@@ -2668,7 +2668,7 @@ struct AskRecentModelPickerView: View {
     }
 
     /// One captioned run of rows. A folded section is one row with a chevron
-    /// in place of its caption; its rows show under it only while it is open.
+    /// in place of its caption; its rows open in a submenu beside the card.
     struct Section: Hashable {
         let title: String
         let rows: [Row]
@@ -2681,8 +2681,8 @@ struct AskRecentModelPickerView: View {
     let onDone: () -> Void
 
     @State private var current: Row
-    /// The folded sections the user has opened, by title. All start closed.
-    @State private var unfolded: Set<String> = []
+    /// The folded section whose submenu is open, by title.
+    @State private var openSubmenu: String?
     /// A local keyDown monitor is the only reliable way to own the arrow keys inside a
     /// popover — a focused field editor swallows them before SwiftUI sees them.
     @State private var keyMonitor: Any?
@@ -2732,19 +2732,18 @@ struct AskRecentModelPickerView: View {
         r.provider.isFirstParty && r.id.hasPrefix("auto-")
     }
 
-    /// The sections as drawn: a folded section keeps only its rows while it
-    /// is open. A query shows every match, so it unfolds every section.
+    /// The sections as drawn: a folded section is its row alone; its rows
+    /// live in the submenu. A query lists every match inline.
     private var shownSections: [Section] {
         if !query.isEmpty {
             return matchedSections.map { Section(title: $0.title, rows: $0.rows) }
         }
-        return Self.collapse(sections, unfolded: unfolded)
+        return Self.collapse(sections)
     }
 
-    private static func collapse(_ sections: [Section], unfolded: Set<String>) -> [Section] {
+    private static func collapse(_ sections: [Section]) -> [Section] {
         sections.map {
-            $0.folded && !unfolded.contains($0.title)
-                ? Section(title: $0.title, rows: [], folded: true) : $0
+            $0.folded ? Section(title: $0.title, rows: [], folded: true) : $0
         }
     }
 
@@ -2795,23 +2794,18 @@ struct AskRecentModelPickerView: View {
         Self.height(shownSections)
     }
 
-    /// Each section is its caption and rows; a folded one is its row and,
-    /// while open, its rows. A rule comes before every section after the
+    /// Each section is its caption and rows; a folded one is its row. A rule comes before every section after the
     /// first, except between two folded ones.
     private static func height(_ sections: [Section]) -> CGFloat {
         guard !sections.isEmpty else { return rowHeight }
         var h: CGFloat = 0
         for (i, section) in sections.enumerated() {
-            if ruleBefore(i, in: sections) { h += sectionRule + MenuCard.rowSpacing }
             h += section.folded ? rowStride : captionHeight + MenuCard.rowSpacing
             h += CGFloat(section.rows.count) * rowStride
         }
         return h - MenuCard.rowSpacing
     }
 
-    private static func ruleBefore(_ i: Int, in sections: [Section]) -> Bool {
-        i > 0 && !(sections[i].folded && sections[i - 1].folded)
-    }
 
     /// A section caption's line: the caption type with 4pt above and 2pt
     /// below, so it sits closer to the rows it names than to the rule above.
@@ -2826,7 +2820,7 @@ struct AskRecentModelPickerView: View {
     /// rows. Measured from the unfiltered sections, so the card keeps its size
     /// while a query narrows the list.
     private var listHeight: CGFloat {
-        min(Self.height(Self.collapse(sections, unfolded: unfolded)),
+        min(Self.height(Self.collapse(sections)),
             Self.captionHeight + CGFloat(Self.listRows) * Self.rowStride)
     }
 
@@ -2844,20 +2838,15 @@ struct AskRecentModelPickerView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             searchRow
-            hairline
             ScrollViewReader { proxy in
                 ScrollView(showsIndicators: false) {
                     // Lazy: a BYOK catalog is hundreds of rows, and only the
                     // window's ten are on screen.
                     LazyVStack(alignment: .leading, spacing: MenuCard.rowSpacing) {
                         let shown = shownSections
-                        ForEach(Array(shown.enumerated()), id: \.element.title) { i, section in
-                            if Self.ruleBefore(i, in: shown) { hairline }
+                        ForEach(shown, id: \.title) { section in
                             if section.folded {
                                 foldRow(section)
-                                ForEach(section.rows, id: \.self) { r in
-                                    modelRow(r).padding(.leading, Self.foldIndent).id(r)
-                                }
                             } else {
                                 caption(section.title)
                                 ForEach(section.rows, id: \.self) { r in
@@ -2944,6 +2933,7 @@ struct AskRecentModelPickerView: View {
                 onDone()
             }
             .onHover { inside in
+                if inside, listAnchor.containsPointer { openSubmenu = nil }
                 if inside, listAnchor.containsPointer, let frame = detailAnchor.frame {
                     ModelDetailPanel.shared.show(Self.detailModel(for: r), beside: frame)
                 } else if !inside {
@@ -2952,28 +2942,46 @@ struct AskRecentModelPickerView: View {
             }
     }
 
-    /// How far an open folded section's rows sit in from its row.
-    private static let foldIndent: CGFloat = 10
-
-    /// A folded section's row: its title and a chevron that turns down while
-    /// it is open. A click opens or closes it; the card stays up.
+    /// A folded section's row: its title and a right chevron. Hover or a
+    /// click opens its rows in a submenu beside the card, the way a native
+    /// menu opens one.
     private func foldRow(_ section: Section) -> some View {
-        let open = unfolded.contains(section.title)
+        let open = openSubmenu == section.title
+        let rows = sections.first { $0.title == section.title }?.rows ?? []
         return MenuCardRow(
             title: section.title,
-            disclosure: open,
+            disclosure: false,
             fontSize: Self.fontSize,
             height: Self.rowHeight,
             horizontalPadding: Self.rowPad,
-            selected: false,
+            selected: open,
             haptic: false) {
-                withAnimation(.easeOut(duration: 0.15)) {
-                    if open { unfolded.remove(section.title) } else { unfolded.insert(section.title) }
-                }
+                openSubmenu = open ? nil : section.title
             }
             .onHover { inside in
-                if inside { ModelDetailPanel.shared.scheduleHide() }
+                guard inside, listAnchor.containsPointer else { return }
+                ModelDetailPanel.shared.scheduleHide()
+                openSubmenu = section.title
             }
+            .modifier(MenuCardWindow(
+                open: open,
+                trailing: true,
+                onDismiss: { _ in
+                    if openSubmenu == section.title { openSubmenu = nil }
+                },
+                card: {
+                    AnyView(AskModelSubmenuCard(
+                        rows: rows,
+                        selected: current,
+                        onPick: { r in
+                            if Self.showsNewTag(r) { ModelNewMarks.seen = true }
+                            arm(r)
+                            ModelDetailPanel.shared.hide()
+                            onDone()
+                        })
+                        .preferredColorScheme(.dark)
+                        .menuCardBackground())
+                }))
     }
 
     /// The search row. Typing goes here from the key monitor while the card is
@@ -2989,14 +2997,6 @@ struct AskRecentModelPickerView: View {
             .padding(.top, 4)
             .padding(.bottom, 2)
             .frame(height: Self.captionHeight, alignment: .bottomLeading)
-    }
-
-    /// The rule between the card's sections.
-    private var hairline: some View {
-        Rectangle().fill(.white.opacity(0.07))
-            .frame(height: 0.5)
-            .padding(.horizontal, Self.rowPad)
-            .padding(.vertical, Self.ruleGap)
     }
 
     /// Every row the ↑/↓ cursor can land on: the models that can be picked now.
@@ -3072,15 +3072,11 @@ struct AskRecentModelPickerView: View {
         }
     }
 
-    /// What the rule between sections keeps from the rows on each side.
-    private static let ruleGap: CGFloat = MenuCard.pickerRuleGap
-    /// Hairline plus `ruleGap` on each side.
-    private static var sectionRule: CGFloat { 0.5 + ruleGap * 2 }
 
     /// The card's height: the search row and the list window.
     private var cardHeight: CGFloat {
         var h = listHeight + MenuCard.cardPad * 2
-        h += Self.rowHeight + Self.sectionRule              // search row
+        h += Self.rowHeight                                 // search row
         return h
     }
 
@@ -3141,6 +3137,74 @@ struct AskRecentModelPickerView: View {
         guard !all.isEmpty else { return }
         let cur = all.firstIndex(of: current) ?? -1
         arm(all[min(max(cur + delta, 0), all.count - 1)])
+    }
+}
+
+/// The submenu a folded section of the Ask model menu opens beside the card:
+/// the section's rows, drawn and picked like the card's own.
+private struct AskModelSubmenuCard: View {
+    typealias Row = AskRecentModelPickerView.Row
+    let rows: [Row]
+    let selected: Row
+    let onPick: (Row) -> Void
+
+    @StateObject private var detailAnchor = ModelDetailAnchor()
+    @ObservedObject private var nono = NoNoAccount.shared
+
+    /// Rows shown before the list scrolls.
+    private static let listRows = 10
+    private static var rowStride: CGFloat {
+        AskRecentModelPickerView.rowHeight + MenuCard.rowSpacing
+    }
+
+    private var listHeight: CGFloat {
+        CGFloat(min(rows.count, Self.listRows)) * Self.rowStride - MenuCard.rowSpacing
+    }
+
+    var body: some View {
+        ScrollViewReader { proxy in
+            ScrollView(showsIndicators: false) {
+                LazyVStack(alignment: .leading, spacing: MenuCard.rowSpacing) {
+                    ForEach(rows, id: \.self) { r in row(r).id(r) }
+                }
+            }
+            .frame(height: listHeight)
+            .onAppear {
+                if rows.contains(selected) { proxy.scrollTo(selected, anchor: .center) }
+            }
+        }
+        .padding(MenuCard.cardPad)
+        .frame(width: MenuCard.pickerCardWidth, alignment: .topLeading)
+        .background(ModelDetailAnchorProbe(anchor: detailAnchor))
+    }
+
+    private func row(_ r: Row) -> some View {
+        typealias V = AskRecentModelPickerView
+        let unavailable = V.unavailable(r)
+        return MenuCardRow(
+            title: ModelRatings.prettyName(for: r.id, provider: r.provider),
+            accessory: V.accessory(for: r),
+            lowBalance: V.lowBalance(r),
+            tag: V.tag(for: r),
+            tagTint: V.showsNewTag(r) ? Tokens.accent : Tokens.sale,
+            brandTitle: V.isHouse(r),
+            dimmed: unavailable,
+            fontSize: V.fontSize,
+            height: V.rowHeight,
+            horizontalPadding: V.rowPad,
+            emphasized: true,
+            selected: r == selected,
+            haptic: false) {
+                guard !unavailable else { return }
+                onPick(r)
+            }
+            .onHover { inside in
+                if inside, let frame = detailAnchor.frame {
+                    ModelDetailPanel.shared.show(V.detailModel(for: r), beside: frame)
+                } else if !inside {
+                    ModelDetailPanel.shared.scheduleHide()
+                }
+            }
     }
 }
 

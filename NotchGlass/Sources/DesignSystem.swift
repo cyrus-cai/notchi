@@ -630,6 +630,11 @@ struct NotchMetrics {
     static let floatingWidth: CGFloat = Tokens.openWidthResult * floatingWidthScale
     /// The floating card's text runs this much of the island's size.
     static let floatingTextScale: CGFloat = 0.94
+    /// The menu bar chat's column (`MenuBarChat`): its messages and its
+    /// composer share this width.
+    static let chatWidth: CGFloat = 380
+    /// The menu bar chat's gap below the menu bar.
+    static let chatTopGap: CGFloat = 6
     /// The result page's width on this screen.
     var resultWidth: CGFloat { floating ? Self.floatingWidth : Tokens.openWidthResult }
     var widthScale: CGFloat { floating ? Self.floatingWidthScale : 1 }

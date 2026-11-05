@@ -319,6 +319,34 @@ final class TelegramBridge: ObservableObject {
         return ["ok": false]
     }
 
+    /// Uploads one image file as a photo (multipart: `sendPhoto` takes a file
+    /// only as form data).
+    private func sendPhoto(_ file: URL, chatID: Int64, replyTo: Int? = nil,
+                           silent: Bool = false) async -> [String: Any] {
+        guard !token.isEmpty,
+              let url = URL(string: "https://api.telegram.org/bot\(token)/sendPhoto"),
+              let data = try? Data(contentsOf: file) else { return ["ok": false] }
+        let boundary = "notchi-\(UUID().uuidString)"
+        var body = Data()
+        func field(_ name: String, _ value: String) {
+            body.append(Data("--\(boundary)\r\nContent-Disposition: form-data; name=\"\(name)\"\r\n\r\n\(value)\r\n".utf8))
+        }
+        field("chat_id", String(chatID))
+        if let replyTo { field("reply_to_message_id", String(replyTo)) }
+        if silent { field("disable_notification", "true") }
+        let type = UTType(filenameExtension: file.pathExtension)?.preferredMIMEType ?? "application/octet-stream"
+        body.append(Data("--\(boundary)\r\nContent-Disposition: form-data; name=\"photo\"; filename=\"\(file.lastPathComponent)\"\r\nContent-Type: \(type)\r\n\r\n".utf8))
+        body.append(data)
+        body.append(Data("\r\n--\(boundary)--\r\n".utf8))
+        var request = URLRequest(url: url, timeoutInterval: 60)
+        request.httpMethod = "POST"
+        request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+        request.httpBody = body
+        guard let (reply, _) = try? await ProxyConfig.urlSession.data(for: request),
+              let json = try? JSONSerialization.jsonObject(with: reply) as? [String: Any] else { return ["ok": false] }
+        return json
+    }
+
     /// `pmset -a disablesleep`, the only switch that keeps a Mac awake with
     /// the lid closed and no external display. It needs root, so turning the
     /// setting on installs one sudoers rule allowing exactly the two pmset
@@ -654,8 +682,23 @@ final class TelegramBridge: ObservableObject {
 
         let final = model.history.first(where: { $0.id == thread })?.conversation
             .last(where: { $0.role == "assistant" && !seedIDs.contains($0.id) })?.text ?? ""
-        let body = Self.withoutVisualBlocks(final).trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !body.isEmpty else {
+        let (shownText, pictures) = Self.localImages(Self.withoutVisualBlocks(final))
+        let body = shownText.trimmingCharacters(in: .whitespacesAndNewlines)
+        defer {
+            // After the text, so the picture lands under the line asking about it.
+            if !pictures.isEmpty {
+                Task { [weak self] in
+                    for picture in pictures {
+                        let result = await self?.sendPhoto(picture, chatID: chatID,
+                                                           replyTo: body.isEmpty ? replyTo : nil)
+                        if let self, let result, let id = Self.messageID(result) {
+                            self.remember(messageID: id, chatID: chatID, thread: thread)
+                        }
+                    }
+                }
+            }
+        }
+        guard !body.isEmpty || !pictures.isEmpty else {
             if let sentID {
                 await call("editMessageText", ["chat_id": chatID, "message_id": sentID, "text": L("telegram.failed")])
             } else {
@@ -663,7 +706,7 @@ final class TelegramBridge: ObservableObject {
             }
             return
         }
-        let parts = Self.split(body)
+        let parts = body.isEmpty ? [] : Self.split(body)
         for (index, part) in parts.enumerated() {
             let html = TelegramFormat.html(part)
             if index == 0, let sentID {
@@ -691,15 +734,16 @@ final class TelegramBridge: ObservableObject {
     /// continues that thread, and replying to the message does too.
     func mirror(threadID: UUID, question: String, answer: String) {
         guard case .connected = state, let owner else { return }
-        let body = Self.withoutVisualBlocks(answer).trimmingCharacters(in: .whitespacesAndNewlines)
+        let (shownText, pictures) = Self.localImages(Self.withoutVisualBlocks(answer))
+        let body = shownText.trimmingCharacters(in: .whitespacesAndNewlines)
         let asked = String(question.trimmingCharacters(in: .whitespacesAndNewlines).prefix(500))
-        guard !body.isEmpty else { return }
+        guard !body.isEmpty || !pictures.isEmpty else { return }
         setThread(threadID, chat: owner)
         let previous = chains[owner]
         chains[owner] = Task { [weak self] in
             await previous?.value
             guard let self else { return }
-            for (index, part) in Self.split(body).enumerated() {
+            for (index, part) in (body.isEmpty ? [] : Self.split(body)).enumerated() {
                 let quote = index == 0 && !asked.isEmpty
                 var result = await self.call("sendMessage", [
                     "chat_id": owner,
@@ -712,6 +756,10 @@ final class TelegramBridge: ObservableObject {
                                                              "text": (quote ? "› " + asked + "\n\n" : "") + part,
                                                              "disable_notification": true])
                 }
+                if let id = Self.messageID(result) { self.remember(messageID: id, chatID: owner, thread: threadID) }
+            }
+            for picture in pictures {
+                let result = await self.sendPhoto(picture, chatID: owner, silent: true)
                 if let id = Self.messageID(result) { self.remember(messageID: id, chatID: owner, thread: threadID) }
             }
         }
@@ -1064,7 +1112,30 @@ final class TelegramBridge: ObservableObject {
     /// What the streaming preview shows: the answer without visual blocks.
     /// Plain text, because half-written Markdown is not valid HTML.
     private static func plain(_ text: String) -> String {
-        withoutVisualBlocks(text).trimmingCharacters(in: .whitespacesAndNewlines)
+        localImages(withoutVisualBlocks(text)).text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Images an answer shows from this Mac — `![…](file://…)` or an absolute
+    /// path, such as a picture from the cloud desktop. Telegram cannot fetch
+    /// them, so they leave the text and go out as photos. Only files that
+    /// exist and are images are taken; any other line stays as written.
+    static func localImages(_ text: String) -> (text: String, files: [URL]) {
+        let pattern = #"!\[[^\]]*\]\(\s*(file://[^)\s]+|/[^)\s]+)\s*\)"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return (text, []) }
+        var files: [URL] = []
+        var out = text
+        let matches = regex.matches(in: text, range: NSRange(text.startIndex..., in: text))
+        for match in matches.reversed() {
+            guard let whole = Range(match.range, in: text),
+                  let target = Range(match.range(at: 1), in: text) else { continue }
+            let raw = String(text[target])
+            let url = raw.hasPrefix("file://") ? URL(string: raw) : URL(fileURLWithPath: raw)
+            guard let url, url.isFileURL, FileManager.default.fileExists(atPath: url.path),
+                  UTType(filenameExtension: url.pathExtension)?.conforms(to: .image) == true else { continue }
+            files.insert(url, at: 0)
+            out.replaceSubrange(whole, with: "")
+        }
+        return (out, files)
     }
 
     /// Charts and cards (`VisualBlocks`) are drawn by the app; in Telegram

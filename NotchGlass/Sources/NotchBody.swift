@@ -210,8 +210,19 @@ struct NotchBody: View {
     /// layout and the open rides one clean spring — same as idle. The model zeros
     /// the seed on every close after parking it, so a non-restore open (fresh
     /// idle, settings, another thread) still mounts "unmeasured" as before.
-    init(model: NotchModel) {
+    /// Draw only the prompt and its bottom row (the Chat pill, the model chip,
+    /// the Recent and ⋯ cluster), whatever page the model is on. The menu bar
+    /// chat (`MenuBarChat`) draws the conversation itself and hosts this as its
+    /// composer.
+    private let composerOnly: Bool
+    /// The composer-only body draws its bottom row (`composerOnly`). The menu
+    /// bar chat shows it only while the pointer is over the composer.
+    private let showsBottomRow: Bool
+
+    init(model: NotchModel, composerOnly: Bool = false, showsBottomRow: Bool = true) {
         self.model = model
+        self.composerOnly = composerOnly
+        self.showsBottomRow = showsBottomRow
         _conversation = ObservedObject(wrappedValue: model.conversation)
         _measuredAnswerHeight = State(initialValue: model.lastMeasuredAnswerHeight)
         _idleBottomHeight = State(initialValue: model.idleBottomRestHeight)
@@ -232,12 +243,54 @@ struct NotchBody: View {
     /// Runway under the panel's tail row: the uniform inset, except for the bare
     /// first-question wait line, which gets extra room so the lone thinking state
     /// doesn't crowd the rounded bottom edge.
+    /// The composer-only body's inset (`composerOnly`): tighter than the
+    /// panel's, since it frames one prompt and one row.
+    static let composerPadding: CGFloat = 12
+
     private var panelBottomPadding: CGFloat {
-        model.mode == .load && model.turns.isEmpty ? 42 : NotchBody.panelPadding
+        if composerOnly { return NotchBody.composerPadding }
+        return model.mode == .load && model.turns.isEmpty ? 42 : NotchBody.panelPadding
+    }
+
+    /// The composer-only body (`composerOnly`): what the user is attaching, the
+    /// prompt, and the bottom row.
+    private var composerContent: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            if !model.askComposeImages.isEmpty {
+                ComposeImagesAttachedLine(images: model.askComposeImages) {
+                    model.removeAskComposeImage(at: $0)
+                }
+                .padding(.bottom, 8)
+                .transition(moduleTransition)
+            }
+            if !model.droppedFiles.isEmpty {
+                droppedFilesLine
+                    .padding(.bottom, 8)
+                    .transition(moduleTransition)
+            }
+            // On a settled answer the placeholder is the suggested next
+            // question, as on the result page; Tab or Enter takes it.
+            inputRow(placeholder: model.mode == .idle && model.turns.isEmpty
+                        ? L(model.idlePlaceholderKey)
+                        : (model.threadIsAgentRun ? nil : model.followUpSuggestion)
+                            ?? L("result.followUp"),
+                     followUp: false)
+                .onChange(of: model.text) { _, _ in
+                    if model.noteError != nil { model.noteError = nil }
+                }
+                .padding(.leading, 4)
+            if showsBottomRow {
+                bucketRow
+                    .transition(.opacity)
+            }
+        }
     }
 
     private var panelContent: some View {
         VStack(alignment: .leading, spacing: 0) {
+            if composerOnly {
+                composerContent
+            } else
             // The idle page also stays up through a main-thread reveal — a pull,
             // or a line sent from the prompt (whose round has already moved
             // `mode` on) — until it hands over to the result page. Same branch
@@ -296,8 +349,8 @@ struct NotchBody: View {
                     }
             }
         }
-        .padding(.horizontal, NotchBody.panelPadding)
-        .padding(.top, NotchBody.panelPadding)
+        .padding(.horizontal, composerOnly ? NotchBody.composerPadding : NotchBody.panelPadding)
+        .padding(.top, composerOnly ? NotchBody.composerPadding : NotchBody.panelPadding)
         // The first-question wait line sits at the panel's visual tail. Give that
         // bare thinking state a little more runway so the activity doesn't crowd
         // the rounded bottom edge; follow-up waits keep the result layout unchanged.
@@ -446,13 +499,6 @@ struct NotchBody: View {
                 refocusInput()
             }
         }
-        // ⌘C on a passage of the answer offers it as a quote; the caret moves to
-        // the follow-up field so the question can be typed straight away.
-        .onChange(of: model.quoteOffer != nil) { _, offered in
-            if offered, model.open, model.mode == .result {
-                refocusInput()
-            }
-        }
         // Leaving a thread (← / ⌘N new-chat, tearing it off into a window) empties
         // `turns` while the panel — and this view — stay mounted, so neither init's
         // seed nor the measurement probe runs again: the OLD thread's measurement
@@ -589,11 +635,6 @@ struct NotchBody: View {
                         .transition(moduleTransition)
                 } else if showsMainThreadPeek, let peek = model.mainThreadPeek {
                     mainThreadReveal(peek.item, answer: peek.answer, live: peek.live)
-                        .transition(moduleTransition)
-                }
-                if let selection = model.selectionContext {
-                    selectionContextLine(selection)
-                        .padding(.bottom, 8)
                         .transition(moduleTransition)
                 }
                 if !model.droppedFiles.isEmpty {
@@ -1104,10 +1145,6 @@ struct NotchBody: View {
                     // measured from this header's real height) grows to keep the
                     // first row clear. Same slot swap as the flat layout: an
                     // active agent compose shows its pasted attachment instead.
-                    if let selection = model.selectionContext {
-                        selectionContextLine(selection)
-                            .padding(.bottom, 8)
-                    }
                     if !model.droppedFiles.isEmpty {
                         droppedFilesLine
                             .padding(.bottom, 8)
@@ -1229,18 +1266,6 @@ struct NotchBody: View {
             .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    /// The carried-selection chip in its slot above the input (see
-    /// `SelectionContextChip`). Leading-aligned like every other line in this
-    /// stack, and it fades out the moment the × is hit — the drop has to look
-    /// like the panel letting go of something, not a row blinking off.
-    private func selectionContextLine(_ selection: String) -> some View {
-        SelectionContextChip(source: model.selectionContextSource,
-                             selection: selection) {
-            withAnimation(.easeOut(duration: Tokens.hoverFade)) { model.dropSelectionContext() }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
     /// One chip per file dropped on the island (`NotchModel.handleFileDrop`),
     /// in the selection chip's slot and face, each with its own ×.
     private var droppedFilesLine: some View {
@@ -1320,6 +1345,19 @@ struct NotchBody: View {
                     loopIntervalChip
                         .transition(.opacity)
                 }
+                // The menu bar chat keeps its right edge empty: a granted gift
+                // and a waiting build sit after the model instead.
+                if composerOnly {
+                    if !model.hasText && nono.justGrantedUSD > 0.0000005 {
+                        giftCue
+                            .transition(.scale(scale: 0.7).combined(with: .opacity))
+                    } else if !model.hasText, let pending = updateChipFace {
+                        updateCue(face: pending, height: Tokens.Control.chip,
+                                  flat: model.unifiedThreadsEnabled,
+                                  hovered: $updateCueIdleHovered)
+                            .transition(.scale(scale: 0.7).combined(with: .opacity))
+                    }
+                }
             }
             // The Recent (+ pin) cluster rides this row's trailing edge — on the
             // same line as the Ask|Agent pill, pushed right by the spacer — instead
@@ -1328,8 +1366,9 @@ struct NotchBody: View {
             // hiding the chevron mid-sentence only dropped the way into Recent and
             // left a hole on that edge. Handed over to the manage bar's trailing edge
             // once Recent is up (see `manageBar`), so the way out of the list sits in
-            // the bottom-right corner.
-            if !recentListShown {
+            // the bottom-right corner. The menu bar chat's composer
+            // (`composerOnly`) has nothing on this edge.
+            if !recentListShown, !composerOnly {
                 let cluster = idleTrailingCluster(flat: model.unifiedThreadsEnabled)
                 // A waiting build says so in words right here, on the home page —
                 // not as a dot behind the ⋯ menu (see `updateCue`).
@@ -6342,7 +6381,7 @@ struct NotchBody: View {
         // The floating card has no row below the prompt, so the text line sits
         // on the panel's 15pt inset plus a little room of its own.
         .frame(height: followUp ? 30
-               : metrics.floating ? inputHeight + 14
+               : metrics.floating && !composerOnly ? inputHeight + 14
                : max(NotchBody.idleRowHeight, inputHeight + idleRowVerticalPadding))
         .animation(.spring(response: 0.3, dampingFraction: 0.7), value: model.hasText)
         // No `.animation(…, value: inputHeight)` here on purpose. It only ever
@@ -6500,15 +6539,6 @@ struct NotchBody: View {
                 SelectionContextChip(selection: quote, isReply: true) {
                     withAnimation(.easeOut(duration: Tokens.hoverFade)) { model.cancelReply() }
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            if let offer = model.quoteOffer, model.activeReplyQuote == nil {
-                QuoteOfferChip(text: offer, accept: {
-                    withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) { model.acceptQuoteOffer() }
-                    refocusInput()
-                }, dismiss: {
-                    withAnimation(.easeOut(duration: Tokens.hoverFade)) { model.dropQuoteOffer() }
-                })
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
             if let original = model.activeEditOriginal {
@@ -7435,48 +7465,6 @@ private struct RevealTailHeight: ViewModifier {
     }
 }
 
-/// "Follow up on this" for a passage copied out of an answer: the chip that
-/// turns it into the follow-up's quote, in the selection chip's glass.
-private struct QuoteOfferChip: View {
-    let text: String
-    let accept: () -> Void
-    let dismiss: () -> Void
-    @State private var hovering = false
-
-    var body: some View {
-        HStack(spacing: 5) {
-            Button(action: accept) {
-                HStack(spacing: 5) {
-                    Image(systemName: "text.quote")
-                        .sfFont(Tokens.TypeSize.badge, weight: .semibold)
-                        .foregroundStyle(Tokens.text4)
-                    Text(L("quote.followUp"))
-                        .sfFont(Tokens.TypeSize.meta, weight: .medium)
-                        .foregroundStyle(hovering ? Tokens.text1 : Tokens.text2)
-                        .lineLimit(1)
-                }
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            Button(action: dismiss) {
-                Image(systemName: "xmark")
-                    .sfFont(Tokens.TypeSize.badge, weight: .semibold)
-                    .foregroundStyle(Tokens.text4)
-                    .frame(width: 14, height: 14)
-                    .contentShape(Circle())
-            }
-            .buttonStyle(GlassPressStyle())
-        }
-        .padding(.leading, 10)
-        .padding(.trailing, 5)
-        .frame(height: 24)
-        .glassCapsule(in: Capsule(), brighter: hovering)
-        .notchTooltip(String(text.prefix(140)))
-        .onHover { hovering = $0 }
-        .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
-    }
-}
-
 /// The ⌘F query on one turn, for its text to highlight — nil unless the turn
 /// matches, so a new query redraws the matching turns only.
 private struct ThreadSearchMark: ViewModifier {
@@ -8244,13 +8232,19 @@ struct UserQuestionBubble: View {
     /// syntax, not user-facing copy: when it reaches a visible question bubble,
     /// present the captured body as a real quote instead of exposing the tags.
     private var selectedTextQuote: (instruction: String, selection: String)? {
-        NotchModel.quoteEnvelope(in: text) ?? NotchModel.fileEnvelopeQuote(in: text)
+        NotchModel.quoteEnvelope(in: shownText) ?? NotchModel.fileEnvelopeQuote(in: shownText)
+    }
+
+    /// A carried selection is context for the model only: the bubble shows the
+    /// typed line alone.
+    private var shownText: String {
+        NotchModel.selectedTextInstruction(in: text) ?? text
     }
 
     /// What the bubble visibly lays out (the transport tags do not consume lines or
     /// influence the corner shape once they have become a quote).
     private var visibleText: String {
-        guard let quote = selectedTextQuote else { return text }
+        guard let quote = selectedTextQuote else { return shownText }
         return quote.instruction.isEmpty
             ? quote.selection
             : quote.instruction + "\n" + quote.selection
@@ -8344,7 +8338,7 @@ struct UserQuestionBubble: View {
             // both the instruction and its quote, without the transport tags.
             .textSelection(.enabled)
         } else {
-            Text(text)
+            Text(shownText)
                 .sfFont(bubbleFont, weight: .medium)
                 .tracking(-0.1)
                 .foregroundStyle(Tokens.text2)
@@ -8361,6 +8355,8 @@ struct UserQuestionBubble: View {
     /// Capped at the answer card's column, so a long question wraps at the
     /// same width as the reply under it.
     @Environment(\.cardWidthFraction) private var cardWidthFraction
+    /// On the desktop (`MenuBarChat`): its own glass.
+    @Environment(\.chatBubbleGlass) private var glass
 
     var body: some View {
         FractionWidthLayout(fraction: cardWidthFraction, hugs: true) {
@@ -8433,16 +8429,19 @@ struct UserQuestionBubble: View {
                 .onHover { hoveringForwarded = $0 }
             }
         }
-        .padding(.horizontal, ChatBubbleChrome.horizontalPad)
-        .padding(.vertical, ChatBubbleChrome.verticalPad)
-        .background(
-            RoundedRectangle(cornerRadius: radius, style: .continuous)
-                .fill(tint.opacity(0.18))
-                .overlay(
-                    RoundedRectangle(cornerRadius: radius, style: .continuous)
-                        .strokeBorder(Tokens.hairline, lineWidth: 1)
-                )
-        )
+        .padding(.horizontal, glass ? ChatBubbleChrome.glassHorizontalPad : ChatBubbleChrome.horizontalPad)
+        .padding(.vertical, glass ? ChatBubbleChrome.glassVerticalPad : ChatBubbleChrome.verticalPad)
+        .modifier(GlassBubbleSurface(on: glass, pill: radius == pillRadius, tint: tint))
+        .background {
+            if !glass {
+                RoundedRectangle(cornerRadius: radius, style: .continuous)
+                    .fill(tint.opacity(0.18))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: radius, style: .continuous)
+                            .strokeBorder(Tokens.hairline, lineWidth: 1)
+                    )
+            }
+        }
         .overlay(alignment: .topTrailing) {
             if let reaction {
                 Text(reaction)
@@ -8467,6 +8466,25 @@ struct UserQuestionBubble: View {
 /// ticking clock already say it's alive, and a pulsing dot on top of them was
 /// only noise. The slot is held either way, so the phrase beside it doesn't
 /// slide sideways the moment the bead lights up.
+/// The question bubble's glass on the desktop (`MenuBarChat`): a pill on one
+/// line, the glass card radius once it wraps.
+private struct GlassBubbleSurface: ViewModifier {
+    let on: Bool
+    let pill: Bool
+    let tint: Color
+
+    func body(content: Content) -> some View {
+        if on {
+            let r = pill
+                ? ChatBubbleChrome.pillRadius + ChatBubbleChrome.glassVerticalPad - ChatBubbleChrome.verticalPad
+                : ChatBubbleChrome.glassCardRadius
+            content.smokedGlass(radius: r, tint: tint)
+        } else {
+            content
+        }
+    }
+}
+
 struct AgentStatusDot: View {
     let running: Bool
     let outcome: AgentTaskManager.Outcome?
@@ -8995,7 +9013,7 @@ private final class MenuCardAnchorView: NSView {
 ///
 /// The card itself knows nothing about where it is drawn — `MenuCardWindow` puts it
 /// in its own window.
-private struct SlashCommandMenu: View {
+struct SlashCommandMenu: View {
     @ObservedObject var model: NotchModel
 
     /// The chord that runs a row, when it has one. Only prompt shortcuts do — a
@@ -9096,7 +9114,8 @@ private struct UnifiedComposeModeControl: View {
     }
 
     /// The destination colour (Ask blue, Agent purple, Capture amber), lifted
-    /// for text on the dark glass. The chip behind it stays neutral.
+    /// for text on the dark glass. No chip behind it at rest; a neutral wash on
+    /// hover.
     private var ink: Color {
         if model.agentComposeActive { return Tokens.agentInk }
         return (model.manualPanelOverride ?? .chat).intentInk
@@ -9117,7 +9136,7 @@ private struct UnifiedComposeModeControl: View {
                 .lineLimit(1)
                 .padding(.horizontal, 7)
                 .padding(.vertical, 3.5)
-                .background(shape.fill(Color.white.opacity(hovering ? 0.14 : 0.10)))
+                .background(shape.fill(Color.white.opacity(hovering ? 0.10 : 0)))
                 .contentShape(shape)
         }
         .buttonStyle(.plain).exemptsDoubleClickPin()

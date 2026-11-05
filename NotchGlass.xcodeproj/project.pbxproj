@@ -46,6 +46,7 @@
 		A1000A09 /* LocalFilesTools.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000A0A /* LocalFilesTools.swift */; };
 		A1000A0B /* ClipboardHistory.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000A0C /* ClipboardHistory.swift */; };
 		A1000AF1 /* WeatherTools.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000AF2 /* WeatherTools.swift */; };
+		A1000C51 /* NotchiSourceTool.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000C52 /* NotchiSourceTool.swift */; };
 		A1000A0D /* MailService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000A0E /* MailService.swift */; };
 		A10000AA /* DiagnosticsLog.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000BB /* DiagnosticsLog.swift */; };
 		A1000A10 /* MenuBarController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000A11 /* MenuBarController.swift */; };
@@ -72,6 +73,7 @@
 		A1000EA2 /* RequestAudit.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000EA3 /* RequestAudit.swift */; };
 		A1CE0001 /* CloudMachine.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1CE0002 /* CloudMachine.swift */; };
 		A1CE0003 /* CardToast.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1CE0004 /* CardToast.swift */; };
+		A1CE0005 /* MenuBarChat.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1CE0006 /* MenuBarChat.swift */; };
 		A1000DC0 /* ToolCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000DC1 /* ToolCatalog.swift */; };
 		A1000EB0 /* MCPService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000EB1 /* MCPService.swift */; };
 		A10000C0 /* OnboardingService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000C1 /* OnboardingService.swift */; };
@@ -111,6 +113,7 @@
 		A1000A0A /* LocalFilesTools.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalFilesTools.swift; sourceTree = "<group>"; };
 		A1000A0C /* ClipboardHistory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClipboardHistory.swift; sourceTree = "<group>"; };
 		A1000AF2 /* WeatherTools.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WeatherTools.swift; sourceTree = "<group>"; };
+		A1000C52 /* NotchiSourceTool.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotchiSourceTool.swift; sourceTree = "<group>"; };
 		A1000A0E /* MailService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MailService.swift; sourceTree = "<group>"; };
 		A10000BB /* DiagnosticsLog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagnosticsLog.swift; sourceTree = "<group>"; };
 		A1000A11 /* MenuBarController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuBarController.swift; sourceTree = "<group>"; };
@@ -137,6 +140,7 @@
 		A1000EA3 /* RequestAudit.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RequestAudit.swift; sourceTree = "<group>"; };
 		A1CE0002 /* CloudMachine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloudMachine.swift; sourceTree = "<group>"; };
 		A1CE0004 /* CardToast.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CardToast.swift; sourceTree = "<group>"; };
+		A1CE0006 /* MenuBarChat.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuBarChat.swift; sourceTree = "<group>"; };
 		A1000DC1 /* ToolCatalog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolCatalog.swift; sourceTree = "<group>"; };
 		A1000EB1 /* MCPService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MCPService.swift; sourceTree = "<group>"; };
 		A10000C1 /* OnboardingService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingService.swift; sourceTree = "<group>"; };
@@ -228,6 +232,7 @@
 				A1000A0A /* LocalFilesTools.swift */,
 				A1000A0C /* ClipboardHistory.swift */,
 				A1000AF2 /* WeatherTools.swift */,
+				A1000C52 /* NotchiSourceTool.swift */,
 				A1000A0E /* MailService.swift */,
 				A10000BB /* DiagnosticsLog.swift */,
 				A1000073 /* UpdaterService.swift */,
@@ -253,6 +258,7 @@
 				A1000EA3 /* RequestAudit.swift */,
 				A1CE0002 /* CloudMachine.swift */,
 				A1CE0004 /* CardToast.swift */,
+				A1CE0006 /* MenuBarChat.swift */,
 				A1000DC1 /* ToolCatalog.swift */,
 				A1000EB1 /* MCPService.swift */,
 				A10000C1 /* OnboardingService.swift */,
@@ -402,6 +408,7 @@
 				A1000A09 /* LocalFilesTools.swift in Sources */,
 				A1000A0B /* ClipboardHistory.swift in Sources */,
 				A1000AF1 /* WeatherTools.swift in Sources */,
+				A1000C51 /* NotchiSourceTool.swift in Sources */,
 				A1000A0D /* MailService.swift in Sources */,
 				A10000AA /* DiagnosticsLog.swift in Sources */,
 				A1000072 /* UpdaterService.swift in Sources */,
@@ -427,6 +434,7 @@
 				A1000EA2 /* RequestAudit.swift in Sources */,
 				A1CE0001 /* CloudMachine.swift in Sources */,
 				A1CE0003 /* CardToast.swift in Sources */,
+				A1CE0005 /* MenuBarChat.swift in Sources */,
 				A1000DC0 /* ToolCatalog.swift in Sources */,
 				A1000EB0 /* MCPService.swift in Sources */,
 				A10000C0 /* OnboardingService.swift in Sources */,
@@ -533,7 +541,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.9.26;
+				MARKETING_VERSION = 0.9.27;
 				PRODUCT_BUNDLE_IDENTIFIER = com.notchglass.app;
 				PRODUCT_NAME = Notchi;
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -556,7 +564,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.9.26;
+				MARKETING_VERSION = 0.9.27;
 				PRODUCT_BUNDLE_IDENTIFIER = com.notchglass.app;
 				PRODUCT_NAME = Notchi;
 				SWIFT_EMIT_LOC_STRINGS = YES;

@@ -105,18 +105,6 @@ struct ContentView: View {
                 default: break
                 }
             }
-            // ⌘C on text selected in an answer: let the copy happen, then offer
-            // the passage as a quote for the follow-up (`NotchModel.offerQuote`).
-            if event.keyCode == 8, event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
-               model.mode == .result, !fieldEditorIsFirstResponder() {
-                let before = NSPasteboard.general.changeCount
-                DispatchQueue.main.async {
-                    let pb = NSPasteboard.general
-                    guard pb.changeCount != before, let copied = pb.string(forType: .string) else { return }
-                    model.offerQuote(copied)
-                }
-                return false
-            }
             if NotchModel.threadSearchEnabled,
                AppShortcutStore.matches(.filter, event: event),
                model.mode == .result, !model.turns.isEmpty,
@@ -994,6 +982,41 @@ struct NotchIsland: View {
     }
 
     var body: some View {
+        if metrics.floating, MenuBarChat.takesOver(model) {
+            menuBarChat
+        } else {
+            islandBody
+        }
+    }
+
+    /// The card's chat (`MenuBarChat`): no panel of its own, pinned to the
+    /// canvas's trailing edge like the card, with the island's frame and hover
+    /// bookkeeping.
+    private var menuBarChat: some View {
+        MenuBarChat(model: model, isOpen: isOpen)
+            .linkGateHost(active: isOpen)
+            .imageLightboxHost()
+            .background(GeometryReader { proxy in
+                Color.clear
+                    .onAppear { model.registerIslandFrame(proxy.frame(in: .global), for: metrics.displayID) }
+                    .onChange(of: proxy.frame(in: .global)) { _, frame in
+                        model.registerIslandFrame(frame, for: metrics.displayID)
+                    }
+            })
+            .onHover { inside in
+                model.pointerInside = inside
+                if inside {
+                    model.hoverEntered(on: metrics.displayID,
+                                       velocity: MouseVelocityTracker.shared.entryVelocity())
+                } else {
+                    model.collapseOnLeave(from: metrics.displayID, sequenced: !reduceMotion)
+                }
+            }
+            .padding(.trailing, NotchMetrics.floatingInset)
+            .frame(maxWidth: .infinity, alignment: .trailing)
+    }
+
+    private var islandBody: some View {
         // The island sizes its HEIGHT to its content (the constant black zone +,
         // when open, the glass body). We deliberately do NOT pin height to a
         // measured value — that creates a clip↔measure deadlock. Width is the
@@ -1248,7 +1271,7 @@ struct NotchIsland: View {
             $0.opacity(isOpen || peeking || metrics.floating ? 1 : 0)
         })
         .overlay(alignment: .top) {
-            if metrics.floating, isOpen, !model.showSettings {
+            if metrics.floating, isOpen, !model.showSettings, !model.cardAnchored() {
                 CardGrabber(model: model)
                     .padding(.top, 2)
             }

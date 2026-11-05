@@ -2606,7 +2606,7 @@ struct InlineSettingsView: View {
 
     /// The wallet's cards, left to right. These three when the lineup has
     /// them; any slot the lineup lacks is filled from the Ask menu's order.
-    private static let walletCardIDs = ["claude-sonnet-5.5", "gpt-6-sol", "auto-us"]
+    private static let walletCardIDs = ["claude-sonnet-5.5", "gpt-6-sol", "gemini-4-argon"]
 
     private var walletCards: [WalletCard] {
         let rows = nonoLineupRows

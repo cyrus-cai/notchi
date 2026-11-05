@@ -523,3 +523,37 @@ struct LegacyGlassBackdrop: NSViewRepresentable {
     }
     func updateNSView(_ nsView: NSVisualEffectView, context: Context) {}
 }
+
+/// One message of the menu bar chat (`MenuBarChat`), which has no panel
+/// behind it: the floating card's own glass (`GlassMaterial` with `floating`),
+/// dark at the top and lighter toward the bottom, with the island's lit rim.
+/// `tint` colours it (the user's own messages wear Ask blue, as they do on the
+/// panel).
+struct SmokedGlassSurface: ViewModifier {
+    var radius: CGFloat
+    var tint: Color? = nil
+
+    func body(content: Content) -> some View {
+        let shape = NotchShape(bottomRadius: radius, topCornerRadius: radius)
+        content.background {
+            ZStack {
+                GlassMaterial(bottomRadius: radius,
+                              topCornerRadius: radius,
+                              expanded: true,
+                              cameraZone: 0,
+                              sweepsOnOpen: false,
+                              floating: true)
+                if let tint { shape.fill(tint.opacity(0.25)) }
+            }
+            .clipShape(shape)
+            .overlay(IslandRim(shape: shape))
+            .allowsHitTesting(false)
+        }
+    }
+}
+
+extension View {
+    func smokedGlass(radius: CGFloat, tint: Color? = nil) -> some View {
+        modifier(SmokedGlassSurface(radius: radius, tint: tint))
+    }
+}

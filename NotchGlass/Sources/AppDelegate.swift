@@ -236,6 +236,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private static let cornerInset: CGFloat = NotchMetrics.floatingInset
     /// Each corner panel's frame at rest, from `position`.
     private var cornerFrames: [CGDirectDisplayID: NSRect] = [:]
+    /// Corner panels placed under the menu bar icon (`statusItemAnchor`). They
+    /// fade in and out where they are instead of flying from the screen's edge,
+    /// and the drag offset does not apply to them.
+    private var anchoredCorners: Set<CGDirectDisplayID> = []
     private let cornerFlight = WindowFlight()
     /// How far the user has dragged the card from the top-right corner. Kept
     /// across launches; the card's position menu puts it back to zero.
@@ -498,6 +502,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         model.onCardDrag = { [weak self] ended in self?.dragCard(ended: ended) }
         model.onCardPositionReset = { [weak self] in self?.resetCardPosition() }
         model.cardMoved = { [weak self] in self?.cardOffset != .zero }
+        model.cardAnchored = { [weak self] in
+            guard let self, let id = self.model.activeDisplay else { return false }
+            return self.anchoredCorners.contains(id)
+        }
         CardToasts.shared.openThread = { [weak self] id in
             self?.openMenuBarCard { $0.openCardThread(id: id) }
         }
@@ -619,6 +627,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // a result via NOTCH_DEMO=1) so the expanded glass can be inspected
         // without a live hover. No effect in normal use.
         let env = ProcessInfo.processInfo.environment
+        // NOTCH_OPEN_CARD=1 opens the menu bar icon's card a second after
+        // launch, once the status item has a frame. Screenshot aid only.
+        if env["NOTCH_OPEN_CARD"] == "1" {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+                self?.toggleMenuBarCard(tip: false)
+            }
+        }
         if env["NOTCH_OPEN"] == "1" {
             model.openPanel(on: preferredScreen()?.displayID)
             if env["NOTCH_DEMO_WELCOME"] != nil { model.offerWelcomeGuide() }
@@ -1645,6 +1660,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // The Dock does not guarantee an automatic redraw when its source image
         // changes. Force the visible tile to consume `applicationIconImage` now.
         dockTile.display()
+        applyBundleIcon(style)
+    }
+
+    /// Notification Center draws the bundle's icon from Launch Services, not
+    /// `applicationIconImage`. Set the selected artwork as the bundle's custom
+    /// icon (removed for Original) and re-register so new notifications use it.
+    private func applyBundleIcon(_ style: AppIconStyle) {
+        let image: NSImage? = style == .original ? nil : style.image
+        let url = Bundle.main.bundleURL
+        DispatchQueue.global(qos: .utility).async {
+            NSWorkspace.shared.setIcon(image, forFile: url.path, options: [])
+            LSRegisterURL(url as CFURL, true)
+        }
     }
 
     // MARK: - Menu bar
@@ -1660,6 +1688,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 guard let self, self.model.open else { return }
                 withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
                     self.model.fullClose()
+                }
+            },
+            pinCard: { [weak self] in
+                guard let self else { return }
+                // The first click of the pair toggled the card; a double-click
+                // always ends open and pinned.
+                if !self.model.open { self.toggleMenuBarCard(tip: false) }
+                guard self.model.canTogglePin, !self.model.isAnswerPinned else { return }
+                withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
+                    self.model.toggleAnswerPin()
                 }
             },
             openNotch: { [weak self] in
@@ -1747,6 +1785,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             else { return }
             position(panel, on: screen, id: id)
             target = id
+        } else if let id = target, !model.open, let panel = panels[id],
+                  let screen = panel.screen ?? preferredScreen() {
+            // The menu bar icon may have moved since the panel was placed.
+            position(panel, on: screen, id: id)
         }
         withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
             if !model.open { model.mode = .idle }
@@ -1851,8 +1893,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     if let frame = cornerFrame(id, out: flies) {
                         panel.setFrame(frame, display: false)
                     }
-                    // A moved card fades in where it is (`slideCorner`).
-                    if flies, cardOffset != .zero { panel.alphaValue = 0 }
+                    // A moved or anchored card fades in (`slideCorner`).
+                    if flies, fadesInPlace(id) { panel.alphaValue = 0 }
                     panel.orderFrontRegardless()
                     // After the open state's first commit, so a slow first build
                     // does not eat the flight.
@@ -1869,6 +1911,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// speed; only Settings, wider than it, travels further.
     private func cornerFrame(_ id: CGDirectDisplayID, out: Bool) -> NSRect? {
         guard var frame = cornerFrames[id] else { return nil }
+        if anchoredCorners.contains(id) { return frame }
         if out, cardOffset == .zero {
             frame.origin.x += max(NotchMetrics.floatingTravel,
                                   (model.showSettings ? model.openWidth : 0) + NotchMetrics.floatingInset)
@@ -1881,6 +1924,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// glass behind the card does not follow.
     private func slideCorner(_ id: CGDirectDisplayID, out: Bool) {
         guard let panel = panels[id], let frame = cornerFrame(id, out: out) else { return }
+        // Under the menu bar icon the window stays put: the chat unfolds down
+        // out of the icon and folds back up into it (`MenuBarChat`).
+        if anchoredCorners.contains(id) {
+            cornerFlight.stop()
+            if panel.frame.origin != frame.origin { panel.setFrame(frame, display: false) }
+            panel.alphaValue = 1
+            if model.cardRetracting != out { model.cardRetracting = out }
+            return
+        }
         // A card the user moved away from the corner fades where it is.
         if cardOffset != .zero {
             if !out, panel.frame.origin != frame.origin { panel.setFrame(frame, display: false) }
@@ -1891,6 +1943,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         cornerFlight.fly(panel, to: frame.origin, on: panel.screen)
+    }
+
+    /// Whether a corner panel fades where it is rather than flying in from the
+    /// screen's edge: one the user moved. One under the menu bar icon neither
+    /// fades nor flies; its content unfolds (`slideCorner`).
+    private func fadesInPlace(_ id: CGDirectDisplayID) -> Bool {
+        cardOffset != .zero && !anchoredCorners.contains(id)
+    }
+
+    /// The x the menu bar chat's column centres on, when the menu bar icon is
+    /// showing on `screen`.
+    private func statusItemAnchor(on screen: NSScreen) -> CGFloat? {
+        guard let item = menuBar?.statusItemFrame else { return nil }
+        let full = screen.frame
+        guard item.midX > full.minX, item.midX < full.maxX,
+              item.maxY >= full.maxY - 1, item.minY >= full.maxY - 60 else { return nil }
+        return item.midX
     }
 
     /// Whether this panel draws as the top-right card: the menu bar icon's card,
@@ -2181,11 +2250,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             : full.midX - canvasWidth / 2
         // AppKit's origin is bottom-left; place the canvas so its top aligns
         // with the screen's top edge (the card's top, on a corner display).
-        let top = corner
+        var top = corner
             ? full.maxY - Self.menuBarHeight(of: screen) - Self.cornerInset
             : full.maxY
+        let anchor = corner ? statusItemAnchor(on: screen) : nil
+        if let anchor {
+            // Under the menu bar icon: the chat's column centred on it, kept
+            // `cornerInset` inside the screen's sides. The card is pinned
+            // `cornerInset` in from the canvas's trailing edge.
+            let inset = Self.cornerInset
+            let columnMid = canvasWidth - inset - NotchMetrics.chatWidth / 2
+            let lowest = full.minX + inset - (canvasWidth - inset - NotchMetrics.chatWidth)
+            x = min(max(anchor - columnMid, lowest), full.maxX - canvasWidth)
+            top = full.maxY - Self.menuBarHeight(of: screen)
+            anchoredCorners.insert(id)
+        } else {
+            anchoredCorners.remove(id)
+        }
         var y = top - canvasHeight
-        if corner {
+        if corner, anchor == nil {
             let offset = clampedCardOffset(cardOffset, on: screen)
             x += offset.width
             y += offset.height
@@ -2224,6 +2307,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// position is kept when the drag ends.
     private func dragCard(ended: Bool) {
         guard let id = model.activeDisplay, cornerDisplays.contains(id),
+              !anchoredCorners.contains(id),
               let panel = panels[id], let screen = panel.screen ?? preferredScreen() else { return }
         let mouse = NSEvent.mouseLocation
         let start = cardDrag ?? (mouse, cardOffset)

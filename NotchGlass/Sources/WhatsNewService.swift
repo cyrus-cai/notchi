@@ -107,6 +107,22 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.9.27",
+            date: "2026-11-05",
+            headline: "Notchi can now fill in web pages for you on a cloud machine.",
+            features: [
+                "With a cloud machine, Notchi can fill in and submit web pages for you in its browser.",
+                "Notchi reads its own source code to answer questions about the app.",
+            ],
+            improvements: [
+                "In the model menu, a folded group opens in a submenu beside the card.",
+                "On Telegram, pictures from the cloud machine arrive as photos.",
+                "Notifications show the app icon you picked.",
+                "When you ask about selected text, your message shows only what you typed.",
+                "Link previews are all drawn at the same size.",
+            ]
+        ),
+        Entry(
             version: "0.9.26",
             date: "2026-11-04",
             headline: "You can now switch the app icon to Notchi's eyes.",

@@ -117,6 +117,58 @@ final class HistoryArchiveWindowController: NSObject, NSWindowDelegate {
 
 /// The archive's search text, held outside the view so the window's Esc can
 /// read and clear it.
+/// What's New in its own window, opened from the menu bar chat, which has no
+/// page of its own to show it on.
+@MainActor
+final class WhatsNewWindowController: NSObject, NSWindowDelegate {
+    static let shared = WhatsNewWindowController()
+
+    private var window: NSWindow?
+
+    private override init() {}
+
+    func present(model: NotchModel) {
+        if let window {
+            window.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+        let window = HistoryArchiveNSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 640, height: 360),
+            styleMask: [.titled, .closable, .miniaturizable, .fullSizeContentView],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = L("whatsnew.title")
+        window.titlebarAppearsTransparent = true
+        window.titleVisibility = .hidden
+        window.isReleasedWhenClosed = false
+        window.isOpaque = false
+        window.backgroundColor = .clear
+        window.appearance = NSAppearance(named: .darkAqua)
+        window.onEscape = { [weak window] in window?.performClose(nil) }
+        let hosting = NSHostingView(rootView:
+            WhatsNewView(model: model, onBack: { [weak window] in window?.performClose(nil) })
+                .padding(.horizontal, 12)
+                .padding(.top, 22)
+                .padding(.bottom, 12)
+                .frame(width: 640)
+                .background(WindowGlassBackground())
+                .notchTooltipClipBox())
+        window.contentView = hosting
+        window.setContentSize(hosting.fittingSize)
+        window.delegate = self
+        window.center()
+        self.window = window
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        window = nil
+    }
+}
+
 @MainActor
 private final class HistoryArchiveSearch: ObservableObject {
     @Published var query = ""
@@ -156,7 +208,7 @@ private final class HistoryArchiveNSWindow: NSWindow {
 /// the whole History window reads as the same material as the notch. Rectangular
 /// (the window is resizable), so it uses a plain `Rectangle`/rounded-none surface
 /// rather than the `NotchShape` silhouette.
-private struct WindowGlassBackground: View {
+struct WindowGlassBackground: View {
     var body: some View {
         Rectangle()
             .fill(.clear)

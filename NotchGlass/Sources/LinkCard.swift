@@ -465,9 +465,8 @@ extension Array where Element == NotchModel.Turn {
             }?.title ?? label
             links.append((url, title))
         }
-        let large = links.count == 1
         for (url, title) in links {
-            Task { _ = await LinkCardStore.shared.still(url: url, title: title, large: large) }
+            Task { _ = await LinkCardStore.shared.still(url: url, title: title, large: false) }
         }
     }
 }
@@ -1246,13 +1245,6 @@ final class BubblePacer: ObservableObject {
         url.absoluteString + "\u{1e}" + (title ?? "") + (large ? "\u{1e}L" : "")
     }
 
-    /// An answer's only card is drawn large.
-    private static func isLarge(_ items: [Item]) -> Bool {
-        items.filter {
-            if case .link = $0 { return true }
-            return false
-        }.count == 1
-    }
 
     /// How many bubbles after the first to draw.
     func shown(_ id: UUID, total: Int, streaming: Bool) -> Int {
@@ -1300,7 +1292,7 @@ final class BubblePacer: ObservableObject {
         } else {
             record.ready = items.count
         }
-        let large = Self.isLarge(items)
+        let large = false
         for item in items {
             guard case .link(let url, let title) = item else { continue }
             let key = Self.cardKey(url, title, large)
@@ -1339,7 +1331,7 @@ final class BubblePacer: ObservableObject {
         var ready = true
         if case .media = item { ready = false }
         if case .link(let url, let title) = item {
-            let key = Self.cardKey(url, title, Self.isLarge(record.items))
+            let key = Self.cardKey(url, title, false)
             if !record.drawn.contains(key) {
                 ready = false
                 // Hold for the card while the typing bubble covers the wait, but

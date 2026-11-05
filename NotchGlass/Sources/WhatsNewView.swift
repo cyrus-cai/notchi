@@ -19,6 +19,9 @@ import SwiftUI
 /// version in the rail scrolls the notes to it.
 struct WhatsNewView: View {
     @ObservedObject var model: NotchModel
+    /// The back pill's action in its own window (`WhatsNewWindowController`);
+    /// nil in the panel, where it closes the page.
+    var onBack: (() -> Void)? = nil
     @ObservedObject private var service = WhatsNewService.shared
 
     /// Which release the notes column is currently parked in — the row the rail
@@ -97,6 +100,7 @@ struct WhatsNewView: View {
     private var header: some View {
         HStack(spacing: 10) {
             PanelBackPill(title: L("whatsnew.title"), help: L("whatsnew.back")) {
+                if let onBack { onBack(); return }
                 withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
                     model.closeWhatsNew()
                 }

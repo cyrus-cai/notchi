@@ -7368,6 +7368,13 @@ final class NotchModel: ObservableObject {
     /// fingers moving down — which is the pull. Negative, on the main thread's
     /// result page, is the collapse.
     private func handleThreadPullScroll(_ event: NSEvent) -> Bool {
+        // The top-right card has no peek to pull: its messages scroll, and
+        // every scroll event is theirs. Taking a swipe's start here stalled
+        // the card's list until the gesture ended.
+        if activeDisplay.map(isCornerDisplay) ?? false {
+            threadPullGesture = .none
+            return false
+        }
         // The coast after the fingers lift belongs to the gesture that ended.
         if event.momentumPhase != [] {
             guard threadPullGesture == .coasting else { return false }
@@ -7570,6 +7577,12 @@ final class NotchModel: ObservableObject {
         guard threadPullProgress == nil, threadPullAvailable else { return false }
         animateThreadPullOpen()
         return true
+    }
+
+    /// The menu bar chat opening on its idle page while a main-thread round
+    /// streams: the round goes back on screen, so its answer keeps arriving.
+    func attachLiveMainThreadRound() {
+        _ = attachMainThreadRound()
     }
 
     /// A live peek (a main-thread round still streaming) opens the way its
@@ -9181,6 +9194,13 @@ final class NotchModel: ObservableObject {
     var onCardPositionReset: (() -> Void)?
     /// Whether the card sits somewhere the user moved it.
     var cardMoved: () -> Bool = { false }
+    /// Whether the card hangs under the menu bar icon, where it cannot be moved.
+    var cardAnchored: () -> Bool = { false }
+    /// The card under the menu bar icon is folding back up into it. Its window
+    /// does not move: `MenuBarChat` plays the fold, and the close runs when the
+    /// flight's time is up.
+    @Published var cardRetracting = false
+
     /// The card's position menu is up (see `isFloatingCardOpen`).
     @Published var isCardPositionMenuOpen = false
 
@@ -9305,7 +9325,6 @@ final class NotchModel: ObservableObject {
         replyTarget = nil
         editTarget = nil
         closeThreadSearch()
-        quoteOffer = nil
         showHistory = false
         showSettings = false
         showWhatsNew = false
@@ -9363,7 +9382,6 @@ final class NotchModel: ObservableObject {
         replyTarget = nil
         editTarget = nil
         closeThreadSearch()
-        quoteOffer = nil
         showHistory = false
         showSettings = false
         highlightedHistoryIndex = nil
@@ -10763,14 +10781,13 @@ final class NotchModel: ObservableObject {
     /// Send the next queued ⌘↵ line once the main thread is free. Only from the
     /// idle prompt: `submit` works on whatever thread is on screen, so with
     /// another page open the line waits for the next return to the prompt. The
-    /// draft, pasted images and quote card on the prompt are put back after.
+    /// draft and pasted images on the prompt are put back after.
     private func drainStayQueue() {
         guard !stayQueue.isEmpty, mode == .idle, turns.isEmpty,
               !inFlightRounds.contains(where: { isMainThread($0.threadID) })
         else { return }
         let draft = text
         let images = askComposeImages
-        let offer = quoteOffer
         text = stayQueue.removeFirst()
         askComposeImages = []
         drainingStayQueue = true
@@ -10778,7 +10795,6 @@ final class NotchModel: ObservableObject {
         drainingStayQueue = false
         text = draft
         askComposeImages = images
-        quoteOffer = offer
     }
 
     /// The clipboard string that's *available* as fresh outside context, or `nil`
@@ -11152,7 +11168,6 @@ final class NotchModel: ObservableObject {
             q = Self.replyEnvelope(line: q, quote: quote)
             replyTarget = nil
         }
-        quoteOffer = nil
         // Messages' send tone for a line that actually goes out — not for a
         // regenerate re-running the same question, or a /loop round.
         // A queued ⌘↵ line already played it when it was queued.
@@ -11698,6 +11713,7 @@ final class NotchModel: ObservableObject {
                 agentTools.append(RecentProjectsTool { await MainActor.run { AgentFolderMRU.entries } })
                 agentTools.append(TravelTimeTool())
                 agentTools.append(WeatherTool())
+                agentTools.append(NotchiSourceTool())
                 agentTools.append(WiFiStatusTool())
                 agentTools.append(RecentSongsTool())
                 agentTools.append(ReadMailTool())
@@ -12805,33 +12821,6 @@ final class NotchModel: ObservableObject {
 
     func cancelReply() { replyTarget = nil }
 
-    // MARK: - Following up on a copied passage
-
-    /// Text the user just copied out of an answer on screen (⌘C), offered as
-    /// a quote for the next follow-up (`acceptQuoteOffer`).
-    @Published private(set) var quoteOffer: String?
-
-    /// Offer `copied` when it is a passage of an answer in the thread on screen.
-    func offerQuote(_ copied: String) {
-        let text = copied.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard (2...2000).contains(text.count), mode == .result,
-              turns.contains(where: { $0.role == "assistant" && MarkdownParser.plainText($0.text).contains(text) || $0.text.contains(text) })
-        else { return }
-        withAnimation(.easeOut(duration: Tokens.hoverFade)) { quoteOffer = text }
-    }
-
-    /// The passage becomes the quote the next follow-up replies to.
-    func acceptQuoteOffer() {
-        guard let text = quoteOffer else { return }
-        let answer = turns.last { $0.role == "assistant" && ($0.text.contains(text) || MarkdownParser.plainText($0.text).contains(text)) }
-        if editTarget != nil { cancelEdit() }
-        let quote = text.count > 500 ? String(text.prefix(500)) + "…" : text
-        replyTarget = ReplyTarget(threadID: threadHistoryID, turnID: answer?.id ?? UUID(), quote: quote)
-        quoteOffer = nil
-    }
-
-    func dropQuoteOffer() { quoteOffer = nil }
-
     // MARK: - Searching the thread on screen (⌘F)
 
     /// The ⌘F state. Its query, matches and position publish on their own
@@ -12954,6 +12943,16 @@ final class NotchModel: ObservableObject {
         \(quote)
         </quoted_message>
         """
+    }
+
+    /// The typed line of a message that ends in a `<selected_text>` envelope.
+    /// The selection is context for the model only; the bubble shows the line.
+    static func selectedTextInstruction(in text: String) -> String? {
+        guard text.range(of: "<selected_text>") != nil,
+              let quote = quoteEnvelope(in: text), !quote.instruction.isEmpty,
+              text.range(of: "<quoted_message>") == nil
+        else { return nil }
+        return quote.instruction
     }
 
     /// Split a user message that ends in a `<selected_text>` (prompt shortcut)

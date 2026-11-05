@@ -3608,12 +3608,12 @@ struct AssistantTurnView: View {
     }
 
     /// Space above the reading block when it leads the card. Working: the orb at
-    /// the wait pill's inset. Settled with the list open: 4pt more than the
-    /// bubble's own inset. Settled and collapsed: the bubble's inset.
+    /// the wait pill's inset. Settled: the bubble's inset, open or shut, so the
+    /// headline stays put when the list opens.
     private func topInset(working: Bool) -> CGFloat {
         guard agentTrail.isEmpty else { return 0 }
         if working { return waitOrbInset - ChatBubbleChrome.verticalPad }
-        return listExpandedVisual ? 4 : 0
+        return 0
     }
 
     /// Interpolate the list's height, and the chevron with it. Owning the
@@ -3673,10 +3673,6 @@ struct AssistantTurnView: View {
         let landed = turnID.map { pacer.shown($0, total: layout.rest.count, streaming: streaming) }
             ?? layout.rest.count
         let typing = turnID.map { pacer.typing($0) } ?? false
-        let cardCount = layout.rest.filter {
-            if case .link = $0 { return true }
-            return false
-        }.count
         VStack(alignment: .leading,
                spacing: pendingQuestion != nil && !hasText ? 0 : 6) {
             // An answer that opens with a card has no first bubble unless the
@@ -3698,8 +3694,7 @@ struct AssistantTurnView: View {
             ForEach(Self.keyed(Array(layout.rest.prefix(landed))), id: \.id) { item in
                 switch item.segment {
                 case .link(let url, let label):
-                    LinkCardView(url: url, title: cardTitle(url, label: label),
-                                 large: cardCount == 1)
+                    LinkCardView(url: url, title: cardTitle(url, label: label))
                         .transition(Self.landing)
                 case .text(let body):
                     AnswerCard(idealAtLeast: FractionWidthLayout.minimumLineWidth(body, fontSize: cardFont),
@@ -4128,6 +4123,17 @@ enum ChatBubbleChrome {
         guard height > 0 else { return pillRadius }
         return height <= pillHeight ? height / 2 : cardRadius
     }
+
+    /// A glass bubble (`chatBubbleGlass`) is roomier, and rounder once it wraps.
+    static let glassHorizontalPad: CGFloat = 16
+    static let glassVerticalPad: CGFloat = 11
+    static let glassCardRadius: CGFloat = 26
+
+    static func glassRadius(forHeight height: CGFloat) -> CGFloat {
+        guard height > 0 else { return pillRadius + glassVerticalPad - verticalPad }
+        return height <= pillHeight + (glassVerticalPad - verticalPad) * 2
+            ? height / 2 : glassCardRadius
+    }
 }
 
 /// The card an answer sits in: the question bubble's recipe (`UserQuestionBubble`
@@ -4154,14 +4160,46 @@ struct AnswerCard<Content: View>: View {
     @ViewBuilder let content: Content
     @State private var cardHeight: CGFloat = 0
     @Environment(\.cardWidthFraction) private var widthFraction
+    @Environment(\.chatBubbleGlass) private var glass
 
     private var radius: CGFloat {
-        visible ? ChatBubbleChrome.radius(forHeight: cardHeight) : 0
+        guard visible else { return 0 }
+        return glass ? ChatBubbleChrome.glassRadius(forHeight: cardHeight)
+            : ChatBubbleChrome.radius(forHeight: cardHeight)
     }
 
     var body: some View {
+        if glass {
+            glassBody
+        } else {
+            panelBody
+        }
+    }
+
+    /// On the desktop the card is always a glass bubble: a wait line or the
+    /// typing dots with no bubble around them would sit on the wallpaper. They
+    /// are laid out for the chrome-less card (pulled left by the side padding),
+    /// so that card gets the padding back.
+    private var glassBody: some View {
         let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)
-        FractionWidthLayout(fraction: visible ? widthFraction : 1,
+        let pad = visible && !bare
+        return FractionWidthLayout(fraction: visible ? widthFraction : 1,
+                                   hugs: visible && hugs, idealAtLeast: idealAtLeast) {
+            content
+                .padding(.leading, pad && !chrome ? ChatBubbleChrome.horizontalPad : 0)
+                .padding(.horizontal, pad ? ChatBubbleChrome.glassHorizontalPad : 0)
+                .padding(.vertical, pad ? ChatBubbleChrome.glassVerticalPad : 0)
+                .modifier(OptionalSmokedGlass(radius: radius, on: pad))
+                .contentShape(shape)
+                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: {
+                    cardHeight = $0
+                }
+        }
+    }
+
+    private var panelBody: some View {
+        let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)
+        return FractionWidthLayout(fraction: visible ? widthFraction : 1,
                             hugs: visible && hugs, idealAtLeast: idealAtLeast) {
             content
                 .padding(.horizontal, visible && !bare ? ChatBubbleChrome.horizontalPad : 0)
@@ -4179,6 +4217,19 @@ struct AnswerCard<Content: View>: View {
                 .onGeometryChange(for: CGFloat.self) { $0.size.height } action: {
                     cardHeight = $0
                 }
+        }
+    }
+}
+
+/// The glass bubble's surface, or none (a table carries its own box). One view
+/// type either way, so a card gaining its chrome does not rebuild its text.
+private struct OptionalSmokedGlass: ViewModifier {
+    let radius: CGFloat
+    let on: Bool
+
+    func body(content: Content) -> some View {
+        content.background {
+            if on { Color.clear.smokedGlass(radius: radius) }
         }
     }
 }
@@ -4429,6 +4480,19 @@ extension EnvironmentValues {
     var threadSearchHighlight: String? {
         get { self[ThreadSearchHighlightKey.self] }
         set { self[ThreadSearchHighlightKey.self] = newValue }
+    }
+}
+
+private struct ChatBubbleGlassKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
+extension EnvironmentValues {
+    /// The bubbles sit on nothing but the desktop (`MenuBarChat`): each one
+    /// wears its own smoked glass instead of the faint fill it has on the panel.
+    var chatBubbleGlass: Bool {
+        get { self[ChatBubbleGlassKey.self] }
+        set { self[ChatBubbleGlassKey.self] = newValue }
     }
 }
 

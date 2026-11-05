@@ -12,7 +12,7 @@ import SwiftUI
 /// into a path the panel already owns, so the menu can never drift from the app.
 ///
 /// One click on the icon opens or closes the top-right card (`Actions.toggleCard`).
-/// A double-click, right-click or control-click shows the menu.
+/// A right-click or control-click shows the menu; a double-click pins the card.
 ///
 /// The menu is rebuilt on every open (`menuNeedsUpdate`) rather than held live:
 /// the model list, the update phase and the interface language all change under
@@ -25,6 +25,8 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     struct Actions {
         var toggleCard: () -> Void
         var closeCard: () -> Void
+        /// Open the card if it is closed and pin it.
+        var pinCard: () -> Void
         var openNotch: () -> Void
         var openHistory: () -> Void
         var openSettings: () -> Void
@@ -56,6 +58,13 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     init(actions: Actions) {
         self.actions = actions
         super.init()
+    }
+
+    /// The status item's frame on screen, nil while it is not installed. The
+    /// menu bar chat hangs under it.
+    var statusItemFrame: NSRect? {
+        guard let window = statusItem?.button?.window, window.isVisible else { return nil }
+        return window.frame
     }
 
     // MARK: - Presence
@@ -224,8 +233,8 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     // MARK: - Clicks
 
     /// The first click acts at once, so a single click has no double-click delay.
-    /// The second click of a double-click closes the card that click opened and
-    /// shows the menu.
+    /// The second click of a double-click keeps the card open and pins it. The
+    /// menu is on right-click and control-click only.
     @objc private func statusItemClicked() {
         let event = NSApp.currentEvent
         if event?.type == .rightMouseUp || event?.modifierFlags.contains(.control) == true {
@@ -235,10 +244,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         let now = ProcessInfo.processInfo.systemUptime
         if let last = lastClickAt, now - last <= NSEvent.doubleClickInterval {
             lastClickAt = nil
-            actions.closeCard()
-            // After the close hands activation back, so the menu's tracking
-            // does not run through it.
-            DispatchQueue.main.async { [weak self] in self?.showMenu() }
+            actions.pinCard()
         } else {
             lastClickAt = now
             actions.toggleCard()

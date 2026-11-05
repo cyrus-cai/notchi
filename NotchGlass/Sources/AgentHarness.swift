@@ -1647,8 +1647,12 @@ struct AgentHarness {
     private func activityLabel(for calls: [ToolInvocation], isRepeatRound: Bool) -> String {
         // Work leaving this Mac is named whatever runs beside it, so it never
         // reads like a local command.
-        if calls.contains(where: { $0.capability == CloudMachineTool.toolName }) {
-            return L("agent.activity.cloudMachine")
+        let cloud = calls.filter { $0.capability == CloudMachineTool.toolName }
+        if !cloud.isEmpty {
+            let browsing = cloud.allSatisfy {
+                CloudMachineTool.browserActions.contains($0.input["action"] as? String ?? "")
+            }
+            return L(browsing ? "agent.activity.cloudBrowser" : "agent.activity.cloudMachine")
         }
         if let first = calls.first, calls.count == 1 {
             switch first.capability {
@@ -1691,7 +1695,7 @@ struct AgentHarness {
             case WeatherTool.toolName: return L("agent.activity.weather")
             case WiFiStatusTool.toolName: return L("agent.activity.wifi")
             case RecentSongsTool.toolName: return L("agent.activity.music")
-            case ReadFileTool.toolName: return L("agent.activity.readFile")
+            case ReadFileTool.toolName, NotchiSourceTool.toolName: return L("agent.activity.readFile")
             case RunShellTool.toolName:
                 // Name the command itself, cut to fit the one-line wait slot.
                 if let raw = first.input["command"] as? String {
