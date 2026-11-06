@@ -9,7 +9,8 @@ import SwiftUI
 /// under the messages already showing. Older messages scroll up and fade out at
 /// the top edge.
 ///
-/// Settings, What's New, Recent and the agent pages keep the card's panel (see
+/// Agent compose draws here too, as the prompt alone. Settings, What's New,
+/// Recent and an agent task's detail page keep the card's panel (see
 /// `takesOver`).
 struct MenuBarChat: View {
     @ObservedObject var model: NotchModel
@@ -19,7 +20,7 @@ struct MenuBarChat: View {
     /// and What's New open in their own windows from here (`openPagesInWindows`),
     /// so they never take the card.
     static func takesOver(_ model: NotchModel) -> Bool {
-        !model.showSettings && model.agentDetailTaskID == nil && !model.agentComposeActive
+        !model.showSettings && model.agentDetailTaskID == nil
     }
 
     /// The messages scroll past this height.
@@ -44,9 +45,24 @@ struct MenuBarChat: View {
     /// The widest a bubble gets, as a share of the column. The composer is as
     /// wide, so the column has one right edge.
     private static let bubbleWidthFraction: CGFloat = 0.86
+    /// The chat sets its messages one size under the panel's (`baseFont`).
+    static let baseFont: CGFloat = Tokens.TypeSize.form
+    /// The size message text ends up in, and the prompt with it.
+    static let answerFont: CGFloat = Tokens.TypeSize.stepDown(baseFont)
+    /// An answer paragraph's line spacing (`baseFont * 0.6` in the markdown view).
+    static let answerLineSpacing: CGFloat = answerFont * 0.6
 
     /// The messages' height, unpadded.
     @State private var contentHeight: CGFloat = 0
+    /// The composer's height, so the messages leave it room in the canvas.
+    @State private var composerHeight: CGFloat = 0
+
+    /// The messages' cap: `maxMessagesHeight`, or less when a tall composer
+    /// would otherwise push the card past the canvas's bottom edge.
+    private var messagesCap: CGFloat {
+        let room = NotchMetrics.canvasHeight - NotchMetrics.chatTopGap - 10 - composerHeight - 12
+        return max(120, min(Self.maxMessagesHeight, room))
+    }
     /// The messages have outgrown `maxMessagesHeight` for this thread. Held
     /// once true, so the lazy list's height estimates, which shift as rows
     /// scroll into view, stop resizing the scroll view and re-rendering the
@@ -82,7 +98,10 @@ struct MenuBarChat: View {
     /// The messages to draw: the whole thread, without the turns the panel
     /// does not draw as bubbles either.
     private var shownTurns: [NotchModel.Turn] {
-        thread.filter { turn in
+        // An agent task runs on its own, not in this thread, so the agent
+        // prompt shows no messages above it.
+        if model.agentComposeActive { return [] }
+        return thread.filter { turn in
             turn.example == nil && !(turn.role == "user" && turn.hidesUserBubble)
         }
     }
@@ -90,7 +109,7 @@ struct MenuBarChat: View {
     /// The thread is the one `model.turns` holds, so its messages take actions.
     private var onScreen: Bool { !model.turns.isEmpty }
 
-    private var overflows: Bool { overflowLatched || contentHeight > Self.maxMessagesHeight }
+    private var overflows: Bool { overflowLatched || contentHeight > messagesCap }
 
     // MARK: - Body
 
@@ -227,13 +246,14 @@ struct MenuBarChat: View {
                     }
                 }
                 .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height in
+                    scroll.measured = height
                     // Any growth (streamed text, a settled answer's layout,
                     // cards) keeps the end in view while the reader is there.
                     if overflowLatched {
                         if scroll.atBottom { scrollToEnd(proxy, animated: false) }
                         return
                     }
-                    if height > Self.maxMessagesHeight {
+                    if height > messagesCap {
                         overflowLatched = true
                         // The scroll view just took its capped height: put the
                         // end back in view.
@@ -259,7 +279,7 @@ struct MenuBarChat: View {
             .modifier(TrackScrollEnd(position: scroll) { end in
                 if followsEnd != end { followsEnd = end }
             })
-            .frame(height: overflows ? Self.maxMessagesHeight + Self.composerOverlap
+            .frame(height: overflows ? messagesCap + Self.composerOverlap
                    : contentHeight + Self.glassGutter * 2)
             .mask(fadeMask)
             // Messages scrolling down toward the composer blur out instead of
@@ -300,9 +320,14 @@ struct MenuBarChat: View {
             }
             .onChange(of: endRequest) { _, _ in scrollToEnd(proxy, animated: false) }
             // Another thread on screen: measure it afresh.
+            // Not zeroed here: the new list may already have reported its
+            // height, and a zero would then stick and hide every message.
+            // Re-judged on the next turn of the run loop, from the last report.
             .onChange(of: turns.first?.id) { _, _ in
-                overflowLatched = false
-                contentHeight = 0
+                DispatchQueue.main.async {
+                    overflowLatched = scroll.measured > messagesCap
+                    contentHeight = scroll.measured
+                }
                 recentCardsCache.clear()
                 scroll.atBottom = true
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { endRequest += 1 }
@@ -370,7 +395,7 @@ struct MenuBarChat: View {
     private func feedbackBubble(_ text: String) -> some View {
         AnswerCard {
             Text(text)
-                .sfFont(Tokens.TypeSize.stepDown(Tokens.TypeSize.reading))
+                .sfFont(Self.answerFont)
                 .foregroundStyle(model.noteError != nil ? Tokens.text1 : Tokens.text2)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -382,7 +407,7 @@ struct MenuBarChat: View {
     private var composer: some View {
         let shape = NotchShape(bottomRadius: Tokens.Radius.shell,
                                topCornerRadius: Tokens.Radius.shell)
-        return NotchBody(model: model, composerOnly: true, showsBottomRow: composerHovering)
+        return NotchBody(model: model, composerOnly: true, showsBottomRow: composerHovering || model.isAnswerPinned || bottomRowMenuOpen)
             .background(GlassMaterial(bottomRadius: Tokens.Radius.shell,
                                       topCornerRadius: Tokens.Radius.shell,
                                       expanded: true,
@@ -397,6 +422,14 @@ struct MenuBarChat: View {
                 withAnimation(.easeOut(duration: Tokens.hoverFade)) { composerHovering = hovering }
             }
             .frame(width: NotchMetrics.chatWidth * Self.bubbleWidthFraction)
+            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { composerHeight = $0 }
+    }
+
+    /// A menu opened from the bottom row is up. The pointer has left the
+    /// composer for the menu, and the row (the menu's anchor) has to stay.
+    private var bottomRowMenuOpen: Bool {
+        model.showModelPicker || model.showAskModelPicker || model.showAgentPicker
+            || model.showAgentFolderPicker || model.showLoopIntervalPicker
     }
 }
 
@@ -477,7 +510,8 @@ private struct ChatRow: View, Equatable {
                 if !turn.imageFiles.isEmpty {
                     SavedTurnImages(files: turn.imageFiles)
                 }
-                UserQuestionBubble(text: turn.text, isAgent: turn.isAgent,
+                UserQuestionBubble(text: turn.text, baseFont: MenuBarChat.baseFont,
+                                   isAgent: turn.isAgent,
                                    reaction: turn.reaction, fromTelegram: turn.fromTelegram)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -500,6 +534,7 @@ private struct ChatRow: View, Equatable {
                 thinkingSince: turn.streaming
                     ? (turn.thinkingStartedAt ?? live?.since) : nil,
                 sources: turn.sources,
+                baseFont: MenuBarChat.baseFont,
                 isAgent: turn.isAgent,
                 showsFooterMetadata: !turn.isAgent,
                 onInAppCopy: { model.rebaselineClipboardAfterInAppWrite() },
@@ -609,6 +644,9 @@ private final class RecentCardsCache {
 /// re-rendered the whole card at that moment.
 private final class ChatScrollEnd {
     var atBottom = true
+    /// The messages' last measured height, kept even while the scroll view is
+    /// capped, so a thread change can re-judge overflow without a fresh report.
+    var measured: CGFloat = 0
     /// Until this time, the messages are held at their end whatever the
     /// geometry reports: a new message grows the content before the scroll to
     /// it runs, and that growth reads as "scrolled up".

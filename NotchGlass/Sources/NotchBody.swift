@@ -270,7 +270,8 @@ struct NotchBody: View {
             }
             // On a settled answer the placeholder is the suggested next
             // question, as on the result page; Tab or Enter takes it.
-            inputRow(placeholder: model.mode == .idle && model.turns.isEmpty
+            inputRow(placeholder: model.agentComposeActive
+                        || (model.mode == .idle && model.turns.isEmpty)
                         ? L(model.idlePlaceholderKey)
                         : (model.threadIsAgentRun ? nil : model.followUpSuggestion)
                             ?? L("result.followUp"),
@@ -1324,7 +1325,13 @@ struct NotchBody: View {
             // drop out while the Recent list is expanded: the recall view shouldn't
             // also carry the compose-family chrome.
             if !recentListShown {
-                if model.unifiedThreadsEnabled {
+                if composerOnly {
+                    // The menu bar chat has no button into Agent. While Agent
+                    // is on (Shift-Tab), the label stays so a click leaves it.
+                    if model.agentComposeActive {
+                        UnifiedComposeModeControl(model: model)
+                    }
+                } else if model.unifiedThreadsEnabled {
                     UnifiedComposeModeControl(model: model)
                 } else {
                     BucketTogglePill(model: model)
@@ -1355,6 +1362,24 @@ struct NotchBody: View {
                         updateCue(face: pending, height: Tokens.Control.chip,
                                   flat: model.unifiedThreadsEnabled,
                                   hovered: $updateCueIdleHovered)
+                            .transition(.scale(scale: 0.7).combined(with: .opacity))
+                    }
+                    // Pinned (double-click or ⌘P): the tack on the trailing edge
+                    // shows it, and clicking it unpins. In Agent, live runs show
+                    // as "N running", which opens Recent.
+                    let running = model.agentComposeActive ? agentManager.runningTasks.count : 0
+                    if model.isAnswerPinned || running > 0 {
+                        Spacer(minLength: 8)
+                        IdleTrailingCluster(
+                            pinned: model.isAnswerPinned, recentOpen: false, showsRecent: false,
+                            runningCount: running,
+                            flat: model.unifiedThreadsEnabled,
+                            togglePin: {
+                                withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
+                                    model.toggleAnswerPin()
+                                }
+                            },
+                            toggleRecent: { model.showHistory = true })
                             .transition(.scale(scale: 0.7).combined(with: .opacity))
                     }
                 }
@@ -1610,8 +1635,8 @@ struct NotchBody: View {
         var own = recents.filter { !$0.provider.isFirstParty }
         own += askBYOKRows.filter { !own.contains($0) }
         return [
-            Section(title: "Notchi " + L("nono.pricing.freeModels"), rows: free, folded: true),
-            Section(title: "Notchi " + L("nono.pricing.payAsYouGo"), rows: paid, folded: true),
+            Section(title: L("nono.pricing.freeModels"), rows: free, folded: true, tag: "Notchi"),
+            Section(title: L("nono.pricing.payAsYouGo"), rows: paid, folded: true, tag: "Notchi"),
             Section(title: L("model.picker.ownKeys"), rows: own),
         ]
     }
@@ -5828,6 +5853,10 @@ struct NotchBody: View {
             // regenerate re-runs THIS question (and would orphan any later turns),
             // so it rides only the last turn, never mid-thread ones.
             let isLastTurn = thread.last?.id == turn.id
+            // The panel's wait state (timer, word, activity) is one value, reset by
+            // each new question, so it belongs to the newest streaming answer only.
+            // An older answer still streaming beside it shows its own values.
+            let ownsPanelWait = thread.last(where: { $0.role == "assistant" && $0.streaming })?.id == turn.id
             let canRegenerate = isLastTurn && !turn.isAgent
                 && model.visibleAskError == nil
             // An agent run's report never offers regenerate: the chat model can't
@@ -5846,12 +5875,13 @@ struct NotchBody: View {
                     text: text,
                     streaming: turn.streaming,
                     activity: turn.streaming
-                        ? (turn.toolActivity ?? model.currentActivity) : nil,
+                        ? (turn.toolActivity ?? (ownsPanelWait ? model.currentActivity : nil)) : nil,
                     orbState: turn.streaming
-                        ? (turn.thinkingOrbState ?? model.thinkingOrbState) : .composing,
-                    thinkingWord: turn.thinkingWord ?? model.currentThinkingWord,
+                        ? (turn.thinkingOrbState ?? (ownsPanelWait ? model.thinkingOrbState : .composing))
+                        : .composing,
+                    thinkingWord: turn.thinkingWord ?? (ownsPanelWait ? model.currentThinkingWord : ""),
                     thinkingSince: turn.streaming
-                        ? (turn.thinkingStartedAt ?? model.thinkingStartedAt) : nil,
+                        ? (turn.thinkingStartedAt ?? (ownsPanelWait ? model.thinkingStartedAt : nil)) : nil,
                     sources: turn.sources,
                     isAgent: turn.isAgent,
                     // The record's completion time, shown as the report footer's
@@ -6141,7 +6171,10 @@ struct NotchBody: View {
     }
 
     private func inputRow(placeholder: String, followUp: Bool) -> some View {
-        let fontSize: CGFloat = (followUp ? NotchBody.followUpFontSize : NotchBody.idleFontSize) * textScale
+        // The menu bar chat sets its prompt in its answers' size and spacing.
+        let fontSize: CGFloat = composerOnly
+            ? MenuBarChat.answerFont
+            : (followUp ? NotchBody.followUpFontSize : NotchBody.idleFontSize) * textScale
         let trailingHint = followUp ? nil : trailingModeHint
         return HStack(spacing: 12) {
             // The field and its fading placeholder. Where Enter sends the line is
@@ -6160,6 +6193,7 @@ struct NotchBody: View {
                     fontSize: fontSize,
                     focusTrigger: focused,
                     maxVisibleLines: NotchBody.promptMaxLines,
+                    lineSpacing: composerOnly ? MenuBarChat.answerLineSpacing : 0,
                     // Enter routes by intent (ask / note / remind) from the idle
                     // prompt. The real mid-thread field is `followUpRow`, which now
                     // also routes by intent; this `followUp` branch is only the

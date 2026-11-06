@@ -633,6 +633,8 @@ struct NotchMetrics {
     /// The menu bar chat's column (`MenuBarChat`): its messages and its
     /// composer share this width.
     static let chatWidth: CGFloat = 380
+    /// The panel's canvas height. The menu bar chat must fit inside it.
+    static let canvasHeight: CGFloat = 640
     /// The menu bar chat's gap below the menu bar.
     static let chatTopGap: CGFloat = 6
     /// The result page's width on this screen.

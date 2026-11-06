@@ -107,6 +107,21 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.9.28",
+            date: "2026-11-06",
+            headline: "The menu bar chat's prompt now matches its answers.",
+            improvements: [
+                "In the menu bar chat, the prompt uses the same text size as the answers.",
+                "In the menu bar chat, a long prompt no longer pushes the chat off the screen.",
+                "In the menu bar chat, the bottom row stays while one of its menus is open.",
+                "In the model menu, Notchi's groups carry a Notchi tag.",
+            ],
+            fixes: [
+                "A chat closed mid-answer no longer shows \"Thinking…\" forever.",
+                "When two answers stream at once, each shows its own progress.",
+            ]
+        ),
+        Entry(
             version: "0.9.27",
             date: "2026-11-05",
             headline: "Notchi can now fill in web pages for you on a cloud machine.",

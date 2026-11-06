@@ -205,7 +205,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// this canvas; the empty area around it is fully transparent and
     /// click-through (see `ContentView`'s hit testing).
     private let canvasWidth: CGFloat = 760
-    private let canvasHeight: CGFloat = 640
+    private let canvasHeight: CGFloat = NotchMetrics.canvasHeight
 
     /// How far the canvas extends ABOVE the screen's top edge — and it has to,
     /// or the island goes dead on the screen's very top row, which is exactly

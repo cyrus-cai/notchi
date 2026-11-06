@@ -248,10 +248,27 @@ extension NSWindow {
         guard let contentView,
               var view = contentView.hitTest(contentView.convert(point, from: nil)) else { return false }
         while true {
+            // An editable text view takes the double-click only where it has
+            // a word to select. Its empty area, and an empty field, are glass.
+            if let tv = view as? NSTextView, tv.isEditable {
+                return Self.textView(tv, hasGlyphAt: tv.convert(point, from: nil))
+            }
             if view is NSControl || view is NSText { return true }
             guard let parent = view.superview else { return false }
             view = parent
         }
+    }
+
+    private static func textView(_ tv: NSTextView, hasGlyphAt point: NSPoint) -> Bool {
+        guard !tv.string.isEmpty, let layout = tv.layoutManager,
+              let container = tv.textContainer else { return false }
+        let origin = tv.textContainerOrigin
+        let p = NSPoint(x: point.x - origin.x, y: point.y - origin.y)
+        let glyph = layout.glyphIndex(for: p, in: container)
+        guard glyph < layout.numberOfGlyphs else { return false }
+        let rect = layout.boundingRect(forGlyphRange: NSRange(location: glyph, length: 1),
+                                       in: container)
+        return rect.insetBy(dx: -2, dy: -2).contains(p)
     }
 
     /// A right-click on selectable text goes to the text view, which shows the

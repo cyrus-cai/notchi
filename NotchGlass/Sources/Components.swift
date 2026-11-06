@@ -151,6 +151,8 @@ struct PromptField: NSViewRepresentable {
     /// How tall the box may grow, in lines of text, before it stops growing and
     /// starts scrolling its content instead.
     var maxVisibleLines: Int = 5
+    /// Extra space between wrapped lines, as the answer text sets it. 0: none.
+    var lineSpacing: CGFloat = 0
     var onSubmit: () -> Void
     /// Invoked when ← is pressed while the field is empty — lets a result view bind
     /// it to "back / new conversation". No-op by default (e.g. the idle prompt),
@@ -347,7 +349,7 @@ struct PromptField: NSViewRepresentable {
             // ink outright — a plain string assignment leans on typing attributes and
             // can land unstyled.
             tv.textStorage?.setAttributedString(
-                NSAttributedString(string: text, attributes: Self.attributes(fontSize: fontSize)))
+                NSAttributedString(string: text, attributes: Self.attributes(fontSize: fontSize, lineSpacing: lineSpacing)))
             tv.setSelectedRange(NSRange(location: (text as NSString).length, length: 0))
         }
         applyStyle(to: tv)
@@ -412,11 +414,19 @@ struct PromptField: NSViewRepresentable {
     }
 
     /// The glyph attributes the box types (and pastes) in.
-    private static func attributes(fontSize: CGFloat) -> [NSAttributedString.Key: Any] {
+    private static func attributes(fontSize: CGFloat,
+                                   lineSpacing: CGFloat) -> [NSAttributedString.Key: Any] {
         [
             .font: NSFont.systemFont(ofSize: fontSize),
             .foregroundColor: NSColor(Tokens.ink).withAlphaComponent(0.96),
+            .paragraphStyle: paragraphStyle(lineSpacing: lineSpacing),
         ]
+    }
+
+    private static func paragraphStyle(lineSpacing: CGFloat) -> NSParagraphStyle {
+        let style = NSMutableParagraphStyle()
+        style.lineSpacing = lineSpacing
+        return style
     }
 
     /// Only writes a property when its value actually changed. AppKit setters here
@@ -434,8 +444,19 @@ struct PromptField: NSViewRepresentable {
         // Guarded like the rest: re-stamping typing attributes on every render would
         // churn them mid-IME-composition for no reason.
         if (tv.typingAttributes[.font] as? NSFont) != wantFont
-            || (tv.typingAttributes[.foregroundColor] as? NSColor) != wantInk {
-            tv.typingAttributes = Self.attributes(fontSize: fontSize)
+            || (tv.typingAttributes[.foregroundColor] as? NSColor) != wantInk
+            || (tv.typingAttributes[.paragraphStyle] as? NSParagraphStyle)?.lineSpacing != lineSpacing {
+            tv.typingAttributes = Self.attributes(fontSize: fontSize, lineSpacing: lineSpacing)
+        }
+        // Text already in the box takes a changed spacing too. Not while an IME
+        // composition is open, which an attribute edit would disturb.
+        if tv.defaultParagraphStyle?.lineSpacing != lineSpacing, !tv.hasMarkedText() {
+            let style = Self.paragraphStyle(lineSpacing: lineSpacing)
+            tv.defaultParagraphStyle = style
+            if let storage = tv.textStorage, storage.length > 0 {
+                storage.addAttribute(.paragraphStyle, value: style,
+                                     range: NSRange(location: 0, length: storage.length))
+            }
         }
     }
 
@@ -608,7 +629,8 @@ struct PromptField: NSViewRepresentable {
             if layout.extraLineFragmentTextContainer != nil {
                 used = max(used, layout.extraLineFragmentRect.maxY)
             }
-            let cap = line * CGFloat(max(1, parent.maxVisibleLines))
+            let lines = CGFloat(max(1, parent.maxVisibleLines))
+            let cap = line * lines + parent.lineSpacing * (lines - 1)
             let measuredHeight = min(max(used, line), cap).rounded(.up)
 
             // Stabilize the IME boundary case described above. Growing is immediate

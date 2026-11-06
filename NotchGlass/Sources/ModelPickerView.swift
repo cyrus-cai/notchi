@@ -2673,6 +2673,8 @@ struct AskRecentModelPickerView: View {
         let title: String
         let rows: [Row]
         var folded: Bool = false
+        /// A tag after the title: whose models these are ("Notchi").
+        var tag: String? = nil
     }
 
     /// In display order. Empty sections are not drawn.
@@ -2743,7 +2745,7 @@ struct AskRecentModelPickerView: View {
 
     private static func collapse(_ sections: [Section]) -> [Section] {
         sections.map {
-            $0.folded ? Section(title: $0.title, rows: [], folded: true) : $0
+            $0.folded ? Section(title: $0.title, rows: [], folded: true, tag: $0.tag) : $0
         }
     }
 
@@ -2769,7 +2771,7 @@ struct AskRecentModelPickerView: View {
             return terms.allSatisfy { hay.contains($0) }
         }
         let result = sections
-            .map { Section(title: $0.title, rows: $0.rows.filter(matches), folded: $0.folded) }
+            .map { Section(title: $0.title, rows: $0.rows.filter(matches), folded: $0.folded, tag: $0.tag) }
             .filter { !$0.rows.isEmpty }
         search.key = (query, sections)
         search.result = result
@@ -2950,6 +2952,7 @@ struct AskRecentModelPickerView: View {
         let rows = sections.first { $0.title == section.title }?.rows ?? []
         return MenuCardRow(
             title: section.title,
+            tag: section.tag, tagTint: .white,
             disclosure: false,
             fontSize: Self.fontSize,
             height: Self.rowHeight,

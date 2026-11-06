@@ -541,7 +541,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.9.27;
+				MARKETING_VERSION = 0.9.28;
 				PRODUCT_BUNDLE_IDENTIFIER = com.notchglass.app;
 				PRODUCT_NAME = Notchi;
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -564,7 +564,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.9.27;
+				MARKETING_VERSION = 0.9.28;
 				PRODUCT_BUNDLE_IDENTIFIER = com.notchglass.app;
 				PRODUCT_NAME = Notchi;
 				SWIFT_EMIT_LOC_STRINGS = YES;

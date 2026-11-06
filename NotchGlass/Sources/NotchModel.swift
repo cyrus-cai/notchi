@@ -13317,6 +13317,11 @@ final class NotchModel: ObservableObject {
                                answerID: UUID? = nil,
                                outOfCredit: Bool = false, service: AIService? = nil) {
         var thread = thread
+        // Another round's turn still marked streaming with no round behind it
+        // must not be saved as live. This round's own turn is settled below.
+        var live = Set(inFlightRounds.map(\.answerID))
+        if let answerID { live.insert(answerID) }
+        thread = Self.settlingDeadStreams(thread, live: live)
         mergeReactions(into: &thread)
         mergeCaptures(into: &thread)
         for turn in thread { turnReactions[turn.id] = nil; turnCaptures[turn.id] = nil }
@@ -14554,7 +14559,32 @@ final class NotchModel: ObservableObject {
         // `ForEach(id: \.element.id)` renders as undefined results: one of the two
         // draws as a blank row. Keeping the first occurrence of each id also heals
         // an archive that already picked up such a pair on an earlier launch.
+        // Nothing on disk can still be streaming: the process that ran those
+        // rounds is gone. Without this, a turn saved mid-round shows a live
+        // "Thinking…" forever.
+        for i in surviving.indices where surviving[i].turns?.contains(where: \.streaming) == true {
+            surviving[i].turns = Self.settlingDeadStreams(surviving[i].turns ?? [], live: [])
+        }
         history = Self.dedupedByID(history + surviving)
+    }
+
+    /// Settle every turn still marked streaming whose round is not in `live`.
+    /// An assistant turn that never got text becomes a failed "no answer" turn,
+    /// so it stays out of the wire context and does not render as a wait.
+    static func settlingDeadStreams(_ turns: [Turn], live: Set<UUID>) -> [Turn] {
+        var out = turns
+        for i in out.indices where out[i].streaming && !live.contains(out[i].id) {
+            out[i].streaming = false
+            out[i].toolActivity = nil
+            out[i].thinkingStartedAt = nil
+            out[i].pendingQuestion = nil
+            if out[i].role == "assistant",
+               out[i].text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                out[i].text = L("error.noAnswer")
+                out[i].isError = true
+            }
+        }
+        return out
     }
 
     /// Newest-first list with each `id` kept once, at its earliest (newest) position.
