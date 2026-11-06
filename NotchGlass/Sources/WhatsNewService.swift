@@ -109,7 +109,6 @@ final class WhatsNewService: ObservableObject {
         Entry(
             version: "0.9.28",
             date: "2026-11-06",
-            headline: "The menu bar chat's prompt now matches its answers.",
             improvements: [
                 "In the menu bar chat, the prompt uses the same text size as the answers.",
                 "In the menu bar chat, a long prompt no longer pushes the chat off the screen.",
