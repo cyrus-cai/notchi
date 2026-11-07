@@ -930,3 +930,38 @@ private struct LoopRoundSidebarRow: View {
             .id(item.id)
     }
 }
+
+/// How to start `/loop`, in the same words everywhere it is offered: the
+/// routines empty state, the idle prompt's focus hint, the `/` row, and the
+/// Help / Agents / ⌘ menu items. Two lines — the instruction, then one example.
+struct LoopDiscoverCopy: View {
+    var centered = false
+    var action: (() -> Void)? = nil
+
+    var body: some View {
+        Group {
+            if let action {
+                Button(action: action) { label }
+                    .buttonStyle(.plain)
+            } else {
+                label
+            }
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(L("loop.discover"))
+        .accessibilityHint(L("loop.discover.example"))
+    }
+
+    private var label: some View {
+        VStack(alignment: centered ? .center : .leading, spacing: 4) {
+            Text(L("loop.discover"))
+                .sfFont(Tokens.TypeSize.label)
+                .foregroundStyle(Tokens.text3)
+            Text(L("loop.discover.example"))
+                .sfFont(Tokens.TypeSize.meta)
+                .foregroundStyle(Tokens.text4)
+        }
+        .multilineTextAlignment(centered ? .center : .leading)
+        .frame(maxWidth: .infinity, alignment: centered ? .center : .leading)
+    }
+}

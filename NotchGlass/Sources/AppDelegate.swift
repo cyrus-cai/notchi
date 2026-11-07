@@ -1098,6 +1098,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
+        NotificationCenter.default.addObserver(
+            forName: .startLoopRequested,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                NSApp.activate(ignoringOtherApps: true)
+                self.model.startLoopCompose(on: self.displayForSummon())
+            }
+        }
+
         // The Recent list's "See all" action opens the standalone History window
         // showing the complete, uncapped archive (the notch keeps only the newest
         // slice). A real top-level window, managed by its own controller.
