@@ -338,6 +338,10 @@ struct NotchBody: View {
                                     withAnimation(.spring(response: 0.4, dampingFraction: 0.86)) {
                                         model.showRoutines = false
                                     }
+                                }, onStartLoop: {
+                                    withAnimation(.spring(response: 0.4, dampingFraction: 0.86)) {
+                                        model.startLoopCompose()
+                                    }
                                 }, copies: { AnyView(copyThreadTab) })
                                 .frame(width: geo.size.width * (metrics.floating ? 0.75 : 0.58))
                                 .frame(maxWidth: .infinity, alignment: .trailing)
@@ -676,6 +680,13 @@ struct NotchBody: View {
                     // The invitation takes the prompt's place until Start or ×.
                     if !showsWelcomeInvite && !showsUnifiedIntroInvite && !showsAutoRetireInvite
                         && featureNudgeInvite == nil {
+                        if showsLoopDiscover {
+                            LoopDiscoverCopy {
+                                model.startLoopCompose()
+                            }
+                            .padding(.bottom, 8)
+                            .transition(.opacity)
+                        }
                         idleInputRow
                     }
 
@@ -806,6 +817,22 @@ struct NotchBody: View {
               !showsAutoRetireInvite,
               let nudge = model.featureNudge, nudge.threadID == nil else { return nil }
         return nudge
+    }
+
+    /// The idle prompt's focus hint for `/loop`. It sits on the empty prompt —
+    /// the field that has focus — and leaves once a line is typed or `/loop`
+    /// is armed. A guide that replaces the prompt owns that slot instead.
+    private var showsLoopDiscover: Bool {
+        model.text.isEmpty
+            && model.loopIntervalMinutes == nil
+            && !model.issueMode
+            && model.promptShortcutMode == nil
+            && !model.usingPromptShortcutContext
+            && model.selectionContext == nil
+            && model.askComposeImages.isEmpty
+            && model.agentComposeImages.isEmpty
+            && model.droppedFiles.isEmpty
+            && !recentListShown
     }
 
     private var showsMainThreadPeek: Bool {
@@ -2538,6 +2565,10 @@ struct NotchBody: View {
                             onChangeInterval: {
                                 agentDetailMetadataOpen = false
                                 showLiveLoopIntervalPicker = true
+                            },
+                            onStartLoop: {
+                                agentDetailMetadataOpen = false
+                                model.startLoopCompose()
                             })
                             .manageMenuCardBackground())
                     }))
@@ -3796,6 +3827,10 @@ struct NotchBody: View {
                                     if let path = item.link {
                                         NSWorkspace.shared.open(URL(fileURLWithPath: path))
                                     }
+                                },
+                                onStartLoop: {
+                                    splitAgentMetadataOpen = false
+                                    model.startLoopCompose()
                                 })
                                 .manageMenuCardBackground())
                         }))
@@ -6630,6 +6665,10 @@ struct NotchBody: View {
                                     onChangeInterval: {
                                         model.isResultMetadataMenuOpen = false
                                         showLiveLoopIntervalPicker = true
+                                    },
+                                    onStartLoop: {
+                                        model.isResultMetadataMenuOpen = false
+                                        model.startLoopCompose()
                                     })
                                     .manageMenuCardBackground())
                             }))
@@ -6867,6 +6906,8 @@ struct AgentRunMetadataMenu: View {
     var onContinueLoop: (() -> Void)? = nil
     /// Opens the interval card. Live loops only — compose already has its chip.
     var onChangeInterval: (() -> Void)? = nil
+    /// Arms `/loop` on the idle prompt. Shown when this thread is not already one.
+    var onStartLoop: (() -> Void)? = nil
 
     private var folderName: String? {
         guard let folderPath, !folderPath.isEmpty else { return nil }
@@ -6919,6 +6960,10 @@ struct AgentRunMetadataMenu: View {
                                       hint: L("loop.continue"),
                                       action: onContinueLoop)
                 }
+            } else if let onStartLoop {
+                ResultMetadataRow(icon: LucideIcons.loop, title: L("loop.discover"),
+                                  hint: L("loop.discover.example"),
+                                  action: onStartLoop)
             }
         }
         .padding(ManageMenuMetrics.cardPadding)
@@ -9034,9 +9079,9 @@ private final class MenuCardAnchorView: NSView {
 /// The `/` command menu — a small floating card of plain words under the prompt.
 ///
 /// Deliberately spare: one word per row, no icons, no descriptions, no shortcut
-/// column. The whole menu is a completion list for what the user is already
-/// typing, so the words ARE the content — anything else beside them is furniture
-/// competing with the four things that matter. It sizes to its longest word and
+/// column — except `/loop`, which repeats the same two lines as the empty state
+/// and the focus hint. The whole menu is a completion list for what the user is
+/// already typing, so the words ARE the content. It sizes to its longest word and
 /// hangs at the prompt's left edge, in the same Liquid Glass the manage menu
 /// wears, so it reads as a card hovering over the panel rather than a new block
 /// bolted into it.
@@ -9064,8 +9109,17 @@ struct SlashCommandMenu: View {
         }
     }
 
+    /// The shared example, only on the `/loop` row.
+    private static func example(for match: NotchModel.SlashMatch) -> String? {
+        if case .mode(let command) = match, command == .loop {
+            return L("loop.discover.example")
+        }
+        return nil
+    }
+
     private static func title(for match: NotchModel.SlashMatch) -> String {
         switch match {
+        case .mode(let command) where command == .loop: return L("loop.discover")
         case .mode(let command): return command.title
         case .shortcut(let shortcut): return shortcut.displayName
         case .skill(let skill): return skill.displayName
@@ -9081,12 +9135,27 @@ struct SlashCommandMenu: View {
             return MenuCard.width(titles: NotchModel.MentionCommand.allCases.map { ($0.title, nil) }, max: 260)
         }
         let modes = NotchModel.SlashCommand.allCases.map { command -> (String, String?) in
-            (command.title, command == .loop ? LoopInterval.short(LoopInterval.lastMinutes) : nil)
+            (command == .loop ? L("loop.discover") : command.title,
+             command == .loop ? LoopInterval.short(LoopInterval.lastMinutes) : nil)
         }
         let shortcuts = PromptShortcutStore.current.filter(\.isReady)
             .map { ($0.displayName, $0.shortcut?.displayString) }
         let skills = model.agentSkills.map { ($0.displayName, String?.some("Skill")) }
-        return MenuCard.width(titles: modes + shortcuts + skills, max: 260)
+        // The example is the loop row's second line and shares the interval
+        // accessory, so the card has to clear that pair too.
+        let example = (L("loop.discover.example"),
+                       String?.some(LoopInterval.short(LoopInterval.lastMinutes)))
+        return MenuCard.width(titles: modes + shortcuts + skills + [example], max: 320)
+    }
+
+    /// Extra height for the `/loop` row's example line, when that row is on screen.
+    private var loopRowExtra: CGFloat {
+        let visible = model.slashMatches.prefix(9)
+        let showsLoop = visible.contains { match in
+            if case .mode(let command) = match, command == .loop { return true }
+            return false
+        }
+        return showsLoop ? 12 : 0
     }
 
     private var menuHeight: CGFloat {
@@ -9095,15 +9164,19 @@ struct SlashCommandMenu: View {
         return MenuCard.cardPad * 2
             + CGFloat(rows) * MenuCard.rowHeight
             + CGFloat(rows - 1) * MenuCard.rowSpacing
+            + loopRowExtra
     }
 
     var body: some View {
         ScrollView(.vertical) {
             LazyVStack(alignment: .leading, spacing: MenuCard.rowSpacing) {
                 ForEach(Array(model.slashMatches.enumerated()), id: \.element.id) { index, match in
+                    let example = Self.example(for: match)
                     MenuCardRow(
                         title: Self.title(for: match),
                         accessory: Self.chord(for: match),
+                        subtitle: example,
+                        height: example == nil ? MenuCard.rowHeight : MenuCard.rowHeight + 12,
                         selected: index == model.slashHighlight,
                         onHoverIn: { model.slashHighlight = index },
                         action: {
@@ -10300,6 +10373,8 @@ struct RoutinesPanel: View {
 
     @Binding var tab: NotchModel.SidePageTab
     var onClose: () -> Void
+    /// The empty state: arm `/loop` on the idle prompt, the same path as the menu.
+    var onStartLoop: () -> Void = {}
     /// The From copies tab's content, drawn by `NotchBody` (it reads the
     /// thread the way the result page does).
     var copies: () -> AnyView
@@ -10355,10 +10430,8 @@ struct RoutinesPanel: View {
     private var routines: some View {
             let rows = items
             if rows.isEmpty {
-                Text(L("routines.empty"))
-                    .sfFont(Tokens.TypeSize.label)
-                    .foregroundStyle(Tokens.text4)
-                    .multilineTextAlignment(.center)
+                LoopDiscoverCopy(centered: true, action: onStartLoop)
+                    .padding(.horizontal, 24)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 ScrollView {
