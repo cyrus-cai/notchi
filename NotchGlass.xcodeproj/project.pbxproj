@@ -48,6 +48,7 @@
 		A1000AF1 /* WeatherTools.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000AF2 /* WeatherTools.swift */; };
 		A1000C51 /* NotchiSourceTool.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000C52 /* NotchiSourceTool.swift */; };
 		A1000A0D /* MailService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000A0E /* MailService.swift */; };
+		A1000B71 /* OutlookServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000B72 /* OutlookServer.swift */; };
 		A10000AA /* DiagnosticsLog.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000BB /* DiagnosticsLog.swift */; };
 		A1000A10 /* MenuBarController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000A11 /* MenuBarController.swift */; };
 		A1000072 /* UpdaterService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000073 /* UpdaterService.swift */; };
@@ -115,6 +116,7 @@
 		A1000AF2 /* WeatherTools.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WeatherTools.swift; sourceTree = "<group>"; };
 		A1000C52 /* NotchiSourceTool.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotchiSourceTool.swift; sourceTree = "<group>"; };
 		A1000A0E /* MailService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MailService.swift; sourceTree = "<group>"; };
+		A1000B72 /* OutlookServer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OutlookServer.swift; sourceTree = "<group>"; };
 		A10000BB /* DiagnosticsLog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagnosticsLog.swift; sourceTree = "<group>"; };
 		A1000A11 /* MenuBarController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuBarController.swift; sourceTree = "<group>"; };
 		A1000073 /* UpdaterService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdaterService.swift; sourceTree = "<group>"; };
@@ -234,6 +236,7 @@
 				A1000AF2 /* WeatherTools.swift */,
 				A1000C52 /* NotchiSourceTool.swift */,
 				A1000A0E /* MailService.swift */,
+				A1000B72 /* OutlookServer.swift */,
 				A10000BB /* DiagnosticsLog.swift */,
 				A1000073 /* UpdaterService.swift */,
 				A1000C91 /* UpdatePrompt.swift */,
@@ -410,6 +413,7 @@
 				A1000AF1 /* WeatherTools.swift in Sources */,
 				A1000C51 /* NotchiSourceTool.swift in Sources */,
 				A1000A0D /* MailService.swift in Sources */,
+				A1000B71 /* OutlookServer.swift in Sources */,
 				A10000AA /* DiagnosticsLog.swift in Sources */,
 				A1000072 /* UpdaterService.swift in Sources */,
 				A1000C90 /* UpdatePrompt.swift in Sources */,
@@ -541,7 +545,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.9.28;
+				MARKETING_VERSION = 0.9.29;
 				PRODUCT_BUNDLE_IDENTIFIER = com.notchglass.app;
 				PRODUCT_NAME = Notchi;
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -564,7 +568,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.9.28;
+				MARKETING_VERSION = 0.9.29;
 				PRODUCT_BUNDLE_IDENTIFIER = com.notchglass.app;
 				PRODUCT_NAME = Notchi;
 				SWIFT_EMIT_LOC_STRINGS = YES;

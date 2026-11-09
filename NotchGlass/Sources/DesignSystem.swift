@@ -269,12 +269,10 @@ struct LowBalanceTag: View {
 }
 
 /// A $0 rate in the Notchi pricing table. `LowBalanceTag`'s face in a muted
-/// teal. `limited` for a rate that is free now and may not stay free.
+/// teal.
 struct FreeTag: View {
-    var limited = false
-
     var body: some View {
-        PriceTag(text: L(limited ? "nono.pricing.freeForNow" : "nono.pricing.free"))
+        PriceTag(text: L("nono.pricing.free"))
     }
 }
 

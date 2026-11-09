@@ -441,7 +441,6 @@ private struct HistoryArchiveView: View {
         HistoryFilterPill(
             title: title,
             active: active ?? (sourceFilter == source),
-            tint: source?.tint,
             action: action ?? { sourceFilter = source }
         )
     }
@@ -513,33 +512,15 @@ private struct HistoryArchiveView: View {
     }
 }
 
-/// One source-filter pill in the master header — the notch's Liquid Glass chip
-/// family: plain glass that brightens on hover, wearing its source's tint when
-/// active. Tapping toggles the filter.
+/// One source-filter pill in the master header, in the app's one tab-chip style.
+/// Tapping toggles the filter.
 private struct HistoryFilterPill: View {
     let title: String
     let active: Bool
-    /// The source's app colour (Notes amber, Reminders orange, Ask blue), washed
-    /// into the glass when the pill is active. `nil` for the "All" pill.
-    let tint: Color?
     let action: () -> Void
 
-    @State private var hovering = false
-
     var body: some View {
-        Button(action: action) {
-            Text(title)
-                .font(.sf(Tokens.TypeSize.meta, weight: .medium))
-                .foregroundStyle(active ? Tokens.text1 : (hovering ? Tokens.text2 : Tokens.text3))
-                .padding(.horizontal, 11)
-                .padding(.vertical, 5)
-                .glassCapsule(in: Capsule(), brighter: active || hovering,
-                              tint: active ? tint : nil)
-                .contentShape(Capsule())
-        }
-        .buttonStyle(GlassPressStyle())
-        .onHover { hovering = $0 }
-        .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
+        TabChip(title: title, active: active, action: action)
     }
 }
 
@@ -767,5 +748,107 @@ private struct TranscriptBubble: View {
         if let slash = s.lastIndex(of: "/") { s = String(s[s.index(after: slash)...]) }
         if s.hasSuffix(":free") { s = String(s.dropLast(":free".count)) }
         return s
+    }
+}
+
+/// Settings in a standard macOS window: titlebar with traffic lights, the
+/// system window shadow, and a behind-window material. Used when the panel is
+/// the floating card (menu bar card / Dynamic Island screens), whose transparent
+/// glass is a poor surface for a long form.
+@MainActor
+final class SettingsWindowController: NSObject, NSWindowDelegate {
+    static let shared = SettingsWindowController()
+
+    private var window: NSWindow?
+
+    var isVisible: Bool { window?.isVisible ?? false }
+
+    private override init() {}
+
+    func present(model: NotchModel) {
+        if let window {
+            window.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+        let window = HistoryArchiveNSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 760, height: 560),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = L("settings.title")
+        window.titlebarAppearsTransparent = true
+        window.titleVisibility = .hidden
+        // An empty unified toolbar gives the taller titlebar row, so the traffic
+        // lights sit level with the Settings header.
+        let toolbar = NSToolbar(identifier: "NotchSettingsToolbar")
+        toolbar.showsBaselineSeparator = false
+        window.toolbar = toolbar
+        window.toolbarStyle = .unified
+        window.isReleasedWhenClosed = false
+        window.minSize = NSSize(width: 640, height: 420)
+        window.appearance = NSAppearance(named: .darkAqua)
+        window.onEscape = { [weak window, weak model] in
+            guard let model else { return }
+            if let section = InlineSettingsView.Section(rawValue: model.settingsSection),
+               let parent = section.parent {
+                model.settingsSection = parent.rawValue
+            } else if window?.firstResponder is NSText {
+                window?.makeFirstResponder(nil)
+            } else {
+                window?.performClose(nil)
+            }
+        }
+
+        let material = NSVisualEffectView()
+        material.material = .hudWindow
+        material.blendingMode = .behindWindow
+        material.state = .active
+
+        let hosting = NSHostingView(rootView: SettingsWindowRoot(model: model)
+            .environmentObject(Localization.shared)
+            .notchTooltipClipBox())
+        hosting.translatesAutoresizingMaskIntoConstraints = false
+        material.addSubview(hosting)
+        NSLayoutConstraint.activate([
+            hosting.leadingAnchor.constraint(equalTo: material.leadingAnchor),
+            hosting.trailingAnchor.constraint(equalTo: material.trailingAnchor),
+            hosting.topAnchor.constraint(equalTo: material.topAnchor),
+            hosting.bottomAnchor.constraint(equalTo: material.bottomAnchor),
+        ])
+        window.contentView = material
+        window.delegate = self
+        window.center()
+        window.setFrameAutosaveName("NotchSettingsWindow")
+        self.window = window
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        window = nil
+    }
+}
+
+/// Settings sized to the window: the pane takes whatever height is left under
+/// the header, inside the panel's own 15pt gutter.
+private struct SettingsWindowRoot: View {
+    @ObservedObject var model: NotchModel
+
+    var body: some View {
+        GeometryReader { proxy in
+            let pad = NotchBody.panelPadding
+            let pane = max(200, proxy.size.height - InlineSettingsView.windowChrome - pad)
+            InlineSettingsView(model: model)
+                .environment(\.settingsWindowPaneHeight, pane)
+                .padding(.horizontal, pad)
+                .padding(.bottom, pad)
+                .frame(width: proxy.size.width, height: proxy.size.height, alignment: .top)
+        }
+        // Darkens the window's material so text over a light wallpaper stays
+        // readable.
+        .background(Color.black.opacity(0.3))
+        .ignoresSafeArea()
     }
 }

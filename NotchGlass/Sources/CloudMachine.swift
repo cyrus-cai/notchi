@@ -1251,6 +1251,10 @@ enum CloudDesktopBridge {
 /// failed. Hidden when it is off. A click opens Settings → Chat, where it is
 /// turned on and off.
 struct CloudMachineStatusChip: View {
+    /// `GlassSegmentCluster(glass:)`: off draws the glyph bare.
+    var glass: Bool = true
+    /// `GlassSegmentCluster(bareChip:)`.
+    var bareChip: Bool = true
     var openSettings: () -> Void
     @ObservedObject private var account = InstaBoxAccount.shared
 
@@ -1277,7 +1281,7 @@ struct CloudMachineStatusChip: View {
                             .id(look)
                             .transition(.opacity)
                     }
-                ])
+                ], glass: glass, bareChip: bareChip)
                 .transition(.opacity.combined(with: .scale(scale: 0.8)))
             }
         }

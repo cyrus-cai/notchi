@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import os
 
 /// The content that lives inside the glass, below the constant black notch zone.
 /// Switches between idle / load / result exactly like the prototype's modes.
@@ -53,6 +54,23 @@ struct NotchBody: View {
     @State private var agentChipAnchorX: CGFloat? = nil
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.notchMetrics) private var metrics
+
+    /// The picker flags (`showAskModelPicker`, `showAgentPicker`, …) live on the
+    /// shared model, and the island and the top-right card each draw a
+    /// `NotchBody` that reads them. Only the one on the display in use opens a
+    /// menu from them; the other copy's menu would take the pick's click as a
+    /// click outside it and close both before the row's action runs.
+    private var ownsSharedMenus: Bool {
+        guard let active = model.activeDisplay, let mine = metrics.displayID else { return true }
+        return active == mine
+    }
+
+    /// `flag` as this copy's menu should see it: down unless this copy owns
+    /// the shared menus. Writes go straight through to the model.
+    private func sharedMenu(_ flag: ReferenceWritableKeyPath<NotchModel, Bool>) -> Binding<Bool> {
+        Binding(get: { model[keyPath: flag] && ownsSharedMenus },
+                set: { model[keyPath: flag] = $0 })
+    }
     /// Drives the custom field's first-responder. Set shortly after the panel
     /// opens so the caret lands without a click (the AppDelegate has just made
     /// the panel key; a tiny delay lets that settle first).
@@ -367,7 +385,7 @@ struct NotchBody: View {
         // and this modifier sits on the panel body — so building them eagerly makes
         // every unfurl pay for a menu nobody asked for. The body re-runs when `showModelPicker` flips, which
         // is before the presenter reads them.
-        .modelMenu(isPresented: $model.showModelPicker,
+        .modelMenu(isPresented: sharedMenu(\.showModelPicker),
                    models: model.showModelPicker ? catalog.rows(selected: selectedProvider) : [],
                    selectedProvider: selectedProvider,
                    selectedID: selectedModelID,
@@ -1364,14 +1382,13 @@ struct NotchBody: View {
                                   hovered: $updateCueIdleHovered)
                             .transition(.scale(scale: 0.7).combined(with: .opacity))
                     }
-                    // Pinned (double-click or ⌘P): the tack on the trailing edge
-                    // shows it, and clicking it unpins. In Agent, live runs show
-                    // as "N running", which opens Recent.
+                    // The pin lives in the chat's header chips, not here. In
+                    // Agent, live runs show as "N running", which opens Recent.
                     let running = model.agentComposeActive ? agentManager.runningTasks.count : 0
-                    if model.isAnswerPinned || running > 0 {
+                    if running > 0 {
                         Spacer(minLength: 8)
                         IdleTrailingCluster(
-                            pinned: model.isAnswerPinned, recentOpen: false, showsRecent: false,
+                            pinned: false, recentOpen: false, showsRecent: false,
                             runningCount: running,
                             flat: model.unifiedThreadsEnabled,
                             togglePin: {
@@ -1497,7 +1514,7 @@ struct NotchBody: View {
             .accessibilityLabel(L("loop.chip.help"))
             .fixedSize()
             .modifier(MenuCardWindow(
-                open: model.showLoopIntervalPicker,
+                open: model.showLoopIntervalPicker && ownsSharedMenus,
                 onDismiss: { _ in model.showLoopIntervalPicker = false },
                 card: {
                     AnyView(LoopIntervalMenuCard(
@@ -1568,7 +1585,7 @@ struct NotchBody: View {
         // screen rect is re-read on every layout pass, so a pick that re-titles
         // (and resizes) the chip carries the card with it instead of stranding it.
         .modifier(MenuCardWindow(
-            open: model.showAskModelPicker,
+            open: model.showAskModelPicker && ownsSharedMenus,
             onDismiss: { _ in model.showAskModelPicker = false },
             card: {
                 return AnyView(AskRecentModelPickerView(
@@ -1748,7 +1765,7 @@ struct NotchBody: View {
             .fixedSize()
             // Same chip-hung card as the model menus, in its own clear panel.
             .modifier(MenuCardWindow(
-                open: model.showAgentFolderPicker,
+                open: model.showAgentFolderPicker && ownsSharedMenus,
                 onDismiss: { _ in model.showAgentFolderPicker = false },
                 card: {
                     AnyView(AgentFolderPickerView(
@@ -1791,7 +1808,7 @@ struct NotchBody: View {
                     Color.clear
                         .frame(width: 1, height: 1)
                         .modifier(MenuCardWindow(
-                            open: model.showAgentPicker,
+                            open: model.showAgentPicker && ownsSharedMenus,
                             centered: true,
                             onDismiss: { _ in model.showAgentPicker = false },
                             card: {
@@ -6427,7 +6444,7 @@ struct NotchBody: View {
         // anything else in the panel) changes when the menu is up — see
         // `MenuCardWindow`.
         .modifier(MenuCardWindow(
-            open: !followUp && model.slashMenuOpen,
+            open: !followUp && model.slashMenuOpen && ownsSharedMenus,
             // Clicking away is Esc's exit — the command word goes with the menu.
             // A click in another app also re-arms the ordinary leave-fold
             // (`collapseOnLeave` sits out while the menu is up), the same
@@ -6605,7 +6622,7 @@ struct NotchBody: View {
                             model.isResultMetadataMenuOpen.toggle()
                         }
                         .modifier(MenuCardWindow(
-                            open: model.isResultMetadataMenuOpen,
+                            open: model.isResultMetadataMenuOpen && ownsSharedMenus,
                             upperLeading: true,
                             onDismiss: { _ in model.isResultMetadataMenuOpen = false },
                             card: {
@@ -8764,6 +8781,7 @@ private final class MenuCardAnchorView: NSView {
     private var dismissed = false
     /// The card currently on screen, if any. One menu at a time.
     private static weak var current: MenuCardAnchorView?
+    private static let log = Logger(subsystem: "com.notchglass.notch", category: "menu-card")
     /// What a click outside the card reports to — see `installDismissMonitors`.
     private var onDismiss: ((Bool) -> Void)?
     private var clickMonitors: [Any] = []
@@ -8811,7 +8829,11 @@ private final class MenuCardAnchorView: NSView {
     }
 
     private func openMenu(with card: AnyView) {
-        guard let host = window else { return }
+        // The island and the top-right card each draw the composer, and both
+        // read the same `open` flag. Only the window on screen opens the card:
+        // a card hung off the hidden one would take the pick's click as a click
+        // outside it and close the menu before the row's action runs.
+        guard let host = window, host.isVisible else { return }
         let hosting = NSHostingView(rootView: card)
         let panel = MenuCardPanel(
             contentRect: NSRect(origin: .zero, size: hosting.fittingSize),
@@ -8829,6 +8851,12 @@ private final class MenuCardAnchorView: NSView {
         // over that card's right edge. Left unset, the margin's clear pixels
         // pass the pointer through to the rows underneath.
         let nested = host is MenuCardPanel
+        // Two top-level cards at once means two views opened from one shared
+        // flag: each takes a click in the other as a click outside it. Logged
+        // as a fault so it shows in Console the first time it happens.
+        if !nested, let other = Self.current, other !== self, other.isOpen {
+            Self.log.fault("two top-level menu cards open at once")
+        }
         if !nested { panel.ignoresMouseEvents = false }
         // Dark like the island, and along for the ride across Spaces / full-screen.
         panel.appearance = NSAppearance(named: .darkAqua)
@@ -10456,35 +10484,18 @@ struct RoutinesPanel: View {
 }
 
 /// A side page's top row, the header's height: its tabs, and × where ⋯ was.
-/// The selected tab sits on a lit capsule that slides between them.
+/// The tabs are `TabChip`s — the same strip Settings uses.
 struct SidePageHeader: View {
     var tabs: [(NotchModel.SidePageTab, String)]
     @Binding var selected: NotchModel.SidePageTab
     var onClose: () -> Void
 
-    @Namespace private var capsule
-
     var body: some View {
-        HStack(spacing: 2) {
+        HStack(spacing: TabChip.gap) {
             ForEach(tabs, id: \.0) { tab, title in
-                Button {
+                TabChip(title: title, active: selected == tab) {
                     withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) { selected = tab }
-                } label: {
-                    Text(title)
-                        .sfFont(Tokens.TypeSize.label, weight: .medium)
-                        .foregroundStyle(selected == tab ? Tokens.text1 : Tokens.text3)
-                        .padding(.horizontal, 12)
-                        .frame(height: 28)
-                        .background {
-                            if selected == tab {
-                                Capsule().fill(Tokens.recessFillLit)
-                                    .matchedGeometryEffect(id: "tab", in: capsule)
-                            }
-                        }
-                        .contentShape(Capsule())
                 }
-                .buttonStyle(.plain)
-                .exemptsDoubleClickPin()
             }
             Spacer(minLength: 0)
             GlassSegmentCluster(segments: [

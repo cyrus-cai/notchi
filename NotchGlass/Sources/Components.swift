@@ -1737,6 +1737,9 @@ struct GlassSegmentCluster: View {
     /// their contrast over a light backdrop, and drops the resting dimming —
     /// 55% of a dark pill over a white page is a pale smudge, not quiet chrome.
     var smoked: Bool = false
+    /// Bare cluster only: off draws no glass chip under a hovered or engaged
+    /// glyph; the glyph brightens and nothing else changes.
+    var bareChip: Bool = true
 
     // Fixed clusters keep their index identity. A cluster with conditional
     // segments can supply semantic ids so removing a neighbour does not make
@@ -1831,7 +1834,7 @@ struct GlassSegmentCluster: View {
                             segmentHighlight
                                 ? (seg.engaged ? 0.20 : (hovering ? 0.12 : 0))
                                 : 0))
-                    } else {
+                    } else if bareChip {
                         // Bare cluster: there is no pill to brighten, so the glass
                         // arrives per glyph — one round chip that lights under the
                         // pointer and fades back to nothing, instead of a slab
@@ -1930,6 +1933,69 @@ struct PanelBackPill: View {
         .onHover { hovering = $0 }
         .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
         .accessibilityLabel(help)
+    }
+}
+
+/// One chip of a segmented tab strip — the one shape every switcher in the app
+/// wears: a rounded-square glass tile, a soft translucent pane with a lit rim,
+/// brighter under the pointer and brightest on the open tab. Settings' connector
+/// groups, the prompt-template groups, the side page's tabs, History's filter
+/// pills and the survey's choices all draw from this, so a strip added later
+/// cannot land in a style of its own.
+///
+/// The tile is a continuous 8pt rounded square rather than a capsule: the corner
+/// is what makes a row of them read as separate segments of one control instead
+/// of a run of loose pills. The strip's gap is 6pt against this chip's 28pt
+/// height, the same proportion the icon chips use.
+struct TabChip: View {
+    /// Which register the label is set in. A tab that heads a section of cards
+    /// takes the panel's small-caps caption, the same font as the group headings
+    /// under it; a plain switcher takes the body-ish meta.
+    enum Typeface { case meta, caption }
+
+    var title: String
+    var active: Bool
+    var typeface: Typeface = .meta
+    var action: () -> Void
+
+    @State private var hovering = false
+
+    static let height: CGFloat = 28
+    static let gap: CGFloat = 6
+    static let corner: CGFloat = 8
+
+    private var ink: Color {
+        active ? Tokens.text1 : (hovering ? Tokens.text1 : Tokens.text2)
+    }
+
+    private var tile: RoundedRectangle {
+        RoundedRectangle(cornerRadius: Self.corner, style: .continuous)
+    }
+
+    var body: some View {
+        Button(action: action) {
+            Group {
+                switch typeface {
+                case .meta:
+                    Text(title)
+                        .sfFont(Tokens.TypeSize.meta, weight: .medium)
+                        .foregroundStyle(ink)
+                case .caption:
+                    Text(title)
+                        .captionLabel(color: ink)
+                }
+            }
+            .lineLimit(1)
+            .padding(.horizontal, 11)
+            .frame(height: Self.height)
+            .background(tile.fill(Color.white.opacity(active ? 0.17 : (hovering ? 0.11 : 0.06))))
+            .overlay(tile.strokeBorder(Color.white.opacity(active ? 0.22 : (hovering ? 0.16 : 0.11)),
+                                       lineWidth: 0.5))
+            .contentShape(tile)
+        }
+        .buttonStyle(.plain).exemptsDoubleClickPin()
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
     }
 }
 
@@ -4002,11 +4068,25 @@ struct AssistantTurnView: View {
     private func copyAnswerMarkdown() {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(
-            renderedText.trimmingCharacters(in: .whitespacesAndNewlines),
+            Self.withoutDraftFences(renderedText).trimmingCharacters(in: .whitespacesAndNewlines),
             forType: .string
         )
         onInAppCopy?()
         Haptics.confirm()
+    }
+
+    /// The answer with each ```draft fence's marker lines dropped, so the
+    /// piece inside pastes as written.
+    static func withoutDraftFences(_ text: String) -> String {
+        var out: [String] = []
+        var inDraft = false
+        for line in text.components(separatedBy: "\n") {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if !inDraft, trimmed.lowercased() == "```draft" { inDraft = true; continue }
+            if inDraft, trimmed == "```" { inDraft = false; continue }
+            out.append(line)
+        }
+        return out.joined(separator: "\n")
     }
 
     /// Copy with every markdown mark removed — plain prose for pasting into
@@ -7170,7 +7250,10 @@ struct CodeBlockView: View {
     private static let foldTo = 12
 
     private var lineCount: Int { text.reduce(1) { $1 == "\n" ? $0 + 1 : $0 } }
-    private var folds: Bool { lineCount > Self.foldOver }
+    /// A `draft` fence holds a piece the user will paste whole (an email, a
+    /// post): it reads as body text, never folds, and copies as written.
+    private var isDraft: Bool { language?.lowercased() == "draft" }
+    private var folds: Bool { !isDraft && lineCount > Self.foldOver }
 
     /// What the island shows: the whole block, or its first `foldTo` lines.
     private var shownText: String {
@@ -7189,12 +7272,25 @@ struct CodeBlockView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(CodeHighlighter.highlighted(shownText, language: language))
-                .font(.system(size: baseFont - 1, weight: .regular, design: .monospaced))
-                .foregroundStyle(color)
-                .textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .fixedSize(horizontal: false, vertical: true)
+            if isDraft {
+                Text(text)
+                    .sfFont(baseFont)
+                    .tracking(-0.05)
+                    .lineSpacing(baseFont * 0.6)
+                    .foregroundStyle(color)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .fixedSize(horizontal: false, vertical: true)
+                    // Keeps the first line clear of the copy chip.
+                    .padding(.trailing, Self.side)
+            } else {
+                Text(CodeHighlighter.highlighted(shownText, language: language))
+                    .font(.system(size: baseFont - 1, weight: .regular, design: .monospaced))
+                    .foregroundStyle(color)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             // The question bubble's Show more toggle, in its quiet text4.
             if folds {
                 Button {
@@ -8584,6 +8680,9 @@ struct MenuCardRow: View {
     var tag: String? = nil
     /// The tag's color: Settings' blue for "New", `Tokens.sale` for a discount.
     var tagTint: Color = Tokens.accent
+    /// Notchi's two eyes in the trailing slot, dimmed: marks a row whose
+    /// models are Notchi's own. Takes the tag's place.
+    var notchiMark: Bool = false
     /// A trailing glyph that only appears under the pointer, for a row that
     /// leaves this surface rather than choosing something in it. Held in the
     /// layout at rest — same as the detail card's scoring link — so arriving on
@@ -8668,12 +8767,15 @@ struct MenuCardRow: View {
                     Spacer(minLength: 0)
                     LowBalanceTag()
                 }
-                if let tag, !lowBalance {
+                if notchiMark {
+                    Spacer(minLength: 0)
+                    NotchiMarkEyes(pose: NotchiMarkPose(), eyeHeight: accessoryFontSize * 0.7, dim: 0.55)
+                } else if let tag, !lowBalance {
                     Spacer(minLength: 0)
                     InlineSettingsView.NewBadge(text: tag, tint: tagTint)
                 }
                 if let accessory {
-                    if !lowBalance && tag == nil { Spacer(minLength: 0) }
+                    if !lowBalance && tag == nil && !notchiMark { Spacer(minLength: 0) }
                     Text(accessory)
                         .sfFont(accessoryFontSize, weight: .regular)
                         .foregroundStyle(selected ? Tokens.text2 : Tokens.text4)
@@ -8681,14 +8783,14 @@ struct MenuCardRow: View {
                         .fixedSize()
                 }
                 if let disclosure {
-                    if accessory == nil && !lowBalance { Spacer(minLength: 0) }
+                    if accessory == nil && !lowBalance && tag == nil && !notchiMark { Spacer(minLength: 0) }
                     Image(systemName: "chevron.right")
                         .sfFont(accessoryFontSize, weight: .semibold)
                         .foregroundStyle(selected ? Tokens.text2 : Tokens.text4)
                         .rotationEffect(.degrees(disclosure ? 90 : 0))
                 }
                 if let isOn {
-                    if accessory == nil && !lowBalance && disclosure == nil {
+                    if accessory == nil && !lowBalance && tag == nil && !notchiMark && disclosure == nil {
                         Spacer(minLength: 0)
                     }
                     // Drawn, not hit: the row's own button takes the click, so
@@ -8701,7 +8803,7 @@ struct MenuCardRow: View {
                         .allowsHitTesting(false)
                 }
                 if let hoverSymbol {
-                    if accessory == nil && !lowBalance && disclosure == nil {
+                    if accessory == nil && !lowBalance && tag == nil && !notchiMark && disclosure == nil {
                         Spacer(minLength: 0)
                     }
                     Image(systemName: hoverSymbol)

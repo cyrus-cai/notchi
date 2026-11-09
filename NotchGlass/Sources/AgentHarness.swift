@@ -505,7 +505,7 @@ struct ToolRegistry: Sendable {
 
     /// `deferring` names the tools to hold back (`ToolCatalog.deferred`); any
     /// of them present adds `load_tools` at the end of the list.
-    init(_ tools: [NotchTool], deferring: Set<String> = []) {
+    init(_ tools: [NotchTool], deferring: Set<String> = [], apps: [ConnectedApp] = []) {
         let held = tools.map(\.name).filter { deferring.contains($0) }
         if held.isEmpty {
             self.tools = tools
@@ -518,7 +518,7 @@ struct ToolRegistry: Sendable {
             for tool in tools where deferring.contains(tool.name) {
                 summaries[tool.name] = ToolCatalog.summary(of: tool.name) ?? ToolCatalog.brief(tool.description)
             }
-            self.tools = tools + [LoadToolsTool(loadout: loadout, summaries: summaries)]
+            self.tools = tools + [LoadToolsTool(loadout: loadout, summaries: summaries, apps: apps)]
             self.loadout = loadout
         }
     }

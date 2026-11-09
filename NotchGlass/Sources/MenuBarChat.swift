@@ -9,18 +9,17 @@ import SwiftUI
 /// under the messages already showing. Older messages scroll up and fade out at
 /// the top edge.
 ///
-/// Agent compose draws here too, as the prompt alone. Settings, What's New,
-/// Recent and an agent task's detail page keep the card's panel (see
-/// `takesOver`).
+/// Agent compose draws here too, as the prompt alone. An agent task's detail
+/// page keeps the card's panel (see `takesOver`).
 struct MenuBarChat: View {
     @ObservedObject var model: NotchModel
     let isOpen: Bool
 
     /// Whether this view draws the card for what the model shows now. Recent
     /// and What's New open in their own windows from here (`openPagesInWindows`),
-    /// so they never take the card.
+    /// and so does Settings (`openSettings`), so none of them take the card.
     static func takesOver(_ model: NotchModel) -> Bool {
-        !model.showSettings && model.agentDetailTaskID == nil
+        model.agentDetailTaskID == nil
     }
 
     /// The messages scroll past this height.
@@ -84,6 +83,8 @@ struct MenuBarChat: View {
     static let unfoldSpring = Animation.spring(response: 0.5, dampingFraction: 0.6)
     /// The pointer is over the composer: its bottom row shows.
     @State private var composerHovering = false
+    /// The header's side-page mark has its menu down.
+    @State private var sidePageMenuOpen = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     // MARK: - What is shown
@@ -116,8 +117,20 @@ struct MenuBarChat: View {
     var body: some View {
         let turns = shownTurns
         VStack(alignment: .leading, spacing: 10) {
-            if !turns.isEmpty {
+            if model.showRoutines {
+                sidePage
+                    .transition(.opacity)
+                    .transaction(stillWhileClosed)
+            } else if !turns.isEmpty {
                 messages(turns)
+                    // Over the messages' top, ending at the bubbles' right
+                    // edge. Takes no height of its own.
+                    .overlay(alignment: .topLeading) {
+                        headerChips
+                            .frame(width: NotchMetrics.chatWidth * Self.bubbleWidthFraction,
+                                   alignment: .trailing)
+                            .padding(.top, 10)
+                    }
                     .padding(.bottom, overflows ? -Self.composerOverlap : 0)
                     .transition(.opacity)
                     .transaction(stillWhileClosed)
@@ -146,9 +159,15 @@ struct MenuBarChat: View {
             } else {
                 var quiet = Transaction()
                 quiet.disablesAnimations = true
-                withTransaction(quiet) { revealed = false }
+                withTransaction(quiet) {
+                    revealed = false
+                    // Like leaving the thread in the panel: the next open
+                    // shows the chat, not the side page.
+                    model.showRoutines = false
+                }
             }
         }
+        .animation(.spring(response: 0.4, dampingFraction: 0.86), value: model.showRoutines)
         .onAppear { openPagesInWindows() }
         .onChange(of: model.showHistory) { _, _ in openPagesInWindows() }
         .onChange(of: model.showWhatsNew) { _, _ in openPagesInWindows() }
@@ -209,6 +228,146 @@ struct MenuBarChat: View {
         }
     }
 
+
+    // MARK: - Header chips
+
+    /// The panel's header trio on this card: the side page, the cloud machine,
+    /// and the pin. Laid over the top of the messages, right-aligned with the
+    /// bubbles. One group: bare glyphs over a single soft dark blur.
+    private var headerChips: some View {
+        HStack(spacing: 6) {
+            CloudMachineStatusChip(glass: false, bareChip: false) {
+                model.settingsSection = InlineSettingsView.Section.chat.rawValue
+                model.openSettings()
+            }
+            GlassSegmentCluster(segments: [
+                .init(engaged: model.isAnswerPinned,
+                      tooltip: shortcutHelp(model.isAnswerPinned ? "result.unpin" : "result.pin",
+                                            action: .pin),
+                      action: {
+                          withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
+                              model.toggleAnswerPin()
+                          }
+                      }) {
+                    PinStateGlyph(pinned: model.isAnswerPinned, size: 12, weight: .light)
+                },
+                .init(id: "sidePage",
+                      engaged: model.showRoutines,
+                      tooltip: L("recent.manage"),
+                      action: { sidePageMenuOpen.toggle() }) {
+                    Image(systemName: "sidebar.right")
+                        .sfFont(13, weight: .light)
+                },
+            ], glass: false, bareChip: false)
+            .modifier(MenuCardWindow(open: sidePageMenuOpen,
+                                     lowerTrailing: true,
+                                     onDismiss: { _ in sidePageMenuOpen = false },
+                                     card: { AnyView(sidePageMenu) }))
+        }
+        .padding(.horizontal, 4)
+        .background {
+            ZStack {
+                BackdropBlur(radius: 12, spot: true)
+                    .padding(-Self.chipBlurSpread)
+                Capsule()
+                    .fill(Color.black.opacity(0.6))
+                    .padding(-4)
+                    .blur(radius: 8)
+            }
+            .allowsHitTesting(false)
+        }
+    }
+
+    /// How far the blur behind the header chips spreads past them.
+    private static let chipBlurSpread: CGFloat = 16
+
+    /// The side-page mark's card: the same three rows the panel's ⋯ holds.
+    /// Choosing a tab shows the side page in place of the messages.
+    private var sidePageMenu: some View {
+        let detach = L("detached.open")
+        let routines = L("routines.title")
+        let copies = L("copyThread.tab")
+        return VStack(alignment: .leading, spacing: MenuCard.rowSpacing) {
+            if NotchModel.detachedWindowsEnabled {
+                MenuCardRow(title: detach, selected: false) {
+                    sidePageMenuOpen = false
+                    model.openDetachedWindow()
+                }
+            }
+            MenuCardRow(title: routines,
+                        selected: model.showRoutines && model.sidePageTab == .routines) {
+                sidePageMenuOpen = false
+                openSidePage(.routines)
+            }
+            MenuCardRow(title: copies,
+                        selected: model.showRoutines && model.sidePageTab == .copies) {
+                sidePageMenuOpen = false
+                openSidePage(.copies)
+            }
+        }
+        .padding(MenuCard.cardPad)
+        .frame(width: MenuCard.width(titles: [(detach, nil), (routines, nil), (copies, nil)]))
+        .manageMenuCardBackground()
+    }
+
+    /// Open the side page on `tab`, or close it when that tab already shows.
+    private func openSidePage(_ tab: NotchModel.SidePageTab) {
+        if model.showRoutines, model.sidePageTab == tab {
+            model.showRoutines = false
+        } else {
+            model.sidePageTab = tab
+            model.showRoutines = true
+        }
+    }
+
+    // MARK: - Side page
+
+    /// Routines and Sub-thread, in the messages' place. The card has no
+    /// panel for the side page to cover, so it takes the messages' column.
+    private var sidePage: some View {
+        RoutinesPanel(tab: $model.sidePageTab,
+                      onClose: { model.showRoutines = false },
+                      copies: { AnyView(copyThreadTab) })
+            .frame(width: NotchMetrics.chatWidth * Self.bubbleWidthFraction,
+                   height: messagesCap)
+            .clipShape(RoundedRectangle(cornerRadius: Tokens.Radius.shell, style: .continuous))
+    }
+
+    /// The Sub-thread tab: the copy thread, as this card draws messages.
+    @ViewBuilder
+    private var copyThreadTab: some View {
+        let turns = model.copyThreadConversation.filter(\.isDrawn)
+        if turns.isEmpty {
+            Text(L("copyThread.empty"))
+                .sfFont(Tokens.TypeSize.label)
+                .foregroundStyle(Tokens.text4)
+                .multilineTextAlignment(.center)
+                .padding(.top, 8)
+            Spacer(minLength: 0)
+        } else {
+            ScrollViewReader { proxy in
+                ScrollView(.vertical, showsIndicators: false) {
+                    LazyVStack(alignment: .leading, spacing: Self.bubbleGap) {
+                        ForEach(Array(turns.enumerated()), id: \.element.id) { i, turn in
+                            ChatRow(turn: turn, model: model,
+                                    isLast: i == turns.count - 1,
+                                    question: turns.question(at: i),
+                                    recentCards: [],
+                                    onScreen: false,
+                                    live: nil, streamingNow: false, askFailed: false)
+                                .equatable()
+                        }
+                    }
+                    .padding(.bottom, NotchBody.panelPadding)
+                    Color.clear.frame(height: 0).id(Self.bottomID)
+                }
+                .environment(\.cardWidthFraction, 1)
+                .onAppear {
+                    DispatchQueue.main.async { proxy.scrollTo(Self.bottomID, anchor: .bottom) }
+                }
+            }
+        }
+    }
 
     // MARK: - Messages
 
@@ -404,10 +563,14 @@ struct MenuBarChat: View {
     // MARK: - Composer
 
     /// The island's prompt and bottom row, in the floating card's glass.
+    ///
+    /// The pin holds the CARD open, not this row: a pinned answer keeps the
+    /// bottom row hover-only like every other state, so pinning doesn't grow
+    /// the composer by a row height.
     private var composer: some View {
         let shape = NotchShape(bottomRadius: Tokens.Radius.shell,
                                topCornerRadius: Tokens.Radius.shell)
-        return NotchBody(model: model, composerOnly: true, showsBottomRow: composerHovering || model.isAnswerPinned || bottomRowMenuOpen)
+        return NotchBody(model: model, composerOnly: true, showsBottomRow: composerHovering || bottomRowMenuOpen)
             .background(GlassMaterial(bottomRadius: Tokens.Radius.shell,
                                       topCornerRadius: Tokens.Radius.shell,
                                       expanded: true,
@@ -718,21 +881,26 @@ extension NotchModel {
 /// backdrop layer, so the gradient is set on the layer itself.
 private struct BackdropBlur: NSViewRepresentable {
     var radius: CGFloat
+    /// A round patch, whole at the centre and fading out to its edges, instead
+    /// of a band fading in from the top.
+    var spot: Bool = false
 
-    func makeNSView(context: Context) -> BackdropBlurView { BackdropBlurView(radius: radius) }
+    func makeNSView(context: Context) -> BackdropBlurView { BackdropBlurView(radius: radius, spot: spot) }
     func updateNSView(_ view: BackdropBlurView, context: Context) {}
 }
 
 private final class BackdropBlurView: NSView {
     private let radius: CGFloat
+    private let spot: Bool
     /// The filter is a variable blur (`inputMaskImage`), or a plain Gaussian
     /// when the system has no variable blur; the plain one is faded in by a
     /// gradient mask on the layer instead.
     private var variable = false
-    private var maskedHeight: CGFloat = -1
+    private var maskedSize: CGSize = CGSize(width: -1, height: -1)
 
-    init(radius: CGFloat) {
+    init(radius: CGFloat, spot: Bool = false) {
         self.radius = radius
+        self.spot = spot
         super.init(frame: .zero)
         wantsLayer = true
     }
@@ -744,7 +912,7 @@ private final class BackdropBlurView: NSView {
             return CALayer()
         }
         let layer = backdrop.init()
-        if let filter = Self.filter("variableBlur") {
+        if !spot, let filter = Self.filter("variableBlur") {
             filter.setValue(radius, forKey: "inputRadius")
             filter.setValue(true, forKey: "inputNormalizeEdges")
             filter.setValue(Self.rampImage(), forKey: "inputMaskImage")
@@ -760,8 +928,20 @@ private final class BackdropBlurView: NSView {
 
     override func layout() {
         super.layout()
-        guard let layer, bounds.height != maskedHeight else { return }
-        maskedHeight = bounds.height
+        guard let layer, bounds.size != maskedSize else { return }
+        maskedSize = bounds.size
+        if spot {
+            // Whole in the middle, clear at the edges.
+            let gradient = CAGradientLayer()
+            gradient.type = .radial
+            gradient.frame = layer.bounds
+            gradient.colors = [NSColor.black.cgColor, NSColor.black.cgColor, NSColor.clear.cgColor]
+            gradient.locations = [0, 0.45, 1]
+            gradient.startPoint = CGPoint(x: 0.5, y: 0.5)
+            gradient.endPoint = CGPoint(x: 1, y: 1)
+            layer.mask = gradient
+            return
+        }
         // The fade of the band itself: clear at the top, whole at the bottom.
         let gradient = CAGradientLayer()
         gradient.frame = layer.bounds

@@ -1,4 +1,7 @@
+import AppKit
+import CryptoKit
 import Foundation
+import Network
 
 // MARK: - MCP servers
 //
@@ -28,6 +31,8 @@ struct MCPServerSpec: Sendable, Equatable {
     var exclude: [String] = []
     /// `autoApprove` (or Cline's `alwaysAllow`): tools that run without the card.
     var autoApprove: [String] = []
+    /// The built-in connector whose OAuth sign-in authorizes this server.
+    var oauthConnector: String?
 
     func offers(_ tool: String) -> Bool {
         (include.isEmpty || include.contains { MCPConfig.matches($0, tool) })
@@ -117,12 +122,26 @@ enum MCPConfig {
         }
     }
 
-    /// `mcp.json` first, then each other app in `sources` order. A name already
+    /// Servers from `mcp.json` and other apps' settings are switched off for
+    /// now; only the connectors signed in from Settings load.
+    static let userServersEnabled = false
+
+    /// Connectors first, then `mcp.json`, then each other app in `sources` order. A name already
     /// taken is skipped, so an entry in `mcp.json` (`"disabled": true` included)
     /// overrides another app's server of the same name.
     static func load() -> Loaded {
         var out = Loaded()
         var taken = Set<String>()
+        for connector in MCPConnector.all where MCPTokenStore.load(connector.id) != nil {
+            taken.insert(connector.id)
+            var spec = MCPServerSpec(name: connector.id)
+            spec.url = connector.url
+            spec.oauthConnector = connector.id
+            out.specs.append(spec)
+            out.sources[connector.id] = connector.title
+            out.raw[connector.id] = ["url": connector.url.absoluteString]
+        }
+        guard userServersEnabled else { return out }
         if let data = try? Data(contentsOf: fileURL) {
             if let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
                 add(servers(in: root), source: nil, base: fileURL.deletingLastPathComponent(),
@@ -566,6 +585,7 @@ final class MCPStdioTransport: MCPTransport, @unchecked Sendable {
 final class MCPHTTPTransport: MCPTransport, @unchecked Sendable {
     private let url: URL
     private let headers: [String: String]
+    private let connector: String?
     private let lock = NSLock()
     private var nextID = 1
     private var sessionID: String?
@@ -575,6 +595,7 @@ final class MCPHTTPTransport: MCPTransport, @unchecked Sendable {
         guard let url = spec.url else { throw MCPError("No url.") }
         self.url = url
         headers = spec.headers
+        connector = spec.oauthConnector
     }
 
     func setProtocolVersion(_ version: String) {
@@ -608,10 +629,31 @@ final class MCPHTTPTransport: MCPTransport, @unchecked Sendable {
         req.httpMethod = "DELETE"
         req.setValue(session, forHTTPHeaderField: "Mcp-Session-Id")
         for (key, value) in headers { req.setValue(value, forHTTPHeaderField: key) }
+        if let connector, let token = MCPTokenStore.load(connector) {
+            req.setValue("Bearer \(token.accessToken)", forHTTPHeaderField: "Authorization")
+        }
         ProxyConfig.urlSession.dataTask(with: req).resume()
     }
 
+    /// A connector's server answered 401: the access token is refreshed and
+    /// the message sent once more.
+    private struct Unauthorized: Error {}
+
     private func post(_ message: [String: Any], timeout: TimeInterval, awaiting id: Int?) async throws -> [String: Any]? {
+        do {
+            return try await send(message, timeout: timeout, awaiting: id, refresh: false)
+        } catch is Unauthorized {
+            do {
+                return try await send(message, timeout: timeout, awaiting: id, refresh: true)
+            } catch is Unauthorized {
+                let title = MCPConnector.find(connector)?.title ?? "The server"
+                throw MCPError("\(title) refused the sign-in. Connect it again in Settings.")
+            }
+        }
+    }
+
+    private func send(_ message: [String: Any], timeout: TimeInterval, awaiting id: Int?,
+                      refresh: Bool) async throws -> [String: Any]? {
         var req = URLRequest(url: url, timeoutInterval: timeout)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -622,6 +664,10 @@ final class MCPHTTPTransport: MCPTransport, @unchecked Sendable {
         if let session { req.setValue(session, forHTTPHeaderField: "Mcp-Session-Id") }
         if let version { req.setValue(version, forHTTPHeaderField: "MCP-Protocol-Version") }
         for (key, value) in headers { req.setValue(value, forHTTPHeaderField: key) }
+        if let connector {
+            let token = try await MCPTokens.shared.accessToken(connector, forceRefresh: refresh)
+            req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
         req.httpBody = try JSONSerialization.data(withJSONObject: message)
 
         let (bytes, response) = try await ProxyConfig.urlSession.bytes(for: req)
@@ -636,6 +682,7 @@ final class MCPHTTPTransport: MCPTransport, @unchecked Sendable {
                 if body.count >= 400 { break }
             }
             let text = String(decoding: body, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+            if http.statusCode == 401, connector != nil { throw Unauthorized() }
             if http.statusCode == 404, session != nil {
                 lock.lock(); sessionID = nil; lock.unlock()
                 throw MCPSessionExpired()
@@ -710,7 +757,9 @@ final class MCPConnection: @unchecked Sendable {
                         onExit: @escaping @Sendable (String) -> Void,
                         onToolsChanged: @escaping @Sendable () -> Void) async throws -> MCPConnection {
         let transport: MCPTransport
-        if spec.url != nil {
+        if let local = MCPLocalTransport.server(for: spec) {
+            transport = MCPLocalTransport(local)
+        } else if spec.url != nil {
             transport = try MCPHTTPTransport(spec: spec)
         } else {
             let stdio = try MCPStdioTransport(spec: spec)
@@ -826,10 +875,6 @@ final class MCPConnection: @unchecked Sendable {
 final class MCPHub: ObservableObject {
     static let shared = MCPHub()
 
-    /// More tools than this are held behind `load_tools` rather than sent on
-    /// every request: a big server (dozens of tools) would otherwise cost every
-    /// question its descriptions.
-    static let advertiseLimit = 8
 
     enum Status: Equatable {
         case starting
@@ -950,6 +995,25 @@ final class MCPHub: ObservableObject {
     private func set(_ name: String, _ status: Status) {
         guard let index = servers.firstIndex(where: { $0.name == name }) else { return }
         servers[index].status = status
+    }
+
+    /// The apps `load_tools` names, from one question's MCP tools: each
+    /// server's tools and the connector's defaults among them.
+    nonisolated static func connectedApps(_ tools: [NotchTool]) -> [ConnectedApp] {
+        var order: [String] = []
+        var byServer: [String: [MCPTool]] = [:]
+        for case let tool as MCPTool in tools {
+            if byServer[tool.server] == nil { order.append(tool.server) }
+            byServer[tool.server, default: []].append(tool)
+        }
+        return order.map { server in
+            let list = byServer[server] ?? []
+            let connector = MCPConnector.find(server)
+            let defaults = (connector?.defaultTools ?? []).compactMap { raw in
+                list.first { $0.info.name == raw }?.name
+            }
+            return ConnectedApp(title: connector?.title ?? server, tools: list.map(\.name), defaults: defaults)
+        }
     }
 
     /// The connected servers' tools for one question. `confirm` shows the
@@ -1220,5 +1284,669 @@ enum MiniTOML {
             insert(value, at: Array(path.dropFirst()), into: &child)
             table[first] = child
         }
+    }
+}
+
+// MARK: - Connectors
+
+/// A remote MCP server Notchi knows by name, signed in to with OAuth from
+/// Settings > Connect instead of a line in `mcp.json`.
+struct MCPConnector: Identifiable, Sendable {
+    let id: String
+    let title: String
+    let url: URL
+    /// Scopes to ask for instead of every one the server lists.
+    var scopes: [String]?
+    /// Set for GitHub: its OAuth App signs in with the device flow, which needs
+    /// no client secret. Everything else registers itself (DCR).
+    var githubClientID: String?
+    /// Set for Google: its authorization server has no registration, so
+    /// Notchi signs in as the desktop client made for it in Google Cloud.
+    var client: StaticClient?
+    /// The tools `load_tools(app:)` adds, by the server's names; the rest load
+    /// by name. Empty: all of them when there are ten or fewer.
+    var defaultTools: [String]
+    /// The group Settings lists it under.
+    var category: Category
+
+    enum Category: String, CaseIterable {
+        case docs, mail, projects, developer
+    }
+
+    /// A client Notchi was issued ahead of time.
+    struct StaticClient: Sendable {
+        let id: String
+        /// Kept out of the source: the build writes it into Info.plist from
+        /// NOTCHI_GOOGLE_CLIENT_SECRET. Nil for a public client, which signs
+        /// in with PKCE alone.
+        let secretKey: String?
+        /// Added to the sign-in address.
+        let authParams: [String: String]
+        /// The sign-in and token addresses, for a server that does not publish
+        /// OAuth metadata. Nil: found from the server.
+        var authorize: URL? = nil
+        var token: URL? = nil
+
+        var secret: String? {
+            guard let secretKey else { return nil }
+            let value = Bundle.main.object(forInfoDictionaryKey: secretKey) as? String
+            return (value?.isEmpty == false && value?.hasPrefix("$(") == false) ? value : nil
+        }
+    }
+
+    static let google = StaticClient(
+        id: "1073923399222-5kkq0aduqeb6kgiasi3ber4vrbr9dnj1.apps.googleusercontent.com",
+        secretKey: "NotchiGoogleClientSecret",
+        authParams: ["access_type": "offline", "prompt": "consent"])
+
+    /// The Notchi app registered in Microsoft Entra: a public client for
+    /// personal and work accounts, redirect http://127.0.0.1/callback.
+    static let microsoftClientID = ""
+
+    static let microsoft = StaticClient(
+        id: microsoftClientID,
+        secretKey: nil,
+        authParams: ["prompt": "select_account"],
+        authorize: URL(string: "https://login.microsoftonline.com/common/oauth2/v2.0/authorize")!,
+        token: URL(string: "https://login.microsoftonline.com/common/oauth2/v2.0/token")!)
+
+    init(_ id: String, _ title: String, _ url: String, scopes: [String]? = nil,
+         githubClientID: String? = nil, client: StaticClient? = nil, defaultTools: [String] = [],
+         category: Category = .developer) {
+        self.id = id
+        self.title = title
+        self.url = URL(string: url)!
+        self.scopes = scopes
+        self.githubClientID = githubClientID
+        self.client = client
+        self.defaultTools = defaultTools
+        self.category = category
+    }
+
+    /// Off until Google verifies the app: unverified, it serves 100 test users
+    /// and its refresh tokens last 7 days.
+    static let googleEnabled = false
+
+    static var all: [MCPConnector] {
+        listed.filter { connector in
+            switch connector.client?.id {
+            case google.id?: return googleEnabled
+            case microsoft.id?: return !microsoftClientID.isEmpty
+            default: return true
+            }
+        }
+    }
+
+    private static let listed: [MCPConnector] = [
+        MCPConnector("notion", "Notion", "https://mcp.notion.com/mcp",
+                     defaultTools: ["notion-search", "notion-fetch", "notion-create-pages", "notion-update-page"], category: .docs),
+        MCPConnector("linear", "Linear", "https://mcp.linear.app/mcp",
+                     defaultTools: ["list_issues", "get_issue", "create_issue", "update_issue",
+                                    "list_projects", "list_teams", "create_comment"], category: .projects),
+        // Outlook has no MCP server for personal accounts; OutlookServer
+        // answers in Notchi, over Microsoft Graph.
+        MCPConnector("outlook", "Outlook", "https://graph.microsoft.com/v1.0",
+                     scopes: ["offline_access", "User.Read", "Mail.ReadWrite"],
+                     client: microsoft, category: .mail),
+        MCPConnector("gmail", "Gmail", "https://gmailmcp.googleapis.com/mcp/v1",
+                     scopes: ["https://www.googleapis.com/auth/gmail.modify"],
+                     client: google, category: .mail),
+        MCPConnector("googlecalendar", "Google Calendar", "https://calendarmcp.googleapis.com/mcp/v1",
+                     scopes: ["https://www.googleapis.com/auth/calendar"],
+                     client: google, category: .mail),
+        MCPConnector("googledrive", "Google Drive", "https://drivemcp.googleapis.com/mcp/v1",
+                     scopes: ["https://www.googleapis.com/auth/drive"],
+                     client: google, category: .docs),
+        MCPConnector("dropbox", "Dropbox", "https://mcp.dropbox.com/mcp", category: .docs),
+        MCPConnector("granola", "Granola", "https://mcp.granola.ai/mcp", category: .docs),
+        MCPConnector("miro", "Miro", "https://mcp.miro.com/", category: .projects),
+        MCPConnector("vercel", "Vercel", "https://mcp.vercel.com"),
+        MCPConnector("cloudflare", "Cloudflare", "https://mcp.cloudflare.com/mcp"),
+        MCPConnector("supabase", "Supabase", "https://mcp.supabase.com/mcp",
+                     defaultTools: ["list_projects", "list_tables", "execute_sql", "get_logs", "search_docs"]),
+        MCPConnector("stripe", "Stripe", "https://mcp.stripe.com"),
+        // Netlify lists a scope of its own for Claude; ask only for the general ones.
+        MCPConnector("netlify", "Netlify", "https://netlify-mcp.netlify.app/mcp",
+                     scopes: ["offline_access", "read", "write"]),
+        MCPConnector("huggingface", "Hugging Face", "https://huggingface.co/mcp"),
+        MCPConnector("github", "GitHub", "https://api.githubcopilot.com/mcp/",
+                     scopes: ["repo", "read:org", "read:user", "user:email", "notifications", "gist", "read:project"],
+                     githubClientID: "Ov23lixrOXQWEKxIYhBX",
+                     defaultTools: ["get_me", "search_repositories", "get_file_contents", "search_code",
+                                    "search_issues", "issue_read", "issue_write", "search_pull_requests",
+                                    "pull_request_read", "list_issues"], category: .projects),
+    ]
+
+    static func find(_ id: String?) -> MCPConnector? {
+        all.first { $0.id == id }
+    }
+}
+
+/// What one OAuth sign-in left: the client Notchi registered for it and the
+/// tokens it got.
+struct MCPOAuthToken: Codable, Sendable {
+    var clientID: String
+    var clientSecret: String?
+    var tokenEndpoint: URL
+    var resource: String
+    var accessToken: String
+    var refreshToken: String?
+    var expiresAt: Date?
+}
+
+/// Tokens in `UserDefaults`, one entry per connector, like `APIKeyStore`'s
+/// keys: Notchi's self-signed certificate has no Team ID, so the keychain ties
+/// an item to one build and asks for the login password after every update.
+enum MCPTokenStore {
+    private static let prefix = "mcp_oauth."
+
+    static func load(_ id: String) -> MCPOAuthToken? {
+        guard let data = UserDefaults.standard.data(forKey: prefix + id) else { return nil }
+        return try? JSONDecoder().decode(MCPOAuthToken.self, from: data)
+    }
+
+    static func save(_ token: MCPOAuthToken, for id: String) {
+        guard let data = try? JSONEncoder().encode(token) else { return }
+        UserDefaults.standard.set(data, forKey: prefix + id)
+    }
+
+    static func delete(_ id: String) {
+        UserDefaults.standard.removeObject(forKey: prefix + id)
+    }
+}
+
+/// Hands out a connector's access token, refreshing it when it is about to
+/// expire or the server refused it. One refresh at a time per connector: a
+/// refresh token is single-use, so two at once would void the sign-in.
+actor MCPTokens {
+    static let shared = MCPTokens()
+
+    private var refreshing: [String: Task<MCPOAuthToken, Error>] = [:]
+
+    func accessToken(_ id: String, forceRefresh: Bool) async throws -> String {
+        let title = MCPConnector.find(id)?.title ?? id
+        guard var token = MCPTokenStore.load(id) else {
+            throw MCPError("\(title) is not connected. Connect it in Settings.")
+        }
+        let stale = token.expiresAt.map { $0.timeIntervalSinceNow < 60 } ?? false
+        if forceRefresh || stale { token = try await refresh(id, title: title, token) }
+        return token.accessToken
+    }
+
+    private func refresh(_ id: String, title: String, _ token: MCPOAuthToken) async throws -> MCPOAuthToken {
+        if let running = refreshing[id] { return try await running.value }
+        let task = Task<MCPOAuthToken, Error> {
+            guard let refreshToken = token.refreshToken else {
+                MCPTokenStore.delete(id)
+                throw MCPError("The \(title) sign-in expired. Connect it again in Settings.")
+            }
+            var fields = ["grant_type": "refresh_token", "refresh_token": refreshToken,
+                          "client_id": token.clientID]
+            if !token.resource.isEmpty { fields["resource"] = token.resource }
+            fields["client_secret"] = token.clientSecret
+            let (status, body) = try await MCPOAuth.postForm(token.tokenEndpoint, fields)
+            if (400..<500).contains(status) {
+                MCPTokenStore.delete(id)
+                throw MCPError("The \(title) sign-in expired. Connect it again in Settings.")
+            }
+            guard status == 200, let fresh = MCPOAuth.token(from: body, base: token) else {
+                throw MCPError("Could not refresh the \(title) sign-in (HTTP \(status)).")
+            }
+            MCPTokenStore.save(fresh, for: id)
+            return fresh
+        }
+        refreshing[id] = task
+        defer { refreshing[id] = nil }
+        return try await task.value
+    }
+}
+
+/// The MCP authorization flow (OAuth 2.1): find the server's authorization
+/// server, register Notchi with it (dynamic client registration), send the
+/// user to sign in with PKCE, and catch the code on a loopback port.
+enum MCPOAuth {
+    struct Server {
+        let authorize: URL
+        let token: URL
+        let register: URL?
+        let resource: String
+        let scopes: [String]
+    }
+
+    static func discover(_ url: URL) async throws -> Server {
+        var comps = URLComponents(url: url, resolvingAgainstBaseURL: false)!
+        let path = comps.path == "/" ? "" : comps.path
+        comps.query = nil
+        comps.path = "/.well-known/oauth-protected-resource" + path
+        var resource = try? await getJSON(comps.url!)
+        if resource == nil {
+            comps.path = "/.well-known/oauth-protected-resource"
+            resource = try? await getJSON(comps.url!)
+        }
+        comps.path = ""
+        let origin = comps.url!
+        let issuer = (resource?["authorization_servers"] as? [String])?.first.flatMap(URL.init(string:)) ?? origin
+
+        var meta: [String: Any]?
+        var issuerComps = URLComponents(url: issuer, resolvingAgainstBaseURL: false)!
+        let issuerPath = issuerComps.path == "/" ? "" : issuerComps.path
+        for wellKnown in ["/.well-known/oauth-authorization-server", "/.well-known/openid-configuration"] {
+            issuerComps.path = wellKnown + issuerPath
+            if let found = try? await getJSON(issuerComps.url!) { meta = found; break }
+        }
+        guard let meta,
+              let authorize = (meta["authorization_endpoint"] as? String).flatMap(URL.init(string:)),
+              let token = (meta["token_endpoint"] as? String).flatMap(URL.init(string:)) else {
+            throw MCPError("The server does not describe how to sign in.")
+        }
+        let register = (meta["registration_endpoint"] as? String).flatMap(URL.init(string:))
+        return Server(authorize: authorize, token: token, register: register,
+                      resource: (resource?["resource"] as? String) ?? url.absoluteString,
+                      scopes: (resource?["scopes_supported"] as? [String]) ?? [])
+    }
+
+    /// Registers Notchi as a public client for this one redirect address.
+    static func register(_ server: Server, redirect: String) async throws -> (id: String, secret: String?) {
+        guard let endpoint = server.register else {
+            throw MCPError("The server does not let Notchi register itself.")
+        }
+        var req = URLRequest(url: endpoint, timeoutInterval: 30)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try JSONSerialization.data(withJSONObject: [
+            "client_name": "Notchi",
+            "client_uri": "https://notch.website",
+            "logo_uri": "https://notch.website/icon-light.png",
+            "redirect_uris": [redirect],
+            "grant_types": ["authorization_code", "refresh_token"],
+            "response_types": ["code"],
+            "token_endpoint_auth_method": "none",
+        ])
+        let (data, response) = try await ProxyConfig.urlSession.data(for: req)
+        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        guard (200..<300).contains(status),
+              let body = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let id = body["client_id"] as? String else {
+            throw MCPError("Registering Notchi with the server failed (HTTP \(status)).")
+        }
+        return (id, body["client_secret"] as? String)
+    }
+
+    static func token(from body: Data, base: MCPOAuthToken) -> MCPOAuthToken? {
+        guard let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+              let access = json["access_token"] as? String else { return nil }
+        var out = base
+        out.accessToken = access
+        if let refresh = json["refresh_token"] as? String { out.refreshToken = refresh }
+        let expires = (json["expires_in"] as? NSNumber)?.doubleValue
+        out.expiresAt = expires.map { Date().addingTimeInterval($0) }
+        return out
+    }
+
+    static func postForm(_ url: URL, _ fields: [String: String]) async throws -> (Int, Data) {
+        var req = URLRequest(url: url, timeoutInterval: 30)
+        req.httpMethod = "POST"
+        req.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        req.setValue("application/json", forHTTPHeaderField: "Accept")
+        req.httpBody = Data(fields.map { "\(encode($0.key))=\(encode($0.value))" }
+            .joined(separator: "&").utf8)
+        let (data, response) = try await ProxyConfig.urlSession.data(for: req)
+        return ((response as? HTTPURLResponse)?.statusCode ?? 0, data)
+    }
+
+    private static func getJSON(_ url: URL) async throws -> [String: Any] {
+        var req = URLRequest(url: url, timeoutInterval: 20)
+        req.setValue("application/json", forHTTPHeaderField: "Accept")
+        let (data, response) = try await ProxyConfig.urlSession.data(for: req)
+        guard (response as? HTTPURLResponse)?.statusCode == 200,
+              let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw MCPError("Not found.")
+        }
+        return json
+    }
+
+    private static func encode(_ value: String) -> String {
+        var allowed = CharacterSet.alphanumerics
+        allowed.insert(charactersIn: "-._~")
+        return value.addingPercentEncoding(withAllowedCharacters: allowed) ?? value
+    }
+
+    static func randomString() -> String {
+        base64url(SymmetricKey(size: .bits256).withUnsafeBytes { Data($0) })
+    }
+
+    static func challenge(_ verifier: String) -> String {
+        base64url(Data(SHA256.hash(data: Data(verifier.utf8))))
+    }
+
+    private static func base64url(_ data: Data) -> String {
+        data.base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+    }
+}
+
+/// Settings' Connect / Disconnect for each connector.
+@MainActor
+final class MCPConnectorAuth: ObservableObject {
+    static let shared = MCPConnectorAuth()
+
+    enum Phase: Equatable {
+        case idle
+        case waiting
+        /// GitHub's device flow: the code the user enters on github.com.
+        case code(String)
+        case failed(String)
+    }
+
+    @Published private(set) var phases: [String: Phase] = [:]
+    @Published private(set) var connected: Set<String>
+
+    private struct Pending {
+        let connector: MCPConnector
+        let server: MCPOAuth.Server
+        let clientID: String
+        let clientSecret: String?
+        let redirect: String
+        let verifier: String
+        let state: String
+    }
+
+    private var listener: NWListener?
+    private var pending: Pending?
+    private var current: String?
+    private var timeoutTask: Task<Void, Never>?
+    private static let timeout: TimeInterval = 300
+
+    private init() {
+        connected = Set(MCPConnector.all.map(\.id).filter { MCPTokenStore.load($0) != nil })
+    }
+
+    func phase(_ id: String) -> Phase { phases[id] ?? .idle }
+
+    func isWaiting(_ id: String) -> Bool {
+        switch phase(id) {
+        case .waiting, .code: return true
+        default: return false
+        }
+    }
+
+    func connect(_ connector: MCPConnector) {
+        cancel()
+        current = connector.id
+        phases[connector.id] = .waiting
+        Task {
+            do {
+                if let clientID = connector.githubClientID {
+                    try await beginDevice(connector, clientID: clientID)
+                } else {
+                    try await begin(connector)
+                }
+            } catch {
+                guard current == connector.id else { return }
+                fail(error.localizedDescription)
+            }
+        }
+    }
+
+    func cancel() {
+        teardown()
+        if let id = current, isWaiting(id) { phases[id] = .idle }
+        current = nil
+        pending = nil
+    }
+
+    func disconnect(_ connector: MCPConnector) {
+        MCPTokenStore.delete(connector.id)
+        connected.remove(connector.id)
+        phases[connector.id] = .idle
+        MCPHub.shared.reload()
+    }
+
+    private func begin(_ connector: MCPConnector) async throws {
+        let port = try await listen()
+        let redirect = "http://127.0.0.1:\(port)/callback"
+        var server: MCPOAuth.Server
+        if let issued = connector.client, let authorize = issued.authorize, let token = issued.token {
+            server = MCPOAuth.Server(authorize: authorize, token: token, register: nil,
+                                     resource: "", scopes: [])
+        } else {
+            server = try await MCPOAuth.discover(connector.url)
+        }
+        let client: (id: String, secret: String?)
+        if let issued = connector.client {
+            if issued.secretKey != nil, issued.secret == nil {
+                throw MCPError("This build of Notchi has no \(connector.title) client secret.")
+            }
+            client = (issued.id, issued.secret)
+            // Google and Microsoft take no resource parameter; the scopes name the API.
+            server = MCPOAuth.Server(authorize: server.authorize, token: server.token,
+                                     register: nil, resource: "", scopes: server.scopes)
+        } else {
+            client = try await MCPOAuth.register(server, redirect: redirect)
+        }
+        guard current == connector.id else { return }
+        let verifier = MCPOAuth.randomString()
+        let state = MCPOAuth.randomString()
+        pending = Pending(connector: connector, server: server, clientID: client.id,
+                          clientSecret: client.secret, redirect: redirect,
+                          verifier: verifier, state: state)
+        var comps = URLComponents(url: server.authorize, resolvingAgainstBaseURL: false)!
+        var items = [
+            URLQueryItem(name: "response_type", value: "code"),
+            URLQueryItem(name: "client_id", value: client.id),
+            URLQueryItem(name: "redirect_uri", value: redirect),
+            URLQueryItem(name: "code_challenge", value: MCPOAuth.challenge(verifier)),
+            URLQueryItem(name: "code_challenge_method", value: "S256"),
+            URLQueryItem(name: "state", value: state),
+        ]
+        if !server.resource.isEmpty {
+            items.append(URLQueryItem(name: "resource", value: server.resource))
+        }
+        for (name, value) in (connector.client?.authParams ?? [:]).sorted(by: { $0.key < $1.key }) {
+            items.append(URLQueryItem(name: name, value: value))
+        }
+        let scopes = connector.scopes ?? server.scopes
+        if !scopes.isEmpty {
+            items.append(URLQueryItem(name: "scope", value: scopes.joined(separator: " ")))
+        }
+        comps.queryItems = (comps.queryItems ?? []) + items
+        guard let url = comps.url else { throw MCPError("Could not build the sign-in address.") }
+        NSWorkspace.shared.open(url)
+        timeoutTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(Self.timeout * 1_000_000_000))
+            guard let self, !Task.isCancelled, self.current == connector.id else { return }
+            self.cancel()
+        }
+    }
+
+    /// GitHub's device flow: get a code, copy it, open github.com/login/device,
+    /// then poll until the user approves. No client secret is involved.
+    private func beginDevice(_ connector: MCPConnector, clientID: String) async throws {
+        let scope = (connector.scopes ?? []).joined(separator: " ")
+        let (status, data) = try await MCPOAuth.postForm(
+            URL(string: "https://github.com/login/device/code")!,
+            ["client_id": clientID, "scope": scope])
+        guard status == 200,
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let deviceCode = json["device_code"] as? String,
+              let userCode = json["user_code"] as? String,
+              let verify = (json["verification_uri"] as? String).flatMap(URL.init(string:)) else {
+            let reason = ((try? JSONSerialization.jsonObject(with: data)) as? [String: Any])?["error_description"] as? String
+            throw MCPError(reason ?? "GitHub did not start the sign-in (HTTP \(status)).")
+        }
+        guard current == connector.id else { return }
+        var interval = max(5, (json["interval"] as? NSNumber)?.doubleValue ?? 5)
+        let deadline = Date().addingTimeInterval((json["expires_in"] as? NSNumber)?.doubleValue ?? 900)
+        phases[connector.id] = .code(userCode)
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(userCode, forType: .string)
+        NSWorkspace.shared.open(verify)
+
+        let tokenURL = URL(string: "https://github.com/login/oauth/access_token")!
+        while Date() < deadline {
+            try await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
+            guard current == connector.id else { return }
+            let (_, body) = try await MCPOAuth.postForm(tokenURL, [
+                "client_id": clientID, "device_code": deviceCode,
+                "grant_type": "urn:ietf:params:oauth:grant-type:device_code"])
+            let reply = (try? JSONSerialization.jsonObject(with: body) as? [String: Any]) ?? [:]
+            switch reply["error"] as? String {
+            case "authorization_pending"?:
+                continue
+            case "slow_down"?:
+                interval += 5
+                continue
+            case "access_denied"?:
+                throw MCPError("The sign-in was cancelled.")
+            case let error?:
+                throw MCPError((reply["error_description"] as? String) ?? error)
+            case nil:
+                let base = MCPOAuthToken(clientID: clientID, clientSecret: nil, tokenEndpoint: tokenURL,
+                                         resource: connector.url.absoluteString, accessToken: "",
+                                         refreshToken: nil, expiresAt: nil)
+                guard let token = MCPOAuth.token(from: body, base: base) else {
+                    throw MCPError("GitHub sent no token.")
+                }
+                guard current == connector.id else { return }
+                MCPTokenStore.save(token, for: connector.id)
+                connected.insert(connector.id)
+                phases[connector.id] = .idle
+                current = nil
+                MCPHub.shared.reload()
+                return
+            }
+        }
+        throw MCPError("The code expired. Connect again.")
+    }
+
+    /// A loopback-only listener; returns its port once it is ready.
+    private func listen() async throws -> UInt16 {
+        let params = NWParameters.tcp
+        params.requiredLocalEndpoint = NWEndpoint.hostPort(host: "127.0.0.1", port: .any)
+        let listener = try NWListener(using: params)
+        self.listener = listener
+        listener.newConnectionHandler = { [weak self] conn in
+            conn.start(queue: .main)
+            Task { @MainActor in self?.read(conn, accumulated: Data()) }
+        }
+        return try await withCheckedThrowingContinuation { (cont: CheckedContinuation<UInt16, Error>) in
+            var resumed = false
+            listener.stateUpdateHandler = { state in
+                guard !resumed else { return }
+                switch state {
+                case .ready:
+                    resumed = true
+                    if let port = listener.port?.rawValue {
+                        cont.resume(returning: port)
+                    } else {
+                        cont.resume(throwing: MCPError("Could not open a local port for the sign-in."))
+                    }
+                case .failed, .cancelled:
+                    resumed = true
+                    cont.resume(throwing: MCPError("Could not open a local port for the sign-in."))
+                default:
+                    break
+                }
+            }
+            listener.start(queue: .main)
+        }
+    }
+
+    private func read(_ conn: NWConnection, accumulated: Data) {
+        conn.receive(minimumIncompleteLength: 1, maximumLength: 8192) { [weak self] data, _, complete, error in
+            Task { @MainActor in
+                guard let self else { conn.cancel(); return }
+                var buf = accumulated
+                if let data { buf.append(data) }
+                if let head = String(data: buf, encoding: .utf8), head.contains("\r\n\r\n") {
+                    self.route(conn, head: head)
+                } else if error != nil || complete || buf.count > 16384 {
+                    conn.cancel()
+                } else {
+                    self.read(conn, accumulated: buf)
+                }
+            }
+        }
+    }
+
+    private func route(_ conn: NWConnection, head: String) {
+        let parts = head.components(separatedBy: " ")
+        guard parts.count >= 2, let target = URLComponents(string: parts[1]),
+              target.path == "/callback", let pending else {
+            respond(conn, status: "404 Not Found", body: "")
+            return
+        }
+        let query = { (name: String) in target.queryItems?.first { $0.name == name }?.value }
+        guard query("state") == pending.state else {
+            respond(conn, status: "400 Bad Request", body: "")
+            return
+        }
+        let title = pending.connector.title
+        guard let code = query("code"), !code.isEmpty else {
+            respond(conn, status: "200 OK", body: Self.page("\(title) was not connected. You can close this tab."))
+            fail("The sign-in was cancelled.")
+            return
+        }
+        respond(conn, status: "200 OK", body: Self.page("\(title) is connected. You can close this tab and go back to Notchi."))
+        teardown()
+        Task { await exchange(code, pending) }
+    }
+
+    private func exchange(_ code: String, _ pending: Pending) async {
+        var fields = ["grant_type": "authorization_code", "code": code,
+                      "redirect_uri": pending.redirect, "client_id": pending.clientID,
+                      "code_verifier": pending.verifier]
+        if !pending.server.resource.isEmpty { fields["resource"] = pending.server.resource }
+        fields["client_secret"] = pending.clientSecret
+        let base = MCPOAuthToken(clientID: pending.clientID, clientSecret: pending.clientSecret,
+                                 tokenEndpoint: pending.server.token, resource: pending.server.resource,
+                                 accessToken: "", refreshToken: nil, expiresAt: nil)
+        do {
+            let (status, body) = try await MCPOAuth.postForm(pending.server.token, fields)
+            guard status == 200, let token = MCPOAuth.token(from: body, base: base) else {
+                fail("\(pending.connector.title) did not accept the sign-in (HTTP \(status)).")
+                return
+            }
+            let id = pending.connector.id
+            MCPTokenStore.save(token, for: id)
+            connected.insert(id)
+            phases[id] = .idle
+            current = nil
+            self.pending = nil
+            MCPHub.shared.reload()
+        } catch {
+            fail(error.localizedDescription)
+        }
+    }
+
+    private func fail(_ message: String) {
+        teardown()
+        if let id = current { phases[id] = .failed(message) }
+        current = nil
+        pending = nil
+    }
+
+    private func teardown() {
+        listener?.cancel()
+        listener = nil
+        timeoutTask?.cancel()
+        timeoutTask = nil
+    }
+
+    private func respond(_ conn: NWConnection, status: String, body: String) {
+        let payload = Data(body.utf8)
+        let head = "HTTP/1.1 \(status)\r\nContent-Type: text/html; charset=utf-8\r\n"
+            + "Content-Length: \(payload.count)\r\nConnection: close\r\n\r\n"
+        conn.send(content: Data(head.utf8) + payload, completion: .contentProcessed { _ in conn.cancel() })
+    }
+
+    private static func page(_ text: String) -> String {
+        """
+        <!doctype html><meta charset="utf-8"><title>Notchi</title>
+        <body style="font:15px -apple-system,sans-serif;display:flex;height:90vh;align-items:center;justify-content:center;color:#333">
+        <p>\(text)</p></body>
+        """
     }
 }

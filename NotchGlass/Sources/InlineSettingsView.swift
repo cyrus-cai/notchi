@@ -176,6 +176,98 @@ private struct TelegramStepPill: View {
     }
 }
 
+/// One row of the connectors table: logo tile, name, then the status column —
+/// Connect, a check once signed in (Disconnect on hover), Cancel while the
+/// browser sign-in is open. A failure's reason goes under the name.
+private struct ConnectorTableRow: View {
+    let connector: MCPConnector
+    @ObservedObject var auth: MCPConnectorAuth
+    @ObservedObject var hub: MCPHub
+    @State private var hovering = false
+
+    var body: some View {
+        let phase = auth.phase(connector.id)
+        let connected = auth.connected.contains(connector.id)
+        let server = hub.servers.first { $0.name == connector.id }
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 10) {
+                tile
+                Text(connector.title)
+                    .font(.sf(Tokens.TypeSize.form))
+                    .foregroundStyle(Tokens.text1)
+                    .lineLimit(1)
+                Spacer(minLength: 12)
+                Group {
+                    if connected {
+                        if hovering {
+                            TelegramStepPill(title: L("connector.disconnect")) { auth.disconnect(connector) }
+                        } else {
+                            Image(systemName: "checkmark")
+                                .font(.system(size: 13, weight: .regular))
+                                .foregroundStyle(Tokens.text2)
+                                .padding(.trailing, 11)
+                        }
+                    } else if auth.isWaiting(connector.id) {
+                        TelegramStepPill(title: L("connector.cancel")) { auth.cancel() }
+                    } else {
+                        TelegramStepPill(title: L("connector.connect")) { auth.connect(connector) }
+                    }
+                }
+                .frame(width: 104, alignment: .trailing)
+            }
+            .frame(height: 40)
+            // The 40pt row centers the name, leaving 12pt under it; the note
+            // sits close under the name instead.
+            Group {
+            if case .code(let code) = phase {
+                note(L("connector.code", code), color: Tokens.text3)
+            } else if phase == .waiting {
+                note(L("connector.waiting"), color: Tokens.text3)
+            } else if case .failed(let message) = phase {
+                note(message, color: Tokens.danger)
+            } else if connected, case .failed(let reason)? = server?.status {
+                HStack(alignment: .firstTextBaseline, spacing: 10) {
+                    note(reason, color: Tokens.text3)
+                    UnderlineLink(title: L("mcp.retry")) { hub.restart(connector.id) }
+                        .fixedSize()
+                }
+            }
+            }
+            .padding(.top, -14)
+        }
+        .padding(.bottom, phase == .idle && !(connected && isFailed(server)) ? 0 : 8)
+        .contentShape(Rectangle())
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
+    }
+
+    private func isFailed(_ server: MCPHub.Server?) -> Bool {
+        if case .failed? = server?.status { return true }
+        return false
+    }
+
+    private func note(_ text: String, color: Color) -> some View {
+        Text(text)
+            .font(.sf(Tokens.TypeSize.meta))
+            .foregroundStyle(color)
+            .lineLimit(2)
+            .textSelection(.enabled)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.leading, 34)
+    }
+
+    private var tile: some View {
+        // Each brand's own current icon, taken from its website or Google's
+        // product branding, in Assets.xcassets as ConnectorLogo-<id>.
+        Image("ConnectorLogo-\(connector.id)")
+            .resizable()
+            .interpolation(.high)
+            .frame(width: 24, height: 24)
+            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+            .shadow(color: .black.opacity(0.25), radius: 1.5, y: 0.5)
+    }
+}
+
 /// Settings rendered *inside* the notch panel, in place of the recent list —
 /// not a separate window — wearing the panel's Liquid Glass skin so it reads as
 /// part of the island. The gear and ⌘, both swap the RECENT block for
@@ -185,6 +277,10 @@ struct InlineSettingsView: View {
     /// Respected wherever this pane animates a size or a position rather than a
     /// colour — the balance block's stepper unfolding, chiefly.
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    /// The pane height when Settings is hosted in its own window
+    /// (`SettingsWindowController`); nil inside the panel.
+    @Environment(\.settingsWindowPaneHeight) private var windowPaneHeight
+    private var inWindow: Bool { windowPaneHeight != nil }
     /// Self-update state (shared app-wide — the gear badge reads the same object).
     /// Drives the Version row: a quiet number normally, an Update action when a
     /// newer release is known.
@@ -253,6 +349,7 @@ struct InlineSettingsView: View {
     /// instructions above it.
     @ObservedObject private var memory = UserMemory.shared
     @ObservedObject private var mcp = MCPHub.shared
+    @ObservedObject private var connectorAuth = MCPConnectorAuth.shared
     @ObservedObject private var telegram = TelegramBridge.shared
     @ObservedObject private var instaBox = InstaBoxAccount.shared
     @State private var telegramToken = ""
@@ -260,6 +357,9 @@ struct InlineSettingsView: View {
     @State private var telegramSetupOpen = false
     @State private var telegramConfirmForget = false
     @State private var telegramBoardCount = NSPasteboard.general.changeCount
+    /// The open group in the connectors table. One tab shows one category's
+    /// rows, so the table keeps a single heading over a short list.
+    @State private var connectorCategory: MCPConnector.Category = .docs
     @ObservedObject private var clipboardHistory = ClipboardHistory.shared
     /// Memory files as edited on the Memory page, by file name. Seeded from
     /// disk on first read; each edit is written straight back.
@@ -445,7 +545,9 @@ struct InlineSettingsView: View {
     enum Section: String, CaseIterable, Identifiable {
         case model = "Model"     // who answers: provider, API key, model override — and the search backend behind it
         case chat = "Chat"       // how a conversation behaves: custom instructions, lid-closed answers, cloud machine, memory, copy sensing, message sounds
-        case connect = "Connect" // other places that reach Notchi: the user's own Telegram bot
+        case memories = "Memories" // memory switches; the files open in `.memory`
+        case connect = "Connect" // third-party connectors
+        case channels = "Channels" // other places that reach Notchi: the user's own Telegram bot
         case appearance = "Appearance" // notch style, interaction, and display placement
         case shortcuts = "Shortcuts" // editable keyboard controls, its own top-level settings category
         case general = "General" // language, app presence, note destination, permissions, + Advanced (proxy)
@@ -473,7 +575,7 @@ struct InlineSettingsView: View {
             switch self {
             case .licenses, .survey: return .about
             case .usage, .pricing, .balances, .privacy: return .model
-            case .memory: return .chat
+            case .memory: return .memories
             default:               return nil
             }
         }
@@ -485,7 +587,16 @@ struct InlineSettingsView: View {
         /// bands live in the ORDER and nowhere else — what answers and what it
         /// takes in, then how the app presents and behaves, then the two pages
         /// that only report.
-        static var sidebarCases: [Section] { allCases.filter { !$0.isDetail } }
+        static var sidebarCases: [Section] { sidebarGroups.flatMap(\.sections) }
+
+        /// The sidebar's groups, in order. A nil title is a group of top-level
+        /// rows with no heading.
+        static let sidebarGroups: [(titleKey: String?, sections: [Section])] = [
+            ("settings.group.agent", [.model, .chat, .memories]),
+            ("settings.group.personal", [.general, .appearance, .shortcuts]),
+            ("settings.group.features", [.connect, .channels]),
+            (nil, [.stats, .about]),
+        ]
 
         /// The sidebar label, localized. The raw value stays English (a stable
         /// identity); this is what the user actually reads.
@@ -493,7 +604,9 @@ struct InlineSettingsView: View {
             switch self {
             case .model:      return L("sidebar.model")
             case .chat:       return L("sidebar.chat")
-            case .connect:    return L("sidebar.connect")
+            case .connect:    return L("connect.connectors")
+            case .channels:   return L("connect.channels")
+            case .memories:   return L("memory.title")
             case .general:    return L("sidebar.general")
             case .shortcuts:  return L("sidebar.shortcuts")
             case .appearance: return L("sidebar.appearance")
@@ -718,6 +831,29 @@ struct InlineSettingsView: View {
 
                     paneContent
                         .padding(.leading, 14)
+                        .background {
+                            // Settings window only: the right pane is a darker
+                            // panel with a rounded leading corner, 8pt below
+                            // the window's top edge.
+                            if inWindow {
+                                GeometryReader { g in
+                                    let top = g.frame(in: .global).minY
+                                    UnevenRoundedRectangle(topLeadingRadius: 12,
+                                                           style: .continuous)
+                                        .fill(Color.black.opacity(0.3))
+                                        .overlay {
+                                            UnevenRoundedRectangle(topLeadingRadius: 12,
+                                                                   style: .continuous)
+                                                .strokeBorder(.white.opacity(0.07), lineWidth: 1)
+                                        }
+                                        .padding(.top, -(top - 8))
+                                        .padding(.trailing, -(NotchBody.panelPadding + 1))
+                                        .padding(.bottom, -(NotchBody.panelPadding + 1))
+                                        .padding(.leading, -4)
+                                }
+                                .allowsHitTesting(false)
+                            }
+                        }
                 }
                 .overlay(alignment: .topLeading) {
                     sidebar()
@@ -953,8 +1089,16 @@ struct InlineSettingsView: View {
     /// category switch (or re-measure on every layout pass).
     private static let headerChrome: CGFloat = 12 + Tokens.Control.header + 4 + 12
     private var settingsPaneHeight: CGFloat {
-        NotchBody.immersiveListHeight - Self.headerChrome
+        windowPaneHeight ?? (NotchBody.immersiveListHeight - Self.headerChrome)
     }
+
+    /// The window's titlebar is a unified toolbar row; the header sits in it,
+    /// right of the traffic lights.
+    static let windowHeaderTop: CGFloat = 13
+    static let windowHeaderLeading: CGFloat = 78
+    /// Height of everything above the pane in the window: header row and the
+    /// 12pt gap the panel uses.
+    static let windowChrome: CGFloat = windowHeaderTop + Tokens.Control.header + 4 + 12
 
     /// Carries the open pane's measured content height out of the scroll view.
     private struct PaneContentHeightKey: PreferenceKey {
@@ -994,6 +1138,12 @@ struct InlineSettingsView: View {
     private static let paneTopRunway: CGFloat = 14
     private static let paneTopFade: CGFloat = 34
 
+    /// The room a group heading takes above itself, on top of the pane's 14pt
+    /// row rhythm. A heading opens a group, so its gap above must be visibly
+    /// wider than the gap between two rows; without it the next group reads as
+    /// more rows of the one before and the whole pane runs together.
+    private static let groupHeadingGap: CGFloat = 16
+
     /// Whether the open pane is scrolled off its top — all the top taper needs to
     /// know. A Bool, not the live offset: driving the gradient's LENGTH from the
     /// offset rebuilt the pane's mask on every scroll tick, which is what made
@@ -1010,6 +1160,11 @@ struct InlineSettingsView: View {
     /// reason: at rest the first card sits flush at 0, so a permanent leading
     /// taper would thin a card nothing is scrolling past.
     @State private var promptShortcutRailScrolled = false
+
+    /// The ready-made action in the rail the pointer is over, if any. Kept apart
+    /// from `hoveredPromptTemplateID` (the picker's cover flow) so a ghost card
+    /// and the picker card for the same template never light each other.
+    @State private var hoveredPromptTemplateGhostID: String?
 
     /// The open section's pane. Lives apart from `body` because it is drawn in
     /// two different frames — in the right-hand column beside the sidebar for a
@@ -1063,7 +1218,7 @@ struct InlineSettingsView: View {
                 // group as the alternative to the wallet above.
                 Text(L("model.byok"))
                     .captionLabel()
-                    .padding(.top, 2)
+                    .padding(.top, Self.groupHeadingGap)
                 providerRow
                 // A model list for a provider that cannot answer yet is a choice
                 // with nothing behind it; it appears once the key or sign-in lands.
@@ -1075,7 +1230,7 @@ struct InlineSettingsView: View {
                 // "which model, whose key" choices.
                 Text(L("decision.title"))
                     .captionLabel()
-                    .padding(.top, 2)
+                    .padding(.top, Self.groupHeadingGap)
                 decisionModelRow
                 switch decisionModel {
                 case .jev:    EmptyView()
@@ -1090,7 +1245,7 @@ struct InlineSettingsView: View {
                 // group rather than its own category.
                 Text(L("sidebar.search"))
                     .captionLabel()
-                    .padding(.top, 2)
+                    .padding(.top, Self.groupHeadingGap)
                 searchBackendRow
                     // No stored pick yet → commit the shown default so the
                     // UI and what actually runs never disagree.
@@ -1121,22 +1276,16 @@ struct InlineSettingsView: View {
                 //     .captionLabel()
                 //     .padding(.top, 2)
                 // mcpSection
-                Text(L("memory.title"))
+                Text(L("capture.sources"))
                     .captionLabel()
-                    .padding(.top, 2)
+                    .padding(.top, Self.groupHeadingGap)
+                copySenseRow
+            case .memories:
                 memoryEnableRow
                 if memory.enabled {
                     if ClipboardHistory.available { memoryClipboardRow }
                     UnderlineLink(title: L("memory.manage")) { open(.memory) }
                 }
-                Text(L("capture.sources"))
-                    .captionLabel()
-                    .padding(.top, 2)
-                copySenseRow
-                Text(L("chat.group.effects"))
-                    .captionLabel()
-                    .padding(.top, 2)
-                messageSoundsRow
             case .general:
                 // App-level settings: how it talks to you, launch, the app's
                 // icons (app icon, Dock, menu bar icon), where notes are saved,
@@ -1145,7 +1294,7 @@ struct InlineSettingsView: View {
                 launchAtLoginRow
                 Text(L("general.appPresence"))
                     .captionLabel()
-                    .padding(.top, 2)
+                    .padding(.top, Self.groupHeadingGap)
                 if AppIconStyleFeature.isEnabled {
                     appIconStyleRow
                 }
@@ -1153,7 +1302,7 @@ struct InlineSettingsView: View {
                 menuBarIconStyleRow
                 Text(L("capture.destination"))
                     .captionLabel()
-                    .padding(.top, 2)
+                    .padding(.top, Self.groupHeadingGap)
                 noteDestinationRow
                 permissionsSection
                 advancedSection
@@ -1174,11 +1323,25 @@ struct InlineSettingsView: View {
                 liveActivityRow
                 Text(L("appearance.displays"))
                     .captionLabel()
-                    .padding(.top, 2)
+                    .padding(.top, Self.groupHeadingGap)
                 placementRow
                 fullscreenAutoHideRow
-            case .connect:
+                Text(L("chat.group.effects"))
+                    .captionLabel()
+                    .padding(.top, Self.groupHeadingGap)
+                messageSoundsRow
+            case .channels:
                 telegramSection
+            case .connect:
+                // One tab per group that has connectors, then that group's rows:
+                // the tab is the heading, so each row needs no caption of its own.
+                VStack(alignment: .leading, spacing: 6) {
+                    connectorCategoryTabs
+                    ForEach(MCPConnector.all.filter { $0.category == activeConnectorCategory }) { connector in
+                        ConnectorTableRow(connector: connector, auth: connectorAuth, hub: mcp)
+                    }
+                }
+                .animation(.easeOut(duration: 0.18), value: activeConnectorCategory)
             case .stats:
                 statsSection
             case .about:
@@ -1314,14 +1477,55 @@ struct InlineSettingsView: View {
     /// `measuring` is the hidden copy that only holds the column's size; it
     /// draws no selection capsule, so the sliding capsule has one source.
     private func sidebar(measuring: Bool = false) -> some View {
+        // In the panel the pane is a fixed 266pt and the grouped list is taller,
+        // so the list scrolls inside that height instead of running past the
+        // panel's glass. The window is tall enough to show it whole.
+        Group {
+            if inWindow {
+                sidebarList(measuring: measuring)
+            } else {
+                ScrollView(.vertical) {
+                    sidebarList(measuring: measuring)
+                }
+                .scrollIndicators(.never)
+                .frame(height: settingsPaneHeight)
+            }
+        }
+        .frame(width: 104, alignment: .topLeading)
+        .padding(.trailing, 12)
+    }
+
+    private func sidebarList(measuring: Bool) -> some View {
         VStack(alignment: .leading, spacing: 2) {
-            ForEach(Section.sidebarCases) { s in
-                sidebarItem(s, measuring: measuring)
+            // The window has no back pill on a category, so the sidebar names
+            // the window.
+            if inWindow {
+                Text(L("settings.title"))
+                    .font(.sf(17, weight: .semibold))
+                    .foregroundStyle(Tokens.text1)
+                    .lineLimit(1)
+                    .padding(.horizontal, 10)
+                    .padding(.bottom, 14)
+            }
+            ForEach(Array(Section.sidebarGroups.enumerated()), id: \.offset) { index, group in
+                if let key = group.titleKey {
+                    Text(L(key))
+                        .font(.sf(Tokens.TypeSize.meta, weight: .medium))
+                        .foregroundStyle(Tokens.text4)
+                        .lineLimit(1)
+                        .padding(.horizontal, 10)
+                        .padding(.top, index == 0 ? 0 : 12)
+                        .padding(.bottom, 2)
+                } else {
+                    Color.clear.frame(height: 12)
+                }
+                ForEach(group.sections) { s in
+                    sidebarItem(s, measuring: measuring)
+                }
             }
             Spacer(minLength: 0)
         }
         .frame(width: 104, alignment: .topLeading)
-        .padding(.trailing, 12)
     }
 
     private func sidebarItem(_ s: Section, measuring: Bool) -> some View {
@@ -1488,6 +1692,7 @@ struct InlineSettingsView: View {
     /// so the pill never skips a floor.
     private var header: some View {
         HStack(spacing: 10) {
+            if !inWindow || section.parent != nil {
             PanelBackPill(
                 title: section.isDetail ? section.title : L("settings.title"),
                 help: section.parent.map { L("navigation.backTo", $0.title) }
@@ -1500,6 +1705,7 @@ struct InlineSettingsView: View {
                         model.closeSettings()
                     }
                 }
+            }
             }
 
             Spacer()
@@ -1527,6 +1733,7 @@ struct InlineSettingsView: View {
                 // offering the click that releases it. Recent isn't reachable from
                 // Settings, so the cluster carries the pin alone. 26pt to sit at the
                 // back pill's height — the header's row height feeds `headerChrome`.
+                if !inWindow {
                 IdleTrailingCluster(
                     pinned: model.isAnswerPinned,
                     recentOpen: false,
@@ -1539,10 +1746,13 @@ struct InlineSettingsView: View {
                     },
                     toggleRecent: {}
                 )
+                }
             }
         }
-        .padding(.horizontal, 8)
-        .padding(.top, 12)
+        .frame(height: Tokens.Control.header)
+        .padding(.leading, inWindow ? Self.windowHeaderLeading - NotchBody.panelPadding : 8)
+        .padding(.trailing, 8)
+        .padding(.top, inWindow ? Self.windowHeaderTop : 12)
         .padding(.bottom, 4)
         .animation(.easeOut(duration: Tokens.rowFade), value: statsHover)
         .animation(.spring(response: 0.34, dampingFraction: 0.82), value: model.isAnswerPinned)
@@ -2723,8 +2933,11 @@ struct InlineSettingsView: View {
                     // Sold below the upstream's list price; the gateway sends
                     // the fraction as `savings`.
                     if let label = row.pricing?.discountLabel {
-                        DiscountTag(text: label)
-                            .padding(.leading, 3)
+                        // A fully discounted row shows FREE in its rate cells.
+                        if row.pricing?.isFullyDiscounted != true {
+                            DiscountTag(text: label)
+                                .padding(.leading, 3)
+                        }
                         if let line = row.pricing?.saleLine {
                             SettingInfo(line)
                         }
@@ -2737,7 +2950,7 @@ struct InlineSettingsView: View {
             // A model billed one rate for all input quotes no cached rate, and
             // the cell is a dash rather than a repeat of the input figure.
             pricingRate(row.pricing?.cachedInputPerMTok)
-            pricingRate(row.pricing?.outputPerMTok, limitedFree: true)
+            pricingRate(row.pricing?.outputPerMTok)
             Text(L(pricingOriginKey(row)))
                 .font(.sf(Tokens.TypeSize.meta))
                 .foregroundStyle(Tokens.text3)
@@ -2763,12 +2976,11 @@ struct InlineSettingsView: View {
     /// A per-1M-token rate; "/M" is the unit. While the fetch this page started
     /// has not landed, a spinner rather than the last figure seen: that may be
     /// the price that just changed, which is why we asked. A $0 rate is a
-    /// FREE tag; a $0 output rate says it is free for now, since it may not
-    /// stay free.
+    /// FREE tag.
     @ViewBuilder
-    private func pricingRate(_ usd: Double?, limitedFree: Bool = false) -> some View {
+    private func pricingRate(_ usd: Double?) -> some View {
         if usd == 0 {
-            FreeTag(limited: limitedFree)
+            FreeTag()
         } else if let usd {
             HStack(alignment: .firstTextBaseline, spacing: 1) {
                 Self.moneyText(usd, size: Tokens.TypeSize.label)
@@ -3755,6 +3967,34 @@ struct InlineSettingsView: View {
     private var modelRow: some View {
         settingRow(label: L("model.label")) {
             HStack(spacing: 6) {
+                // Manual refresh, left of the chip so the chip stays on the right edge: the automatic paths are all cached (the curated
+                // manifest for 6h, a vendor's `/v1/models` for an hour, the CLI
+                // catalogs for the whole launch), which is right until a model ships
+                // mid-session and the list you're looking at is the stale one. One
+                // tap re-asks every backend. Doubles as the load indicator.
+                Button {
+                    Task { await manualRefreshModels() }
+                } label: {
+                    ZStack {
+                        if modelsBusy {
+                            ProgressView()
+                                .controlSize(.small)
+                                .scaleEffect(0.8)
+                        } else {
+                            Image(systemName: "arrow.clockwise")
+                                .font(.sf(Tokens.TypeSize.meta, weight: .semibold))
+                                .foregroundStyle(Tokens.text3)
+                        }
+                    }
+                    // Square frame so the chip style's capsule resolves to a true
+                    // circle rather than a vertical oval.
+                    .frame(width: Tokens.Control.chip, height: Tokens.Control.chip)
+                }
+                .buttonStyle(ShortcutChipStyle(rest: 0.055, restStroke: 0.1))
+                .disabled(modelsBusy)
+                .notchTooltip(L("model.refresh"))
+                .opacity(refreshVisible ? 1 : 0)
+                .allowsHitTesting(refreshVisible)
                 // The chip anchors the model picker as a native popover.
                 // A popover opens in its own window outside the island's tracking
                 // area, so `model.isModelPickerOpen` suspends the panel's
@@ -3793,34 +4033,6 @@ struct InlineSettingsView: View {
                     if modelPickerOpen { Task { await catalog.loadAll() } }
                     model.isModelPickerOpen = modelPickerOpen || promptModelPickerOpen
                 }
-                // Manual refresh: the automatic paths are all cached (the curated
-                // manifest for 6h, a vendor's `/v1/models` for an hour, the CLI
-                // catalogs for the whole launch), which is right until a model ships
-                // mid-session and the list you're looking at is the stale one. One
-                // tap re-asks every backend. Doubles as the load indicator.
-                Button {
-                    Task { await manualRefreshModels() }
-                } label: {
-                    ZStack {
-                        if modelsBusy {
-                            ProgressView()
-                                .controlSize(.small)
-                                .scaleEffect(0.8)
-                        } else {
-                            Image(systemName: "arrow.clockwise")
-                                .font(.sf(Tokens.TypeSize.meta, weight: .semibold))
-                                .foregroundStyle(Tokens.text3)
-                        }
-                    }
-                    // Square frame so the chip style's capsule resolves to a true
-                    // circle rather than a vertical oval.
-                    .frame(width: Tokens.Control.chip, height: Tokens.Control.chip)
-                }
-                .buttonStyle(ShortcutChipStyle(rest: 0.055, restStroke: 0.1))
-                .disabled(modelsBusy)
-                .notchTooltip(L("model.refresh"))
-                .opacity(refreshVisible ? 1 : 0)
-                .allowsHitTesting(refreshVisible)
             }
         }
         // Fine print: the arrow shows on the row it belongs to rather than sitting
@@ -3892,31 +4104,24 @@ struct InlineSettingsView: View {
     /// the group caption above ("SHOW ON") names it, so the cards sit at the
     /// pane's left margin with no hand-tuned vertical offset to keep true.
     private var placementRow: some View {
-        HStack(alignment: .top, spacing: 12) {
-            ForEach(DisplayPlacement.allCases) { p in
-                placementCard(p)
+        settingRow(label: L("appearance.showOn"), aligned: true, verticalAlignment: .top) {
+            HStack(alignment: .top, spacing: 12) {
+                ForEach(DisplayPlacement.allCases) { p in
+                    placementCard(p)
+                }
             }
-            Spacer(minLength: 0)
         }
+        .padding(.vertical, 6)
     }
 
     private func placementCard(_ p: DisplayPlacement) -> some View {
         let selected = placement == p
-        return PickerCard(selected: selected) {
+        return PickerCard(selected: selected, label: p.label) {
             selectPlacement(p)
         } content: {
-            VStack(spacing: 7) {
-                HStack(alignment: .bottom, spacing: 8) {
-                    MiniDisplay(kind: .laptop, hasIsland: true)
-                    MiniDisplay(kind: .external, hasIsland: p == .all)
-                }
-                // The unselected diagram dims as a whole so the bright pills
-                // read as "what you'd get", not as a second active choice.
-                .opacity(selected ? 1 : 0.55)
-                Text(p.label)
-                    .font(.sf(Tokens.TypeSize.meta, weight: selected ? .medium : .regular))
-                    .foregroundStyle(selected ? Tokens.text1 : Tokens.text3)
-                    .lineLimit(1)
+            HStack(alignment: .bottom, spacing: 8) {
+                MiniDisplay(kind: .laptop, hasIsland: true)
+                MiniDisplay(kind: .external, hasIsland: p == .all)
             }
         }
     }
@@ -3939,27 +4144,21 @@ struct InlineSettingsView: View {
                 }
             }
         }
+        .padding(.vertical, 6)
     }
 
     private func appIconStyleCard(_ style: AppIconStyle) -> some View {
         let selected = appIconStyle == style
-        return PickerCard(selected: selected, width: 80) {
+        return PickerCard(selected: selected, label: style.label) {
             selectAppIconStyle(style)
         } content: {
-            VStack(spacing: 5) {
-                if let icon = style.image {
-                    Image(nsImage: icon)
-                        .resizable()
-                        .scaledToFit()
-                        .scaleEffect(style.previewScale)
-                        .frame(width: 34, height: 34)
-                        .clipped()
-                }
-                Text(style.label)
-                    .font(.sf(Tokens.TypeSize.caption, weight: selected ? .medium : .regular))
-                    .foregroundStyle(selected ? Tokens.text1 : Tokens.text3)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.8)
+            if let icon = style.image {
+                Image(nsImage: icon)
+                    .resizable()
+                    .scaledToFit()
+                    .scaleEffect(style.previewScale)
+                    .frame(width: 34, height: 34)
+                    .clipped()
             }
         }
     }
@@ -4044,6 +4243,7 @@ struct InlineSettingsView: View {
                 menuBarIconOffCard
             }
         }
+        .padding(.vertical, 6)
     }
 
     private func menuBarIconStyleCard(_ style: MenuBarIconStyle) -> some View {
@@ -4073,12 +4273,11 @@ struct InlineSettingsView: View {
         selected: Bool, label: String, action: @escaping () -> Void,
         @ViewBuilder glyph: @escaping () -> Glyph
     ) -> some View {
-        PickerCard(selected: selected, width: 64, action: action) {
+        PickerCard(selected: selected, label: label, action: action) {
             glyph()
-                .foregroundStyle(selected ? Tokens.text1 : Tokens.text3)
+                .foregroundStyle(Tokens.text1)
                 .frame(width: 34, height: 34)
         }
-        .accessibilityLabel(label)
     }
 
     private func selectMenuBarIconStyle(_ newValue: MenuBarIconStyle) {
@@ -4902,15 +5101,29 @@ struct InlineSettingsView: View {
     /// `general.fullscreenAutoHide` label keep the old polarity too, matching
     /// the key they're named for.
     private var fullscreenAutoHideRow: some View {
-        settingRow(label: L("general.fullscreenAutoHide.toggle"), aligned: true) {
-            Toggle("", isOn: Binding(
-                get: { !hideInFullscreen },
-                set: { Haptics.levelChange(); selectHideInFullscreen(!$0) }
-            ))
-            .labelsHidden()
-            .toggleStyle(.switch)
-            .controlSize(.mini)
-            .tint(Tokens.text2)
+        settingRow(label: L("general.fullscreenAutoHide.toggle"), aligned: true, verticalAlignment: .top) {
+            HStack(spacing: 8) {
+                ForEach([true, false], id: \.self) { show in
+                    onOffCard(on: show, selected: !hideInFullscreen == show) {
+                        Haptics.levelChange(); selectHideInFullscreen(!show)
+                    } diagram: { FullscreenDiagram(showsNotch: show) }
+                }
+            }
+        }
+        .padding(.vertical, 6)
+    }
+
+    /// One half of an on/off pair drawn as a picture: the diagram over "On"
+    /// or "Off", in the display-placement cards' style.
+    private func onOffCard<Diagram: View>(on: Bool, selected: Bool,
+                                          action: @escaping () -> Void,
+                                          @ViewBuilder diagram: () -> Diagram) -> some View {
+        let picture = diagram()
+        return PickerCard(selected: selected,
+                          label: L(on ? "settings.option.on" : "settings.option.off")) {
+            if !selected { action() }
+        } content: {
+            picture
         }
     }
 
@@ -4921,16 +5134,17 @@ struct InlineSettingsView: View {
     private var liveActivityRow: some View {
         settingRow(label: L("appearance.liveActivity"),
                    info: L("appearance.liveActivity.hint"),
-                   aligned: true) {
-            Toggle("", isOn: Binding(
-                get: { model.liveActivityEnabled },
-                set: { Haptics.levelChange(); model.liveActivityEnabled = $0 }
-            ))
-            .labelsHidden()
-            .toggleStyle(.switch)
-            .controlSize(.mini)
-            .tint(Tokens.text2)
+                   aligned: true,
+                   verticalAlignment: .top) {
+            HStack(spacing: 8) {
+                ForEach([true, false], id: \.self) { on in
+                    onOffCard(on: on, selected: model.liveActivityEnabled == on) {
+                        Haptics.levelChange(); model.liveActivityEnabled = on
+                    } diagram: { LiveActivityDiagram(on: on) }
+                }
+            }
         }
+        .padding(.vertical, 6)
     }
 
     /// The message tones: sending, each reply bubble landing, and a reaction.
@@ -5006,6 +5220,8 @@ struct InlineSettingsView: View {
                     SettingActionButton(title: L("model.test")) { testDecisionModel() }
                 }
             }
+            // The field sits at the pane's right edge, so Test does too.
+            .frame(maxWidth: .infinity, alignment: .trailing)
         }
         if let result = decisionTestResult {
             statusPill(ok: result.isOK, message: result.isOK ? L("decision.test.ok") : result.message)
@@ -5029,6 +5245,16 @@ struct InlineSettingsView: View {
         }
     }
 
+    /// The decision model's three inputs share one grid: a 64pt label column,
+    /// a 12pt gap, then the field, which stops at `decisionFieldWidth` instead
+    /// of running to the pane edge. These hold a server URL, a key and a model
+    /// id — short values that read as a form here and as a page at full width.
+    private static let decisionLabelWidth: CGFloat = 64
+    private static let decisionFieldWidth: CGFloat = 280
+    private static var decisionRowWidth: CGFloat {
+        decisionLabelWidth + 12 + decisionFieldWidth
+    }
+
     private func decisionField(label: String, placeholder: String, text: Binding<String>,
                                secure: Bool = false,
                                commit: @escaping (String) -> Void) -> some View {
@@ -5036,7 +5262,8 @@ struct InlineSettingsView: View {
             Text(label)
                 .font(.sf(Tokens.TypeSize.form, weight: .medium))
                 .foregroundStyle(Tokens.text2)
-                .frame(width: 64, alignment: .leading)
+                .frame(width: Self.decisionLabelWidth, alignment: .leading)
+            Spacer(minLength: 0)
             ZStack(alignment: .leading) {
                 if text.wrappedValue.isEmpty {
                     Text(placeholder)
@@ -5059,7 +5286,7 @@ struct InlineSettingsView: View {
             }
             .padding(.horizontal, 12)
             .frame(height: 34)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(maxWidth: Self.decisionFieldWidth, alignment: .leading)
             .recessedSurface(in: RoundedRectangle.control, lit: false)
         }
     }
@@ -5152,39 +5379,94 @@ struct InlineSettingsView: View {
         .onAppear { instaBox.refresh() }
     }
 
+    // MARK: - Connectors
+
+    /// The groups the table can show: only the ones that still have a connector
+    /// after `MCPConnector.all` drops those this build cannot sign in to.
+    private var connectorCategories: [MCPConnector.Category] {
+        MCPConnector.Category.allCases.filter { category in
+            MCPConnector.all.contains { $0.category == category }
+        }
+    }
+
+    /// The group the table is showing. Falls back to the first available one, so
+    /// a stored pick that no longer exists cannot leave the table empty.
+    private var activeConnectorCategory: MCPConnector.Category {
+        connectorCategories.contains(connectorCategory)
+            ? connectorCategory
+            : (connectorCategories.first ?? .docs)
+    }
+
+    private var connectorCategoryTabs: some View {
+        HStack(spacing: TabChip.gap) {
+            ForEach(connectorCategories, id: \.self) { category in
+                TabChip(
+                    title: L("connector.category.\(category.rawValue)"),
+                    active: category == activeConnectorCategory
+                ) {
+                    connectorCategory = category
+                }
+            }
+        }
+    }
+
     private var telegramSection: some View {
         VStack(alignment: .leading, spacing: 12) {
-            settingRow(label: L("telegram.title"), aligned: true) {
-                Toggle("", isOn: Binding(
-                    get: { telegramOn },
-                    set: { on in
-                        Haptics.levelChange()
-                        setTelegram(on)
+            // Laid out like a connector row: icon, name, and the status column.
+            // The icon keeps the name's line, so the handles below it are the
+            // row's second line and the block stays as tall as its content.
+            HStack(alignment: .top, spacing: 10) {
+                Image("ConnectorLogo-telegram")
+                    .resizable()
+                    .interpolation(.high)
+                    .frame(width: 24, height: 24)
+                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                    .shadow(color: .black.opacity(0.25), radius: 1.5, y: 0.5)
+                    // The 40pt name row centers it on the name.
+                    .padding(.top, 8)
+                VStack(alignment: .leading, spacing: 0) {
+                    HStack(spacing: 10) {
+                        Text(L("telegram.title"))
+                            .font(.sf(Tokens.TypeSize.form))
+                            .foregroundStyle(Tokens.text1)
+                            .lineLimit(1)
+                        Spacer(minLength: 12)
+                        Toggle("", isOn: Binding(
+                            get: { telegramOn },
+                            set: { on in
+                                Haptics.levelChange()
+                                setTelegram(on)
+                            }
+                        ))
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                        .controlSize(.mini)
+                        .tint(Tokens.text2)
                     }
-                ))
-                .labelsHidden()
-                .toggleStyle(.switch)
-                .controlSize(.mini)
-                .tint(Tokens.text2)
-            }
-            if case .connected(let bot, let owner) = telegram.state {
-                // A detail of the row above, so it sits in meta, not as rows of
-                // its own.
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack(spacing: 12) {
-                        ForEach(owner.isEmpty ? ["@" + bot] : ["@" + bot, owner], id: \.self) { name in
-                            Text(name)
-                                .font(.sf(Tokens.TypeSize.meta))
-                                .foregroundStyle(Tokens.text3)
-                                .lineLimit(1)
-                                .textSelection(.enabled)
+                    .frame(height: 40)
+                    if case .connected(let bot, let owner) = telegram.state {
+                        // A detail of the row above, so it sits in meta, not as
+                        // rows of its own — with a little air under the name
+                        // instead of running into it and the switch.
+                        HStack(spacing: 12) {
+                            ForEach(owner.isEmpty ? ["@" + bot] : ["@" + bot, owner], id: \.self) { name in
+                                Text(name)
+                                    .font(.sf(Tokens.TypeSize.meta))
+                                    .foregroundStyle(Tokens.text3)
+                                    .lineLimit(1)
+                                    .textSelection(.enabled)
+                            }
+                            UnderlineLink(title: L("telegram.avatar")) { saveTelegramAvatar() }
+                            UnderlineLink(title: L("telegram.useAnother")) { telegramConfirmForget = true }
                         }
-                        UnderlineLink(title: L("telegram.avatar")) { saveTelegramAvatar() }
-                        UnderlineLink(title: L("telegram.useAnother")) { telegramConfirmForget = true }
+                        .padding(.top, -6)
                     }
                 }
-                .padding(.top, -6)
-            } else if telegramOn {
+            }
+            // The handles line is the block's own second line, so the block
+            // carries its breathing room instead of hanging flush under the pane.
+            .padding(.bottom, 2)
+            if telegramSettingUp {
                 VStack(alignment: .leading, spacing: 6) {
                     telegramStepRow(1, L("telegram.step1")) {
                         TelegramStepPill(title: L("telegram.openBotFather")) {
@@ -5212,6 +5494,7 @@ struct InlineSettingsView: View {
                         }
                     }
                 }
+                .padding(.leading, 34)
                 .transition(.opacity)
             }
         }
@@ -5871,10 +6154,10 @@ struct InlineSettingsView: View {
             // the row: something disappearing under the cursor at the moment of
             // the click reads as a glitch, and the tag is still the label for
             // what is on screen. It is gone the next time Settings is opened.
+            Spacer(minLength: 0)
             GlassMenu(title: copySenseModeLabel, items: copySenseMenuItems) {
                 SettingsNewMarks.copySenseSeen = true
             }
-            Spacer(minLength: 0)
         }
     }
 
@@ -6076,7 +6359,11 @@ struct InlineSettingsView: View {
     /// worth reading. A row earns its place by teaching something the system
     /// convention wouldn't.
     private var shortcutsSection: some View {
-        VStack(alignment: .leading, spacing: 18) {
+        // Groups get more air between them than the rows inside one do. A row
+        // carries 7pt of padding on each side, so rows sit 14pt apart; at 18pt
+        // the reference blocks ran into each other. 24 keeps each group reading
+        // as one block, in step with the gap the other panes' headings take.
+        VStack(alignment: .leading, spacing: 24) {
             promptShortcutsGroup
             ForEach(Array(AppShortcutReference.groups(
                 summonHotKey: summonHotKey,
@@ -6134,16 +6421,15 @@ struct InlineSettingsView: View {
             // The title keeps the text position of every other group's title, and
             // the add chip hangs in an OVERLAY rather than in the row: a 24pt
             // button inside the HStack would make this one header 24pt tall and
-            // push its text ~5pt lower than "Summoning" below it.
+            // push its text ~5pt lower than the uppercase group titles below it.
             //
             // The header still RESERVES the chip's full height, with the text
             // pinned to the top of that box. This group is the first thing in the
             // Shortcuts pane, so its title sits at y=0 of the scroll content — a
-            // 24pt chip centred on a ~15pt line would overflow ~5pt above the
+            // 24pt chip centred on a ~12pt line would overflow ~6pt above the
             // scroll view's edge and clip the chip's upper arc.
             Text(L("shortcuts.promptAction"))
-                .font(.sf(Tokens.TypeSize.label, weight: .medium))
-                .foregroundStyle(Tokens.text1)
+                .captionLabel()
                 .frame(maxWidth: .infinity, minHeight: Self.promptAddChipSize,
                        alignment: .topLeading)
                 .overlay(alignment: .trailing) {
@@ -6171,43 +6457,56 @@ struct InlineSettingsView: View {
                         .foregroundStyle(Tokens.text3)
                         .fixedSize(horizontal: false, vertical: true)
                         .padding(.horizontal, 2)
-                } else {
-                    // One row of small cards running right, scrolled rather than
-                    // wrapped: the group keeps a fixed height however many
-                    // shortcuts there are, so adding a tenth one never pushes the
-                    // reference groups below it off the page.
-                    ScrollView(.horizontal) {
-                        HStack(spacing: 8) {
-                            ForEach(promptShortcuts) { binding in
-                                promptShortcutCardChip(binding)
-                                    .transition(.opacity.combined(with: .scale(scale: 0.96)))
-                            }
+                }
+                // One row of small cards running right, scrolled rather than
+                // wrapped: the group keeps a fixed height however many
+                // shortcuts there are, so adding a tenth one never pushes the
+                // reference groups below it off the page. It also carries the
+                // library's leftovers, so an install with nothing saved yet is
+                // offered the same one-click adds instead of an empty row.
+                ScrollView(.horizontal) {
+                    HStack(spacing: 8) {
+                        ForEach(promptShortcuts) { binding in
+                            promptShortcutCardChip(binding)
+                                .transition(.opacity.combined(with: .scale(scale: 0.96)))
                         }
-                        // The glow bleeds a couple of points past each card.
-                        .padding(.horizontal, 3)
-                        .padding(.vertical, 3)
-                        // Give the last card a runway past the shared edge fade,
-                        // so it can scroll fully into view instead of remaining
-                        // dimmed when the list reaches its end.
-                        .padding(.trailing, 24)
-                        .onScrollOffsetChange(axis: .horizontal) { offset in
-                            let off = offset > 0.5
-                            if off != promptShortcutRailScrolled {
-                                promptShortcutRailScrolled = off
+                        // The library's leftovers follow the saved cards, so
+                        // the ready-made actions sit where the shortcuts
+                        // themselves are instead of only behind the picker.
+                        if !availablePromptTemplates.isEmpty {
+                            ForEach(Array(availablePromptTemplates.enumerated()),
+                                    id: \.element.id) { index, template in
+                                promptTemplateGhostChip(template)
+                                    .padding(.leading, index == 0 && !promptShortcuts.isEmpty
+                                             ? 6 : 0)
+                                    .transition(.opacity)
                             }
                         }
                     }
-                    .scrollIndicators(.never)
-                    // Match the panel's other overflowing lists: content
-                    // dissolves into BOTH boundaries instead of being sliced by
-                    // the scroll viewport — a card leaving to the left thinned out
-                    // the same way one arriving from the right does. The leading
-                    // taper is gated on the rail actually being scrolled, so at
-                    // rest the first card stays crisp against the section's edge.
-                    .scrollEdgeFade(leading: promptShortcutRailScrolled, trailing: true,
-                                    leadingFade: 24, trailingFade: 24)
-                    .padding(.horizontal, -3)
+                    // The glow bleeds a couple of points past each card.
+                    .padding(.horizontal, 3)
+                    .padding(.vertical, 3)
+                    // Give the last card a runway past the shared edge fade,
+                    // so it can scroll fully into view instead of remaining
+                    // dimmed when the list reaches its end.
+                    .padding(.trailing, 24)
+                    .onScrollOffsetChange(axis: .horizontal) { offset in
+                        let off = offset > 0.5
+                        if off != promptShortcutRailScrolled {
+                            promptShortcutRailScrolled = off
+                        }
+                    }
                 }
+                .scrollIndicators(.never)
+                // Match the panel's other overflowing lists: content
+                // dissolves into BOTH boundaries instead of being sliced by
+                // the scroll viewport — a card leaving to the left thinned out
+                // the same way one arriving from the right does. The leading
+                // taper is gated on the rail actually being scrolled, so at
+                // rest the first card stays crisp against the section's edge.
+                .scrollEdgeFade(leading: promptShortcutRailScrolled, trailing: true,
+                                leadingFade: 24, trailingFade: 24)
+                .padding(.horizontal, -3)
             }
             .padding(.top, 10)
         }
@@ -6374,31 +6673,19 @@ struct InlineSettingsView: View {
     }
 
     private var promptTemplateCategoryTabs: some View {
-        HStack(spacing: 4) {
+        HStack(spacing: TabChip.gap) {
             ForEach(promptTemplateGroups) { group in
-                let active = group.category == selectedPromptTemplateCategory
-                Button {
+                // A tab IS the heading of the rail below it, so it takes the
+                // panel's small-caps caption register rather than a second size
+                // of body text — the same font as the group headings elsewhere
+                // in Settings.
+                TabChip(
+                    title: promptTemplateCategoryTitle(group.category),
+                    active: group.category == selectedPromptTemplateCategory,
+                    typeface: .caption
+                ) {
                     selectPromptTemplateCategory(group.category)
-                } label: {
-                    // A tab IS the heading of the rail below it, so it takes the
-                    // panel's small-caps caption register rather than a second
-                    // size of body text. Tracked-out capitals also give the row
-                    // some texture of its own against the plain sentence case
-                    // the cards and the footer are set in.
-                    Text(promptTemplateCategoryTitle(group.category))
-                        .captionLabel(color: active ? Tokens.text1 : Tokens.text3)
-                        .lineLimit(1)
-                        .padding(.horizontal, 11)
-                        .frame(height: 26)
                 }
-                // The selected tab wears its own group's hue — the same light its
-                // cards are cut from — so the row reads as the colour the picker
-                // is currently standing in rather than a lit white pill.
-                .buttonStyle(PromptTemplateChipStyle(
-                    shape: Capsule(), active: active,
-                    tint: active
-                        ? PromptShortcutCardPalette.light(group.category)
-                        : nil))
             }
         }
         .frame(maxWidth: .infinity)
@@ -6822,6 +7109,9 @@ struct InlineSettingsView: View {
         NotificationCenter.default.post(name: .promptShortcutsChanged, object: nil)
         Haptics.confirm()
 
+        // Added from the rail, there is no picker to re-seat.
+        guard promptTemplatePickerOpen else { return }
+
         // The card it was added from leaves the rail immediately, so the picker's
         // position has to be re-seated: this category may now be empty (its tab is
         // gone with it), and the offset may point past the end of a shorter group.
@@ -6927,6 +7217,60 @@ struct InlineSettingsView: View {
                     hoveredPromptShortcutID = binding.id
                 } else if hoveredPromptShortcutID == binding.id {
                     hoveredPromptShortcutID = nil
+                }
+            }
+        }
+    }
+
+    /// A ready-made action the user has not saved yet, sitting in the rail after
+    /// their own cards. Drawn as a SLOT rather than a card — a faint wash and a
+    /// dashed edge — so it never reads as something already set up, and adding it
+    /// takes one click on the plus instead of opening the picker.
+    private func promptTemplateGhostChip(
+        _ template: RemoteModelManifest.PromptTemplate
+    ) -> some View {
+        let hovered = hoveredPromptTemplateGhostID == template.id
+        let shape = RoundedRectangle.menu
+        return Button {
+            addPromptShortcut(from: template)
+        } label: {
+            VStack(alignment: .leading, spacing: 8) {
+                Text(template.name)
+                    .font(.sf(Tokens.TypeSize.label, weight: .medium))
+                    .foregroundStyle(hovered ? Tokens.text2 : Tokens.text3)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+
+                Image(systemName: "plus")
+                    .font(.sf(Tokens.TypeSize.meta, weight: .semibold))
+                    .foregroundStyle(hovered ? Tokens.text2 : Tokens.text4)
+                    .padding(.horizontal, 7)
+                    .frame(minWidth: 24, minHeight: 22)
+                    .background(Capsule().fill(.white.opacity(hovered ? 0.08 : 0.03)))
+                    .overlay(
+                        Capsule().strokeBorder(.white.opacity(hovered ? 0.2 : 0.11),
+                                               lineWidth: 0.5)
+                    )
+            }
+            .frame(width: Self.promptCardWidth, alignment: .leading)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 12)
+            .background(shape.fill(.white.opacity(hovered ? 0.05 : 0.028)))
+            .overlay(
+                shape.strokeBorder(.white.opacity(hovered ? 0.24 : 0.13),
+                                   style: StrokeStyle(lineWidth: 1, dash: [4, 4]))
+            )
+            .contentShape(shape)
+        }
+        .buttonStyle(.plain).exemptsDoubleClickPin()
+        .accessibilityLabel(L("shortcuts.promptAction.add"))
+        .notchTooltip(L("shortcuts.promptAction.add"))
+        .onHover { hovering in
+            withAnimation(.easeOut(duration: Tokens.hoverFade)) {
+                if hovering {
+                    hoveredPromptTemplateGhostID = template.id
+                } else if hoveredPromptTemplateGhostID == template.id {
+                    hoveredPromptTemplateGhostID = nil
                 }
             }
         }
@@ -7239,9 +7583,11 @@ struct InlineSettingsView: View {
     /// sentences, so the eye can drop straight to the chord it came for.
     private func shortcutGroup(_ title: String, _ rows: [AppShortcutReference.Entry]) -> some View {
         VStack(alignment: .leading, spacing: 0) {
+            // Same uppercase caption register as every other settings group
+            // heading (BEHAVIOR, DISPLAYS, …), so the pane's group titles match
+            // the rest of Settings instead of running as normal-case labels.
             Text(title)
-                .font(.sf(Tokens.TypeSize.label, weight: .medium))
-                .foregroundStyle(Tokens.text1)
+                .captionLabel()
                 .padding(.bottom, 3)
             ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
                 VStack(alignment: .leading, spacing: 3) {
@@ -8403,26 +8749,12 @@ struct InlineSettingsView: View {
         let active: Bool
         let action: () -> Void
 
-        @State private var hovering = false
-
         var body: some View {
-            Button {
+            TabChip(title: title, active: active) {
+                // Two quick clicks toggle twice rather than pinning the panel.
                 NotchPanel.exemptNextDoubleClick()
                 action()
-            } label: {
-                Text(title)
-                    .font(.sf(Tokens.TypeSize.meta, weight: .medium))
-                    .foregroundStyle(active ? Tokens.text1 : (hovering ? Tokens.text2 : Tokens.text3))
-                    .padding(.horizontal, 11)
-                    .padding(.vertical, 5)
-                    .glassCapsule(in: Capsule(), brighter: active || hovering,
-                                  tint: active ? Tokens.accent : nil)
-                    .contentShape(Capsule())
             }
-            .buttonStyle(GlassPressStyle())
-            .onHover { hovering = $0 }
-            .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
-            .animation(.easeOut(duration: Tokens.hoverFade), value: active)
         }
     }
 
@@ -8821,10 +9153,11 @@ struct InlineSettingsView: View {
         verticalAlignment: VerticalAlignment = .firstTextBaseline,
         @ViewBuilder _ content: () -> Content
     ) -> some View {
+        // Label on the left, control on the right edge of the pane, in every row.
         HStack(alignment: verticalAlignment, spacing: 12) {
             settingLabel(label, info: info, richInfo: richInfo, aligned: aligned, tag: tag)
-            content()
             Spacer(minLength: 0)
+            content()
         }
     }
 
@@ -9675,39 +10008,50 @@ private struct GlassMenuCard: View {
     }
 }
 
-/// The shared shell behind the placement and Dock-icon picker cards: fixed
-/// width, rounded fill + hairline border, and a hover lift that brightens both
-/// by the same step the About rows use — so an unselected card answers the
-/// pointer instead of sitting dead until it's clicked.
+/// One choice drawn as a picture: a thumbnail, its name under it, and a ring
+/// around the thumbnail when it is the current choice. Every picture picker
+/// in Settings uses this.
 private struct PickerCard<Content: View>: View {
     let selected: Bool
-    /// The two-card rows keep the standard width; a three-card row asks for a
-    /// narrower one so it still clears the pane's edge.
-    var width: CGFloat = 108
+    let label: String
     let action: () -> Void
     @ViewBuilder let content: () -> Content
+
+    static var thumbWidth: CGFloat { 96 }
+    static var thumbHeight: CGFloat { 56 }
 
     @State private var hovering = false
 
     var body: some View {
         Button(action: action) {
-            content()
-                .padding(.vertical, 8)
-                .frame(width: width)
-                .background(
-                    RoundedRectangle.control
-                        .fill(.white.opacity((selected ? 0.10 : 0.04) + (hovering ? 0.05 : 0)))
-                )
-                .overlay(
-                    RoundedRectangle.control
-                        .strokeBorder(.white.opacity((selected ? 0.40 : 0.10) + (hovering ? 0.10 : 0)),
-                                      lineWidth: selected ? 1 : 0.5)
-                )
-                .contentShape(RoundedRectangle.control)
+            VStack(spacing: 6) {
+                content()
+                    .frame(width: Self.thumbWidth, height: Self.thumbHeight)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(.white.opacity(hovering && !selected ? 0.09 : 0.06))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .strokeBorder(.white.opacity(0.10), lineWidth: 0.5)
+                    )
+                    .padding(3)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 11, style: .continuous)
+                            .strokeBorder(.white.opacity(selected ? 0.75 : 0), lineWidth: 2)
+                    )
+                Text(label)
+                    .font(.sf(Tokens.TypeSize.meta, weight: selected ? .semibold : .regular))
+                    .foregroundStyle(selected ? Tokens.text1 : Tokens.text3)
+                    .lineLimit(1)
+            }
+            .contentShape(Rectangle())
         }
         .buttonStyle(PlatePressStyle())
         .onHover { hovering = $0 }
         .animation(.easeOut(duration: Tokens.rowFade), value: hovering)
+        .animation(.easeOut(duration: Tokens.rowFade), value: selected)
+        .accessibilityLabel(label)
     }
 }
 
@@ -9893,6 +10237,63 @@ private struct MiniDisplay: View {
                     .frame(width: 12, height: 2)
             }
         }
+    }
+}
+
+/// The top of a screen with the resting notch: flat when off, with the busy
+/// ears (a dot on the left, the clock on the right) when on.
+private struct LiveActivityDiagram: View {
+    let on: Bool
+
+    var body: some View {
+        ZStack(alignment: .top) {
+            UnevenRoundedRectangle(topLeadingRadius: 3, topTrailingRadius: 3)
+                .fill(.white.opacity(0.10))
+            UnevenRoundedRectangle(topLeadingRadius: 3, topTrailingRadius: 3)
+                .strokeBorder(.white.opacity(0.35), lineWidth: 1)
+            HStack(spacing: 0) {
+                if on {
+                    Circle().fill(.white.opacity(0.9)).frame(width: 3, height: 3)
+                    Spacer(minLength: 0)
+                    Capsule().fill(.white.opacity(0.9)).frame(width: 7, height: 2)
+                }
+            }
+            .padding(.horizontal, 4)
+            .frame(width: on ? 40 : 18, height: 7)
+            .background(UnevenRoundedRectangle(bottomLeadingRadius: 3.5, bottomTrailingRadius: 3.5)
+                .fill(.black))
+        }
+        .frame(width: 64, height: 22)
+    }
+}
+
+/// A screen taken over by a full-screen app, with or without the notch's pill.
+private struct FullscreenDiagram: View {
+    let showsNotch: Bool
+
+    var body: some View {
+        ZStack(alignment: .top) {
+            RoundedRectangle(cornerRadius: 3)
+                .fill(.white.opacity(0.14))
+            RoundedRectangle(cornerRadius: 3)
+                .strokeBorder(.white.opacity(0.4), lineWidth: 1)
+            // The app's own content, edge to edge.
+            VStack(alignment: .leading, spacing: 2.5) {
+                Capsule().fill(.white.opacity(0.3)).frame(width: 26, height: 2)
+                Capsule().fill(.white.opacity(0.3)).frame(width: 34, height: 2)
+                Capsule().fill(.white.opacity(0.3)).frame(width: 20, height: 2)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.leading, 6)
+            .padding(.top, 10)
+            if showsNotch {
+                Capsule()
+                    .fill(.white.opacity(0.95))
+                    .frame(width: 12, height: 3)
+                    .padding(.top, 2.5)
+            }
+        }
+        .frame(width: 50, height: 30)
     }
 }
 
@@ -10209,6 +10610,19 @@ private struct MarkdownMark: View {
 }
 
 
+private struct SettingsWindowPaneHeightKey: EnvironmentKey {
+    static let defaultValue: CGFloat? = nil
+}
+
+extension EnvironmentValues {
+    /// Set by `SettingsWindowController`: the pane height Settings uses in its
+    /// own window. nil inside the notch panel.
+    var settingsWindowPaneHeight: CGFloat? {
+        get { self[SettingsWindowPaneHeightKey.self] }
+        set { self[SettingsWindowPaneHeightKey.self] = newValue }
+    }
+}
+
 private extension EnvironmentValues {
     /// The open Settings pane's shared label column width; 0 until measured.
     var settingsLabelColumn: CGFloat {
@@ -10224,3 +10638,4 @@ private struct InvertIf: ViewModifier {
         if on { content.colorInvert() } else { content }
     }
 }
+

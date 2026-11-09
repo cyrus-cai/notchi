@@ -730,6 +730,18 @@ struct ModelDetailCard: View {
     /// two — see `walletWell`.
     private var isFirstParty: Bool { model.provider.isFirstParty }
 
+    /// Both rates $0 — a free window, or a model the gateway gives away.
+    /// Nothing on the card is billed then, and the banner above already says
+    /// "Free until …", so `firstPartyContent` leaves off the rate line and the
+    /// wallet rather than quoting $0 twice and a balance nothing draws down.
+    static func isFree(_ model: PickerModel) -> Bool {
+        guard let pricing = model.info.notchiPricing else { return false }
+        return pricing.inputPerMTok == 0 && pricing.outputPerMTok == 0
+            && (pricing.cachedInputPerMTok ?? 0) == 0
+    }
+
+    private var isFree: Bool { Self.isFree(model) }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             if isFirstParty, let sale = model.info.notchiPricing?.saleLineShort {
@@ -738,7 +750,8 @@ struct ModelDetailCard: View {
             content
                 .padding(ModelDetailPanel.inset)
         }
-        .frame(width: ModelDetailPanel.width(showingPurchase: wallet?.offersCredit == true
+        .frame(width: ModelDetailPanel.width(showingPurchase: !isFree
+                                               && wallet?.offersCredit == true
                                                && showingAmount),
                alignment: .leading)
         .background {
@@ -800,19 +813,28 @@ struct ModelDetailCard: View {
         } else {
             VStack(alignment: .leading, spacing: 9) {
                 header
-                Meter(title: L("model.detail.speed"), level: figures.speed)
-                Meter(title: L("model.detail.intelligence"), level: figures.intelligence)
+                meters
             }
+        }
+    }
+
+    /// How fast and how smart, on the same scale every other card draws them.
+    private var meters: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            Meter(title: L("model.detail.speed"), level: figures.speed)
+            Meter(title: L("model.detail.intelligence"), level: figures.intelligence)
         }
     }
 
     /// Ours, kept plain: the name, one line of rates, then where it runs and
     /// what it is billed to. No gauge and no rules, so nothing on the card
-    /// competes with the figures.
+    /// competes with the figures. A free model loses the rates and the wallet:
+    /// both say "$0" and the banner already says it once — the two meters take
+    /// their place, so the card still says something about the model.
     ///
     /// Speed and Intelligence are `ModelRatings`' read of an id, and on our own
-    /// ids that read is a word in a name we chose ourselves ("flash"), so this
-    /// card shows the remaining credit in their place.
+    /// ids that read is a word in a name we chose ourselves ("flash"), so a
+    /// card that quotes a price shows the remaining credit in their place.
     private var firstPartyContent: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
@@ -826,11 +848,11 @@ struct ModelDetailCard: View {
                 if let qualifier = title.qualifier { pill(qualifier) }
             }
 
-            prices
+            if isFree { meters } else { prices }
 
             VStack(alignment: .leading, spacing: 2) {
                 notes
-                walletWell
+                if !isFree { walletWell }
             }
         }
     }
@@ -1558,16 +1580,19 @@ final class ModelDetailPanel {
         // already is (the menu delegate, and a timer scheduled on the main run
         // loop).
         let wallet = MainActor.assumeIsolated { ModelDetailCard.Wallet.current }
+        // A free model's card draws no wallet at all (see `firstPartyContent`),
+        // so nothing under the balance is there to hold a frame either.
+        let walletRows = model.provider.isFirstParty && !ModelDetailCard.isFree(model)
         // A row that isn't drawn leaves no probe to clear its frame.
-        if !(model.provider.isFirstParty && wallet?.offersCredit == true && showingAmount) {
+        if !(walletRows && wallet?.offersCredit == true && showingAmount) {
             stepperFrame = .zero
             stepperHovered = false
         }
-        if !(model.provider.isFirstParty && wallet?.offersCredit == true) {
+        if !(walletRows && wallet?.offersCredit == true) {
             addCreditFrame = .zero
             addCreditHovered = false
         }
-        if !(model.provider.isFirstParty && wallet != nil) {
+        if !(walletRows && wallet != nil) {
             learnMoreFrame = .zero
             learnMoreHovered = false
         }
@@ -2952,7 +2977,7 @@ struct AskRecentModelPickerView: View {
         let rows = sections.first { $0.title == section.title }?.rows ?? []
         return MenuCardRow(
             title: section.title,
-            tag: section.tag, tagTint: .white,
+            notchiMark: section.tag != nil,
             disclosure: false,
             fontSize: Self.fontSize,
             height: Self.rowHeight,

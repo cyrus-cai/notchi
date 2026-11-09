@@ -384,10 +384,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         CommandCodeCLIService.warmUp()
         PiCLIService.warmUp()
         DshCLIService.warmUp()
-        // MCP is switched off for now.
-        // // Start the user's MCP servers now, so their tools are ready by the
-        // // first question (an `npx` server's first run downloads it).
-        // MCPHub.shared.reload()
+        // Connect the signed-in connectors now, so their tools are ready by
+        // the first question. Servers from mcp.json and other apps stay off
+        // (`MCPConfig.userServersEnabled`).
+        MCPHub.shared.reload()
         // Same reason: resolving the proxy may spawn a login shell, and the first
         // agent run must not wait on it.
         ProxyConfig.warmUp()
@@ -499,6 +499,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // An open that names no screen lands where the pointer is.
         model.summonDisplay = { [weak self] in self?.displayForSummon() }
         model.isCornerDisplay = { [weak self] in self?.cornerDisplays.contains($0) ?? false }
+        model.presentSettingsWindow = { [weak self] in
+            guard let self else { return }
+            SettingsWindowController.shared.present(model: self.model)
+        }
         model.onCardDrag = { [weak self] ended in self?.dragCard(ended: ended) }
         model.onCardPositionReset = { [weak self] in self?.resetCardPosition() }
         model.cardMoved = { [weak self] in self?.cardOffset != .zero }
@@ -593,6 +597,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     // notch must not disturb it.
                     if NSApp.isActive,
                        !HistoryArchiveWindowController.shared.isVisible,
+                       !SettingsWindowController.shared.isVisible,
                        let prev = self.appToRestoreOnClose, !prev.isTerminated {
                         NSApp.yieldActivation(to: prev)
                         prev.activate()
@@ -1790,6 +1795,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // The menu bar icon may have moved since the panel was placed.
             position(panel, on: screen, id: id)
         }
+        // Settings left open in the island does not follow to the card: the
+        // card opens on its chat.
+        if model.showSettings { model.closeSettings() }
         withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
             if !model.open { model.mode = .idle }
             model.openPanel(on: target)

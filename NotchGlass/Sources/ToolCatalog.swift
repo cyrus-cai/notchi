@@ -75,7 +75,7 @@ enum ToolCatalog {
     /// Held back until the model loads them, with the line `load_tools` lists
     /// for each. Empty since 2026-10-29: every built-in tool is on the wire
     /// from the first turn, which saves the extra `load_tools` round. The
-    /// mechanism stays for MCP servers past `MCPHub.advertiseLimit`.
+    /// mechanism stays for the connectors' MCP tools, which always wait.
     static let deferred: [(name: String, summary: String)] = []
 
     static var deferredNames: Set<String> { Set(deferred.map(\.name)) }
@@ -141,7 +141,7 @@ enum ToolCatalog {
 
     // MARK: Groups
 
-    static let groups: [Group] = [calendar, reminders, notes, mail, files, memory, clipboard]
+    static let groups: [Group] = [calendar, reminders, notes, files, memory, clipboard]
 
     private static let timeZone: [String: Any] = [
         "type": "string",
@@ -393,44 +393,82 @@ final class ToolLoadout: @unchecked Sendable {
     }
 }
 
+/// A connected app's MCP tools, as `load_tools` offers them: the context names
+/// the app only, and loading it puts its default tools on the wire.
+struct ConnectedApp: Sendable {
+    let title: String
+    /// Every tool's wire name, in the server's order.
+    let tools: [String]
+    /// The wire names loaded by `load_tools(app:)`.
+    let defaults: [String]
+}
+
 /// `load_tools`: puts held-back tools on the wire for the rest of this run.
+/// Connected apps are listed by name only; loading one adds its default tools
+/// and names the rest, which load by name.
 struct LoadToolsTool: NotchTool {
     static let toolName = "load_tools"
     let name = toolName
     let description: String
     let schema: [String: Any]
     let loadout: ToolLoadout
+    let apps: [ConnectedApp]
 
-    init(loadout: ToolLoadout, summaries: [String: String] = [:]) {
+    init(loadout: ToolLoadout, summaries: [String: String] = [:], apps: [ConnectedApp] = []) {
         self.loadout = loadout
-        let lines = loadout.held.map { "- \($0): \(summaries[$0] ?? ToolCatalog.summary(of: $0) ?? $0)" }
-        description = """
-        Adds tools you do not have yet. When the request needs one of these, call \
-        load_tools first with the ones it needs; they can be called from your next step:
-        \(lines.joined(separator: "\n"))
-        """
-        schema = [
-            "type": "object",
-            "properties": [
-                "tools": ["type": "array", "items": ["type": "string", "enum": loadout.held],
-                          "description": "The tools to add."],
-            ],
-            "required": ["tools"],
+        self.apps = apps
+        let appTools = Set(apps.flatMap(\.tools))
+        let lines = loadout.held.filter { !appTools.contains($0) }
+            .map { "- \($0): \(summaries[$0] ?? ToolCatalog.summary(of: $0) ?? $0)" }
+        var text = "Adds tools you do not have yet; they can be called from your next step."
+        if !apps.isEmpty {
+            text += " Connected apps: \(apps.map(\.title).joined(separator: ", ")). "
+                + "When the request involves one, call load_tools with its app."
+        }
+        if !lines.isEmpty {
+            text += " Other tools to load by name:\n" + lines.joined(separator: "\n")
+        }
+        description = text
+        var properties: [String: Any] = [
+            "tools": ["type": "array", "items": ["type": "string"],
+                      "description": "Tool names to add, from a list load_tools gave."],
         ]
+        if !apps.isEmpty {
+            properties["app"] = ["type": "string", "enum": apps.map(\.title),
+                                 "description": "The connected app whose tools to add."]
+        }
+        schema = ["type": "object", "properties": properties]
     }
 
     func execute(_ input: [String: Any]) async throws -> String {
-        let asked = (input["tools"] as? [String]) ?? (input["tools"] as? String).map { [$0] } ?? []
+        var asked = (input["tools"] as? [String]) ?? (input["tools"] as? String).map { [$0] } ?? []
+        var others: [String] = []
+        var appTitle: String?
+        if let wanted = input["app"] as? String {
+            guard let app = apps.first(where: { $0.title.caseInsensitiveCompare(wanted) == .orderedSame }) else {
+                return "Error: no connected app named \(wanted). Connected: \(apps.map(\.title).joined(separator: ", "))."
+            }
+            appTitle = app.title
+            let picks = app.defaults.isEmpty && app.tools.count <= 10 ? app.tools : app.defaults
+            asked += picks
+            others = app.tools.filter { !picks.contains($0) }
+        }
+        guard !asked.isEmpty || appTitle != nil else {
+            return "Error: give an app or tool names."
+        }
         let unknown = asked.filter { !loadout.held.contains($0) }
         let added = loadout.load(asked)
         let ready = asked.filter { loadout.held.contains($0) }
-        guard !ready.isEmpty else {
-            return "Error: give tools from this list: \(loadout.held.joined(separator: ", "))."
-        }
-        var out = "Loaded \(ready.joined(separator: ", ")). Call them now."
+        var out = ready.isEmpty ? "" : "Loaded \(ready.joined(separator: ", ")). Call them now."
         if !unknown.isEmpty { out += " Not available: \(unknown.joined(separator: ", "))." }
+        let more = others.filter { loadout.isHeld($0) }
+        if let appTitle, !more.isEmpty {
+            out += (out.isEmpty ? "" : "\n\n")
+                + "More \(appTitle) tools, added with load_tools tools=[…]: \(more.joined(separator: ", "))."
+        }
         let guide = notchToolStances(for: Set(added))
         if !guide.isEmpty { out += "\n\nHow to use them:\n" + guide }
-        return out
+        return out.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
+

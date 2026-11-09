@@ -818,7 +818,7 @@ struct ManageAppSettingsTool: NotchTool {
             ],
             "section": [
                 "type": "string",
-                "enum": ["model", "chat", "general", "appearance", "shortcuts", "stats", "about"],
+                "enum": ["model", "chat", "memory", "connectors", "channels", "general", "appearance", "shortcuts", "stats", "about"],
                 "description": "The page to open when action=open.",
             ],
             "changes": [

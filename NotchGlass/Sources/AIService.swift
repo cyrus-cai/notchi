@@ -295,6 +295,14 @@ by a partial or ambiguous name ("dario", "the Apple event"), the first bubble is
 one short line saying which one you mean — "You mean Dario Amodei of Anthropic." \
 — and the answer follows in the next bubble.
 
+Text the user will copy or send as one piece — an email, a letter, a post, a \
+reply draft, a full translation, a message to paste somewhere — must stay in \
+one bubble. Put the whole piece inside a ```draft fence, with blank lines \
+between its paragraphs as it should read when pasted, and write nothing but \
+the piece inside the fence. The app shows the fence as one block with a copy \
+button. Never split such a piece across bubbles and never write it as plain \
+paragraphs outside the fence.
+
 For a person's or an organisation's background, history, or career, give the \
 concrete facts — years, places, schools, employers, numbers — in order, not a \
 summary of the kind of work they do. Keep each date on the event it belongs to.
@@ -438,8 +446,9 @@ something copied earlier, not on the clipboard now → action=history; "copy …
 paste.
 """),
     (["load_tools"], """
-- A request that needs a tool listed under load_tools → load_tools first, then \
-use it. Never say you cannot do something on that list.
+- A request about a connected app named under load_tools, or one that needs a \
+tool listed there → load_tools first, then use it. Never say you cannot do \
+something on that list.
 """),
     (["calculate"], """
 - Exact arithmetic → calculate.
@@ -3660,7 +3669,7 @@ extension ModelCatalog.ModelList.Entry.NotchiPricing {
 
     /// Both rates are $0. Not `percentOff == 100`: 99.6% rounds to 100 and
     /// still costs money.
-    private var isFullyDiscounted: Bool {
+    var isFullyDiscounted: Bool {
         percentOff != nil && (savings ?? 0) >= 1
     }
 

@@ -99,7 +99,8 @@ struct WalletPocket<Content: View>: View {
                     // Opaque, so the cards' lower halves stay hidden behind it.
                     .fill(LinearGradient(colors: [Color(white: 0.12), Color(white: 0.095)],
                                          startPoint: .top, endPoint: .bottom))
-                    .shadow(color: .black.opacity(0.55), radius: 5, y: -2)
+                    // Kept tight so the shadow stays at the edge, not as a haze around the card.
+                    .shadow(color: .black.opacity(0.4), radius: 1.5, y: -1)
             }
             .overlay {
                 // Light that follows the pointer across the surface.

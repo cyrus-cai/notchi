@@ -4199,6 +4199,9 @@ final class NotchModel: ObservableObject {
         switch Self.settingToken(requested) {
         case "model":      section = .model
         case "chat":       section = .chat
+        case "memory", "memories": section = .memories
+        case "connect", "connectors": section = .connect
+        case "channels", "telegram": section = .channels
         case "general":    section = .general
         case "appearance": section = .appearance
         case "shortcuts":  section = .shortcuts
@@ -8833,6 +8836,12 @@ final class NotchModel: ObservableObject {
     /// (they share the same slot below the prompt) and drops any keyboard
     /// highlight; closing returns to the bare idle prompt.
     func toggleSettings() {
+        if !showSettings, let active = activeDisplay, isCornerDisplay(active),
+           let presentSettingsWindow {
+            if open { fullClose() }
+            presentSettingsWindow()
+            return
+        }
         showSettings.toggle()
         if showSettings {
             showWhatsNew = false
@@ -8846,6 +8855,13 @@ final class NotchModel: ObservableObject {
     /// `display` says which screen should host it (AppDelegate passes the screen
     /// under the mouse when ⌘, fires from anywhere); nil keeps the current one.
     func openSettings(on display: CGDirectDisplayID? = nil) {
+        // The floating card shows Settings in its own standard window.
+        if let target = display ?? activeDisplay ?? summonDisplay(),
+           isCornerDisplay(target), let presentSettingsWindow {
+            if open { fullClose() }
+            presentSettingsWindow()
+            return
+        }
         // Summoned by keyboard, not approached by mouse — a stale entry vector
         // from an earlier hover must not kick the settings unfurl sideways.
         entryVelocity = .zero
@@ -9225,6 +9241,9 @@ final class NotchModel: ObservableObject {
 
     /// Whether `display` draws the top-right card. Set by `AppDelegate`.
     var isCornerDisplay: (CGDirectDisplayID) -> Bool = { _ in false }
+    /// Opens Settings in its own window (AppDelegate wires it to
+    /// `SettingsWindowController`). Used instead of the in-panel page on the card.
+    var presentSettingsWindow: (() -> Void)?
     /// The open card is flying off the screen's right edge. Its page stays as it
     /// is for the flight; the close runs when the flight ends.
     /// Deliberately not `@Published`: no view reads it, and publishing it would
@@ -11716,13 +11735,9 @@ final class NotchModel: ObservableObject {
                 agentTools.append(NotchiSourceTool())
                 agentTools.append(WiFiStatusTool())
                 agentTools.append(RecentSongsTool())
-                agentTools.append(ReadMailTool())
                 agentTools.append(CopyToClipboardTool { [weak self] in
                     await self?.rebaselineClipboardAfterInAppWrite()
                     await self?.markCaptureLine(.copied, answerID: answerID)
-                })
-                agentTools.append(DraftMailTool { [weak self] in
-                    await self?.markCaptureLine(.mailDraft, answerID: answerID)
                 })
                 agentTools.append(SendMessageTool { [weak self] to, text in
                     guard let self else { throw CancellationError() }
@@ -11770,24 +11785,24 @@ final class NotchModel: ObservableObject {
                         return try await self.confirmCloudAction(answerID: answerID, question: question)
                     })
                 }
-                // MCP is switched off for now.
-                // // The user's MCP servers come last, so the built-in prefix of
-                // // the list stays the same with or without them. Past
-                // // `MCPHub.advertiseLimit` they wait behind `load_tools`.
-                // MCPHub.shared.reloadIfChanged()
-                // let mcpTools = MCPHub.shared.agentTools { [weak self] server, tool, input in
-                //     guard let self else { throw CancellationError() }
-                //     return try await self.confirmMCPCall(answerID: answerID, server: server,
-                //                                          tool: tool, input: input)
-                // }
-                // agentTools += mcpTools
-                // let mcpHeld = mcpTools.count > MCPHub.advertiseLimit ? Set(mcpTools.map(\.name)) : []
-                let mcpHeld: Set<String> = []
+                // The connectors' MCP tools come last, so the built-in prefix of
+                // the list stays the same with or without them. All of them
+                // wait behind `load_tools`, which names the apps only.
+                MCPHub.shared.reloadIfChanged()
+                let mcpTools = MCPHub.shared.agentTools { [weak self] server, tool, input in
+                    guard let self else { throw CancellationError() }
+                    return try await self.confirmMCPCall(answerID: answerID, server: server,
+                                                         tool: tool, input: input)
+                }
+                agentTools += mcpTools
+                let mcpHeld = Set(mcpTools.map(\.name))
+                let connectedApps = MCPHub.connectedApps(mcpTools)
                 // Every provider starts a run with the same list, so a prompt
                 // cache that matches on a prefix keeps matching from one
                 // question to the next.
                 let registry = ToolRegistry(ToolCatalog.assemble(agentTools),
-                                            deferring: ToolCatalog.deferredNames.union(mcpHeld))
+                                            deferring: ToolCatalog.deferredNames.union(mcpHeld),
+                                            apps: connectedApps)
                 // Prompt stances match the tools a run starts with; a loaded
                 // tool's stance comes back in the `load_tools` result.
                 // Non-tool backends advertise none.

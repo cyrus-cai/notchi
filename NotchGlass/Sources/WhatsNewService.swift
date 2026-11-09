@@ -107,6 +107,21 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.9.29",
+            date: "2026-11-09",
+            features: [
+                "Settings → Connectors connects Notion, Linear, GitHub and 9 other apps for Notchi to use.",
+            ],
+            improvements: [
+                "Emails, posts and other text to paste arrive as one block with a copy button.",
+                "On the top-right card, Settings opens in its own window.",
+                "A free model's card shows its speed and intelligence instead of $0 rates.",
+            ],
+            fixes: [
+                "Fixed picking a model in the notch's model menu closing the menu without switching models.",
+            ]
+        ),
+        Entry(
             version: "0.9.28",
             date: "2026-11-06",
             improvements: [

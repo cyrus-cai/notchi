@@ -164,7 +164,7 @@ final class DetachedThreadStore: ObservableObject {
 /// corner mask doesn't apply to transparent windows), but still key/main so
 /// the follow-up field and shortcuts work. `.resizable` in the mask keeps
 /// AppKit's edge-resize on a borderless window.
-private final class DetachedWindow: NSWindow {
+private final class DetachedWindow: NSPanel {
     var closesOnEscape = false
     /// The app's editable chords (⌘P pin, ⌘R regenerate — see
     /// `DetachedSessionWindowController.handleAppShortcut`). A detached window is
@@ -180,7 +180,10 @@ private final class DetachedWindow: NSWindow {
     var onEscapeLayer: (() -> Bool)?
 
     override var canBecomeKey: Bool { true }
-    override var canBecomeMain: Bool { true }
+    /// A non-activating panel is never main, like the notch panel. A window that
+    /// can be main but isn't draws its Liquid Glass in the inactive (flat grey)
+    /// state while Notchi is in the background.
+    override var canBecomeMain: Bool { !styleMask.contains(.nonactivatingPanel) }
 
     /// Where the press that may become a move started: the pointer on screen and
     /// the window's own corner, both frozen at mouse-down.
@@ -520,9 +523,7 @@ final class DetachedSessionWindowController: NSObject, NSWindowDelegate {
         }
         let session = DetachedSession.thread(id: threadID)
         if let existing = controller(for: session) {
-            existing.armSummonGrace()
-            existing.window.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
+            existing.showWithoutActivating()
             return
         }
         let face = DetachedCardFace(title: title, subtitle: "",
@@ -826,9 +827,7 @@ final class DetachedSessionWindowController: NSObject, NSWindowDelegate {
         // A fresh round with no composer behind it waits at the card again.
         compactFloorHeight = Self.compactWaitingHeight
         resizeCompactThread(to: Self.compactWaitingHeight, reset: true)
-        armSummonGrace()
-        window.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        showWithoutActivating()
     }
 
     /// Reusing the same empty-prompt shortcut replaces both pieces of transient
@@ -1513,13 +1512,19 @@ final class DetachedSessionWindowController: NSObject, NSWindowDelegate {
                 : DetachedComposeView.restingHeight
             rect = NSRect(x: rect.minX, y: rect.maxY - h, width: rect.width, height: h)
         }
+        // A prompt-shortcut window is a non-activating panel: clicking or typing
+        // in it takes key without activating Notchi, so the app the user was
+        // working in stays frontmost.
         let w = DetachedWindow(
             contentRect: rect,
-            styleMask: [.borderless, .resizable],
+            styleMask: compactShortcut
+                ? [.borderless, .resizable, .nonactivatingPanel]
+                : [.borderless, .resizable],
             backing: .buffered,
             defer: false
         )
         w.title = face.title
+        w.hidesOnDeactivate = false
         w.isOpaque = false
         w.backgroundColor = .clear
         w.hasShadow = true
@@ -1934,6 +1939,11 @@ final class DetachedSessionWindowController: NSObject, NSWindowDelegate {
     }
 
     private func finishSettle() {
+        if compactShortcut, case .thread = state.session {
+            showWithoutActivating()
+            armMergeTracking()
+            return
+        }
         applyPinLevel()
         // Before the activation: a window this new is not yet drawn as visible
         // when `willBecomeActive` arrives, and the grace keeps
@@ -2013,6 +2023,13 @@ final class DetachedSessionWindowController: NSObject, NSWindowDelegate {
     /// to be watched; unpinned it's an ordinary citizen of the window stack.
     private func applyPinLevel() {
         window.level = state.pinned ? .floating : .normal
+    }
+
+    /// A prompt-shortcut result: shown over the app the user is working in,
+    /// without activating Notchi or taking key from that app.
+    private func showWithoutActivating() {
+        window.level = .floating
+        window.orderFrontRegardless()
     }
 
     private func togglePin() {

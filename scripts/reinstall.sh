@@ -46,8 +46,12 @@ echo "$$" > "$LOCK/pid"
 trap 'rm -rf "$LOCK"' EXIT
 
 # --- build -----------------------------------------------------------------
+# The Google connectors' client secret stays out of the repository.
+GOOGLE_SECRET_FILE=".claude/google-client-secret"
+GOOGLE_SECRET="$(cat "$GOOGLE_SECRET_FILE" 2>/dev/null || true)"
 info "Building ${SCHEME} (${CONFIG})…"
 xcodebuild -project "$PROJECT" -scheme "$SCHEME" -configuration "$CONFIG" build \
+  NOTCHI_GOOGLE_CLIENT_SECRET="$GOOGLE_SECRET" \
   >/tmp/notch-reinstall-build.log 2>&1 \
   || { tail -40 /tmp/notch-reinstall-build.log; die "Build failed (full log: /tmp/notch-reinstall-build.log)."; }
 ok "Build succeeded."
