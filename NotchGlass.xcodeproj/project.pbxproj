@@ -74,6 +74,7 @@
 		A1000EA2 /* RequestAudit.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000EA3 /* RequestAudit.swift */; };
 		A1CE0001 /* CloudMachine.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1CE0002 /* CloudMachine.swift */; };
 		A1CE0003 /* CardToast.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1CE0004 /* CardToast.swift */; };
+		A1CE0007 /* ApprovalPopup.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1CE0008 /* ApprovalPopup.swift */; };
 		A1CE0005 /* MenuBarChat.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1CE0006 /* MenuBarChat.swift */; };
 		A1000DC0 /* ToolCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000DC1 /* ToolCatalog.swift */; };
 		A1000EB0 /* MCPService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000EB1 /* MCPService.swift */; };
@@ -142,6 +143,7 @@
 		A1000EA3 /* RequestAudit.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RequestAudit.swift; sourceTree = "<group>"; };
 		A1CE0002 /* CloudMachine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloudMachine.swift; sourceTree = "<group>"; };
 		A1CE0004 /* CardToast.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CardToast.swift; sourceTree = "<group>"; };
+		A1CE0008 /* ApprovalPopup.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ApprovalPopup.swift; sourceTree = "<group>"; };
 		A1CE0006 /* MenuBarChat.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuBarChat.swift; sourceTree = "<group>"; };
 		A1000DC1 /* ToolCatalog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolCatalog.swift; sourceTree = "<group>"; };
 		A1000EB1 /* MCPService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MCPService.swift; sourceTree = "<group>"; };
@@ -261,6 +263,7 @@
 				A1000EA3 /* RequestAudit.swift */,
 				A1CE0002 /* CloudMachine.swift */,
 				A1CE0004 /* CardToast.swift */,
+				A1CE0008 /* ApprovalPopup.swift */,
 				A1CE0006 /* MenuBarChat.swift */,
 				A1000DC1 /* ToolCatalog.swift */,
 				A1000EB1 /* MCPService.swift */,
@@ -438,6 +441,7 @@
 				A1000EA2 /* RequestAudit.swift in Sources */,
 				A1CE0001 /* CloudMachine.swift in Sources */,
 				A1CE0003 /* CardToast.swift in Sources */,
+				A1CE0007 /* ApprovalPopup.swift in Sources */,
 				A1CE0005 /* MenuBarChat.swift in Sources */,
 				A1000DC0 /* ToolCatalog.swift in Sources */,
 				A1000EB0 /* MCPService.swift in Sources */,
@@ -545,7 +549,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.9.29;
+				MARKETING_VERSION = 0.9.30;
 				PRODUCT_BUNDLE_IDENTIFIER = com.notchglass.app;
 				PRODUCT_NAME = Notchi;
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -568,7 +572,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.9.29;
+				MARKETING_VERSION = 0.9.30;
 				PRODUCT_BUNDLE_IDENTIFIER = com.notchglass.app;
 				PRODUCT_NAME = Notchi;
 				SWIFT_EMIT_LOC_STRINGS = YES;

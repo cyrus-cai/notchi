@@ -64,18 +64,25 @@ final class TelegramBridge: ObservableObject {
     /// Held while polling, released when polling stops.
     private var pollAwake: Awake?
     private var pairingUntil: Date?
-    /// Each chat's updates run one after another: a second message waits for
-    /// the first answer instead of racing it on the same thread.
-    private var chains: [Int64: Task<Void, Never>] = [:]
+    /// Messages run one after another per lane: a chat's own lane, plus one
+    /// lane per older thread the user replies to, so a reply to another thread
+    /// does not wait for this one (`lane(for:chatID:)`).
+    private var chains: [String: Task<Void, Never>] = [:]
+    /// Text messages handed to a running round (`NotchModel.steer`), by thread
+    /// and message id, kept until the round ends to answer the ones it did
+    /// not read.
+    private var steered: [UUID: [Int: [[String: Any]]]] = [:]
     /// Option buttons sent for a pending question, by the question's id.
     private var questionOptions: [UUID: [String]] = [:]
-    /// An album arrives as one message per item, sharing a `media_group_id`,
-    /// and Telegram splits more than 10 items into several albums. Album items,
-    /// and any message sent while some are waiting, collect here per chat until
-    /// no new one has come for `albumWait`, then go out as one round.
+    /// Messages collect here per chat until no new one has come for a short
+    /// wait, then go out as one round: people split one request over several
+    /// messages. An album arrives as one message per item, sharing a
+    /// `media_group_id`, and Telegram splits more than 10 items into several
+    /// albums, so a batch holding album items waits `albumWait` instead.
     private var albums: [Int64: [[String: Any]]] = [:]
     private var albumFlush: [Int64: Task<Void, Never>] = [:]
     private static let albumWait: UInt64 = 3_000_000_000
+    private static let burstWait: UInt64 = 1_500_000_000
 
     private static let tokenKey = "aux_key.telegram"
     private static let botKey = "TelegramBotUsername"
@@ -158,7 +165,8 @@ final class TelegramBridge: ObservableObject {
         UserDefaults.standard.removeObject(forKey: Self.pausedKey)
         // getUpdates and a webhook cannot both be on.
         await call("deleteWebhook", [:])
-        await call("setMyCommands", ["commands": [["command": "new", "description": L("telegram.command.new")]]])
+        await call("setMyCommands", ["commands": [["command": "new", "description": L("telegram.command.new")],
+                                                  ["command": "stop", "description": L("telegram.command.stop")]]])
         await call("setMyShortDescription", ["short_description": L("telegram.description")])
         openPairing()
         poll()
@@ -461,13 +469,22 @@ final class TelegramBridge: ObservableObject {
             Task { await installLidRuleAfterPairing() }
         }
         guard chatID == owner else { return }
-        let isCommand = (message["text"] as? String)?.hasPrefix("/") == true
+        let text = message["text"] as? String
+        // Not queued: the lane it would wait in is the round it stops.
+        if let text, text == "/stop" || text.hasPrefix("/stop@") {
+            Task { await stop(chatID: chatID) }
+            flushAlbum(chatID: chatID)
+            return
+        }
+        let isCommand = text?.hasPrefix("/") == true
         if isCommand { flushAlbum(chatID: chatID) }
-        if !isCommand, message["media_group_id"] != nil || albums[chatID] != nil {
+        if !isCommand {
             albums[chatID, default: []].append(message)
+            let wait = albums[chatID]?.contains { $0["media_group_id"] != nil } == true
+                ? Self.albumWait : Self.burstWait
             albumFlush[chatID]?.cancel()
             albumFlush[chatID] = Task { [weak self] in
-                try? await Task.sleep(nanoseconds: Self.albumWait)
+                try? await Task.sleep(nanoseconds: wait)
                 guard !Task.isCancelled else { return }
                 self?.flushAlbum(chatID: chatID)
             }
@@ -483,11 +500,69 @@ final class TelegramBridge: ObservableObject {
     }
 
     private func enqueue(_ messages: [[String: Any]], chatID: Int64) {
-        let previous = chains[chatID]
-        chains[chatID] = Task { [weak self] in
+        if steer(messages, chatID: chatID) { return }
+        let lane = lane(for: messages, chatID: chatID)
+        let previous = chains[lane]
+        chains[lane] = Task { [weak self] in
             await previous?.value
             await self?.answer(messages, chatID: chatID)
         }
+    }
+
+    /// A reply to a message of another thread runs in that thread's lane;
+    /// everything else waits in the chat's own lane.
+    private func lane(for messages: [[String: Any]], chatID: Int64) -> String {
+        if let replied = (messages.first?["reply_to_message"] as? [String: Any])?["message_id"] as? NSNumber,
+           let mapped = threadForMessage(chatID: chatID, messageID: replied.intValue),
+           mapped != thread(for: chatID) {
+            return "\(chatID):\(mapped.uuidString)"
+        }
+        return "\(chatID)"
+    }
+
+    /// Text sent while its thread is answering goes to that round, which reads
+    /// it after its next tool call. Messages with files, a quote, or a reply to
+    /// anything but one of the bot's messages wait for the next round instead.
+    private func steer(_ messages: [[String: Any]], chatID: Int64) -> Bool {
+        guard let model, let first = messages.first,
+              messages.allSatisfy({ ($0["text"] as? String).map { !$0.hasPrefix("/") } ?? false }),
+              first["quote"] == nil, first["external_reply"] == nil else { return false }
+        var target = thread(for: chatID)
+        if let replied = first["reply_to_message"] as? [String: Any] {
+            guard let id = (replied["message_id"] as? NSNumber)?.intValue,
+                  let mapped = threadForMessage(chatID: chatID, messageID: id) else { return false }
+            target = mapped
+        }
+        let text = messages
+            .compactMap { ($0["text"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n")
+        guard let target, !text.isEmpty,
+              let tag = (messages.last?["message_id"] as? NSNumber)?.intValue,
+              model.steer(threadID: target, text: text, tag: tag) else { return false }
+        steered[target, default: [:]][tag] = messages
+        for message in messages {
+            guard let id = (message["message_id"] as? NSNumber)?.intValue else { continue }
+            Task { [weak self] in
+                await self?.call("setMessageReaction", [
+                    "chat_id": chatID, "message_id": id,
+                    "reaction": [["type": "emoji", "emoji": "👀"]],
+                ])
+            }
+        }
+        return true
+    }
+
+    /// Threads stopped with /stop, so an empty answer does not also report
+    /// a failure.
+    private var stoppedThreads: Set<UUID> = []
+
+    private func stop(chatID: Int64) async {
+        let id = thread(for: chatID)
+        let stopped = id.map { model?.stopTelegramRound(threadID: $0) ?? false } ?? false
+        if stopped, let id { stoppedThreads.insert(id) }
+        await call("sendMessage", ["chat_id": chatID,
+                                   "text": L(stopped ? "telegram.stopped" : "telegram.nothingToStop")])
     }
 
     /// `messages` is one message, or the items of one album in order.
@@ -542,7 +617,11 @@ final class TelegramBridge: ObservableObject {
             guard file.text.count > left else { return file }
             return .init(name: file.name, text: String(file.text.prefix(left)) + "\n[… the rest of this file was cut]")
         }
-        let question = files.isEmpty ? text : NotchModel.fileEnvelope(line: text, files: files)
+        var question = files.isEmpty ? text : NotchModel.fileEnvelope(line: text, files: files)
+        // A reply or a quote carries the quoted text, as a reply does in the notch.
+        if let quoted = Self.quotedText(of: message) {
+            question = NotchModel.replyEnvelope(line: question, quote: quoted)
+        }
 
         // A reply to one of the bot's messages continues that message's thread.
         var threadID = thread(for: chatID)
@@ -552,6 +631,10 @@ final class TelegramBridge: ObservableObject {
         }
         // A thread deleted from Recent starts over.
         if let id = threadID, !model.history.contains(where: { $0.id == id }) { threadID = nil }
+        // Another lane can still be answering this thread.
+        while let id = threadID, model.liveThread(id) != nil {
+            try? await Task.sleep(nanoseconds: 500_000_000)
+        }
         let seedIDs = Set(threadID.flatMap { id in model.history.first { $0.id == id }?.conversation.map(\.id) } ?? [])
 
         await call("sendChatAction", ["chat_id": chatID, "action": "typing"])
@@ -561,10 +644,28 @@ final class TelegramBridge: ObservableObject {
             return
         }
         setThread(landed, chat: chatID)
+        model.openSteering(threadID: landed)
         let previous = threadID.flatMap { id in model.history.first { $0.id == id }?.conversation }?
             .last(where: { $0.role == "assistant" && !$0.isError })?.text ?? ""
         react(to: text, previous: previous, thread: landed, chatID: chatID, messageID: messageID)
         await stream(thread: landed, seedIDs: seedIDs, chatID: chatID, replyTo: messageID)
+        // Messages sent after the round's last tool call: answer them next.
+        let waiting = steered.removeValue(forKey: landed) ?? [:]
+        let unread = model.closeSteering(threadID: landed).compactMap { waiting[$0] }.flatMap { $0 }
+        if !unread.isEmpty { await answer(unread, chatID: chatID) }
+    }
+
+    /// The text a message replies to: the part the user highlighted
+    /// (`quote`), else the whole replied message, capped like a notch reply.
+    private static func quotedText(of message: [String: Any]) -> String? {
+        let replied = message["reply_to_message"] as? [String: Any]
+            ?? message["external_reply"] as? [String: Any]
+        let picked = (message["quote"] as? [String: Any])?["text"] as? String
+            ?? (replied?["text"] ?? replied?["caption"]) as? String
+        guard let body = picked?.trimmingCharacters(in: .whitespacesAndNewlines), !body.isEmpty
+        else { return nil }
+        let limit = NotchModel.replyQuoteLimit
+        return body.count > limit ? String(body.prefix(limit)) + "…" : body
     }
 
     // MARK: - Reactions
@@ -698,7 +799,9 @@ final class TelegramBridge: ObservableObject {
                 }
             }
         }
+        let wasStopped = stoppedThreads.remove(thread) != nil
         guard !body.isEmpty || !pictures.isEmpty else {
+            if wasStopped { return }
             if let sentID {
                 await call("editMessageText", ["chat_id": chatID, "message_id": sentID, "text": L("telegram.failed")])
             } else {
@@ -739,8 +842,8 @@ final class TelegramBridge: ObservableObject {
         let asked = String(question.trimmingCharacters(in: .whitespacesAndNewlines).prefix(500))
         guard !body.isEmpty || !pictures.isEmpty else { return }
         setThread(threadID, chat: owner)
-        let previous = chains[owner]
-        chains[owner] = Task { [weak self] in
+        let previous = chains["\(owner)"]
+        chains["\(owner)"] = Task { [weak self] in
             await previous?.value
             guard let self else { return }
             for (index, part) in (body.isEmpty ? [] : Self.split(body)).enumerated() {

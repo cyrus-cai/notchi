@@ -727,6 +727,12 @@ struct AgentHarness {
     /// instead of waiting on a reply that only says so.
     var endsRound: (@MainActor ([ToolInvocation]) -> Bool)?
 
+    /// Messages the user sent while this run was working. Read after each tool
+    /// round; what it returns is added to the last tool result, so the model
+    /// sees it in its next request. Text that arrives after the last tool round
+    /// is left for the caller to answer in a follow-up round.
+    var pendingInput: (@MainActor () -> [String])?
+
     /// Minimum on-screen time for the tool-activity line, so a fast tool (clipboard
     /// and time return in milliseconds) still shows a full, readable cue instead of
     /// a one-frame flicker. The tools run *during* this window — it delays only the
@@ -1341,6 +1347,13 @@ struct AgentHarness {
                 resultsToSend[resultsToSend.count - 1].result += Self.withdrawnNote(exhausted)
             }
 
+            if let pendingInput, !resultsToSend.isEmpty {
+                let sent = pendingInput()
+                if !sent.isEmpty {
+                    resultsToSend[resultsToSend.count - 1].result += Self.userSentNote(sent)
+                }
+            }
+
             convo.append(AgentMessage(kind: .assistantToolCalls(text: assistantText,
                                                                 calls: pendingCalls)))
             convo.append(AgentMessage(kind: .toolResults(resultsToSend)))
@@ -1511,6 +1524,14 @@ struct AgentHarness {
     }
 
     /// Appended to the last tool result before the capped turn (`maxIterations`).
+    /// The user's messages sent during the run, as they reach the model.
+    static func userSentNote(_ messages: [String]) -> String {
+        "\n\n[System note] While you were working, the user sent:\n"
+            + messages.map { "<user_message>\n\($0)\n</user_message>" }.joined(separator: "\n")
+            + "\nThey may add to, correct or replace the request, or ask something else. "
+            + "Take them into account and answer everything in your reply."
+    }
+
     private static let stepCapNote = "\n\n[System note] This was the last tool call this round allows. "
         + "Next, reply to the user without calling tools: what you did, what you found, "
         + "and what is still left for them to do or to ask you for."

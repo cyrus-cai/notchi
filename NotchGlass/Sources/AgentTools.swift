@@ -803,8 +803,7 @@ struct ManageAppSettingsTool: NotchTool {
     Reads, opens, or changes this Notch app's settings. action=list returns current \
     values and supported ids; action=shortcuts returns the live hotkey reference; \
     action=open opens a Settings page (section: model, chat, general, appearance, shortcuts, \
-    stats, about); action=update applies changes[] (keys, proxy, custom URL, instructions and \
-    command access wait on a Confirm card the tool shows itself). \
+    stats, about); action=update applies changes[] at once. \
     For a change, list first (shortcuts first when editing a hotkey) then update. \
     If a value is not supported, open that section instead of listing alternatives.
     """
@@ -1204,7 +1203,7 @@ struct ManageLoopTool: NotchTool {
     to the next such time and interval_minutes to 1440; without it round one \
     runs now. \
     A plain alert at a set time, with no work to do, is a reminder instead. \
-    A start faster than hourly shows its own Confirm card. action=list returns the user's loops with \
+    action=list returns the user's loops with \
     ids; stop, delete and set_interval take loop_id from list. delete removes a loop, \
     stopped or not.
     """
@@ -2475,22 +2474,11 @@ struct ReadPageTool: NotchTool {
 /// This is a lexical check on the command text, not a security boundary: a
 /// command can hide a deletion inside `python -c` or a script file and pass.
 enum ShellRisk {
-    /// Commands that destroy data for good, touch disks or boot state, or need
-    /// administrator rights.
-    private static let guarded: Set<String> = [
-        "srm", "shred", "truncate",
-        "sudo", "su", "dd", "mkfs", "newfs", "diskutil", "tmutil",
-        "shutdown", "reboot", "halt", "csrutil", "nvram", "security",
-    ]
+    /// Commands that erase file contents outright.
+    private static let fileErasers: Set<String> = ["srm", "shred", "truncate", "dd", "mkfs", "newfs"]
     /// Deletions the Trash functions in `ShellRunner.prelude` replace, when
     /// they are the command a segment runs.
     private static let deletions: Set<String> = ["rm", "rmdir", "unlink"]
-    /// `git push` flags that overwrite or delete history on the remote.
-    private static let destructivePushFlags: Set<String> = [
-        "-f", "--force", "--force-with-lease", "--force-if-includes", "--mirror", "-d", "--delete", "--prune",
-    ]
-    /// A nested shell runs text this check never sees.
-    private static let shells: Set<String> = ["sh", "bash", "zsh", "eval"]
     /// Prefixes that run the word after them.
     private static let wrappers: Set<String> = [
         "xargs", "env", "command", "builtin", "noglob", "nohup", "time", "exec", "nice",
@@ -2578,10 +2566,39 @@ enum ShellRisk {
         return lines.joined(separator: "\n")
     }
 
+    /// A refusal for an `osascript` that asks Mail for messages without a
+    /// `date received >` bound. Mail answers one Apple event at a time and
+    /// keeps working on a query after its caller gives up, so one scan of an
+    /// 11,000-message inbox (`repeat with m in messages of inbox`, `whose read
+    /// status is false`) held Mail for minutes, and every Mail call after it
+    /// timed out too (2026-11-09).
+    static func unboundedMailQuery(_ command: String) -> String? {
+        let lowered = command.lowercased()
+        guard lowered.contains("osascript"), lowered.contains("\"mail\""),
+              lowered.contains("messages"), !lowered.contains("date received >") else { return nil }
+        return """
+        Not run: this asks Mail about every message in a mailbox, which keeps Mail busy for \
+        minutes and makes later Mail calls time out. Use read_mail (action=codes for a \
+        verification code, unread, search). In osascript, select by \
+        `messages of inbox whose date received > ((current date) - 30 * minutes)` first, \
+        and read properties of that list in one statement, not in a loop.
+        """
+    }
+
+    /// True when the command deletes files on this Mac in a way the Trash
+    /// functions in `ShellRunner.prelude` cannot catch, or reads the API keys
+    /// Notchi stores. Everything else runs without a card.
     static func needsConfirmation(_ command: String) -> Bool {
         let lowered = command.lowercased()
-        if credentialPaths.contains(where: { lowered.contains($0) }) { return true }
-        if scriptAction(command) != nil { return true }
+        // Keys Notchi keeps in its own defaults (`api_key.*`). A model once
+        // read the InstaBox key this way and called the API around a missing
+        // tool (2026-11-03).
+        if lowered.contains("defaults"), lowered.contains("api_key") { return true }
+        switch scriptAction(command) {
+        case .emptyTrash: return true
+        case .delete where lowered.contains("posix file") || lowered.contains("\"finder\""): return true
+        default: break
+        }
         let separators = CharacterSet(charactersIn: ";|&\n(){}`")
         for segment in command.components(separatedBy: separators) {
             let raw = segment.split(whereSeparator: { $0 == " " || $0 == "\t" })
@@ -2589,36 +2606,26 @@ enum ShellRisk {
             guard let at = commandIndex(in: words) else { continue }
             let name = words[at]
             let rest = words[(at + 1)...]
-            if guarded.contains(name) { return true }
-            // A deletion the Trash function cannot catch: run through a
-            // wrapper (`xargs rm`, `command rm`), by path (`/bin/rm`), or
-            // named anywhere else in the segment (`sh -c "rm …"`).
+            if fileErasers.contains(name) { return true }
+            if name == "diskutil", rest.contains(where: { $0.hasPrefix("erase") || $0 == "partitiondisk" }) {
+                return true
+            }
             if deletions.contains(name),
                at > 0 && words[..<at].contains(where: wrappers.contains)
                 || raw[at].contains("/") {
                 return true
             }
             if name != "git", rest.contains(where: deletions.contains) { return true }
-            if name == "git" {
-                if rest.contains("clean") || (rest.contains("reset") && rest.contains("--hard")) {
-                    return true
-                }
-                // A plain push only adds commits; a forced or deleting push
-                // (`--force`, `-f`, `+branch`, `:branch`) loses work on the remote.
-                if rest.contains("push"),
-                   rest.contains(where: { w in
-                       destructivePushFlags.contains { w == $0 || w.hasPrefix($0 + "=") }
-                           || w.hasPrefix("+") || w.hasPrefix(":")
-                   }) {
-                    return true
-                }
+            if name == "git",
+               rest.contains("clean") || (rest.contains("reset") && rest.contains("--hard")) {
+                return true
             }
             if name == "find" {
                 if rest.contains("-delete") { return true }
                 for (i, w) in rest.enumerated() where ["-exec", "-execdir", "-ok"].contains(w) {
                     let next = rest.index(rest.startIndex, offsetBy: i + 1)
                     if next < rest.endIndex,
-                       guarded.contains(rest[next]) || shells.contains(rest[next]) {
+                       fileErasers.contains(rest[next]) || deletions.contains(rest[next]) {
                         return true
                     }
                 }
@@ -2663,7 +2670,11 @@ enum ShellRunner {
 
     /// Defined before every command: `rm`, `rmdir` and `unlink` move their
     /// arguments to the Trash, so a deletion can be put back from Finder.
-    /// Flags are dropped; a directory goes to the Trash whole.
+    /// Flags are dropped; a directory goes to the Trash whole. `ssh` gets
+    /// options that make an unreachable or silent host fail within about 45
+    /// seconds instead of holding the call to its timeout; `ssh railway.new`
+    /// held one for 180 s (2026-11-09). ssh takes the first value of an
+    /// option, so these win over the command's own `-o`.
     static let prelude: String = {
         let move = FileManager.default.isExecutableFile(atPath: "/usr/bin/trash")
             ? #"/usr/bin/trash "${f[@]}""#
@@ -2671,6 +2682,7 @@ enum ShellRunner {
         return """
         __notchi_trash() { local -a f; local a o=1; for a in "$@"; do if (( o )) && [[ $a == -- ]]; then o=0; elif (( o )) && [[ $a == -* ]]; then :; else f+=("$a"); fi; done; (( ${#f} )) || return 0; \(move); }
         rm() { __notchi_trash "$@"; }; rmdir() { __notchi_trash "$@"; }; unlink() { __notchi_trash "$@"; }
+        ssh() { command ssh -o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=10 -o ServerAliveCountMax=3 "$@"; }
 
         """
     }()
@@ -2875,6 +2887,7 @@ struct RunShellTool: NotchTool {
         if let raw = input["timeout_seconds"] as? NSNumber {
             timeout = min(max(raw.doubleValue, 1), ShellRunner.maxTimeout)
         }
+        if let refusal = ShellRisk.unboundedMailQuery(command) { return refusal }
         if ShellRisk.needsConfirmation(command) {
             guard try await confirm(command) else {
                 return "The user did not approve this command. It was not run. Do not retry it."

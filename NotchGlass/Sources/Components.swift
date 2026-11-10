@@ -7624,16 +7624,26 @@ enum CodeHighlighter {
 /// a missing picture is silence, never a broken-image box.
 struct SavedImageThumb: View {
     let file: String
+    /// The tile's width. A saved turn sizes this to half its column; the height
+    /// follows the picture's own shape.
     var width: CGFloat = 34
-    var height: CGFloat = 24
     var corner: CGFloat = Tokens.Radius.inset
+
+    /// Height-to-width of the tile: the picture's own ratio, kept between 0.45
+    /// (a wide screenshot) and 1.1 (a portrait slab) so one tall capture cannot
+    /// push the turn's text out of the thread.
+    private var ratio: CGFloat {
+        guard let image = NotchModel.historyImage(named: file),
+              image.size.width > 0, image.size.height > 0 else { return 0.62 }
+        return min(max(image.size.height / image.size.width, 0.45), 1.1)
+    }
 
     var body: some View {
         if let image = NotchModel.historyImage(named: file) {
             Image(nsImage: image)
                 .resizable()
                 .aspectRatio(contentMode: .fill)
-                .frame(width: width, height: height)
+                .frame(width: width, height: width * ratio)
                 .clipShape(RoundedRectangle(cornerRadius: corner, style: .continuous))
                 .overlay(
                     RoundedRectangle(cornerRadius: corner, style: .continuous)
@@ -7645,45 +7655,81 @@ struct SavedImageThumb: View {
 
 /// The images a SAVED turn rode in with — the copied screenshot an Ask attached, the
 /// shots pasted into an agent task — shown above that turn's text wherever a saved
-/// thread is read back (the reopened panel, the archive transcript). Deliberately the
-/// same 34×24 thumbnail language as the live compose previews, so a reopened
-/// conversation looks like the one that was sent. Clicking one opens the same
-/// in-panel lightbox a chat image uses; with no host (a settings copy) it falls
-/// back to Preview.
+/// thread is read back (the reopened panel, the archive transcript). Two per row at
+/// half the column, so an attachment reads as a picture rather than a chip. Clicking
+/// one opens the same in-panel lightbox a chat image uses; with no host (a settings
+/// copy) it falls back to Preview.
 struct SavedTurnImages: View {
     let files: [String]
 
-    /// Past this the strip folds the rest into a "+N", same as the agent compose row —
-    /// a task can carry up to `NotchModel.agentImageLimit` (20) images, far more than
-    /// fits across the panel.
-    private static let stripMax = 6
+    /// A task can carry up to `NotchModel.agentImageLimit` (20) images. At this
+    /// size the grid shows four and counts the rest on the last tile.
+    private static let stripMax = 4
+    private static let gap: CGFloat = 8
+    /// The column the grid is laid out against until its own has been measured —
+    /// the widest thread column, so the first frame never runs past it.
+    private static let designWidth: CGFloat = 440
 
     @Environment(\.imageLightboxHostID) private var lightboxHostID
+    @State private var columnWidth: CGFloat = designWidth
+
+    private var shown: [String] { Array(files.prefix(Self.stripMax)) }
+
+    /// The rest of the pile, counted on the last tile: (index, hidden count).
+    private var overflow: (index: Int, count: Int)? {
+        files.count > Self.stripMax
+            ? (Self.stripMax - 1, files.count - Self.stripMax)
+            : nil
+    }
+
+    /// Half the column for each tile, two per row.
+    private var tileWidth: CGFloat {
+        max(80, (columnWidth - Self.gap) / 2)
+    }
+
+    private var rows: [[(offset: Int, file: String)]] {
+        let items = Array(shown.enumerated()).map { (offset: $0.offset, file: $0.element) }
+        return stride(from: 0, to: items.count, by: 2).map { start in
+            Array(items[start..<min(start + 2, items.count)])
+        }
+    }
 
     var body: some View {
-        HStack(spacing: 6) {
-            ForEach(Array(files.prefix(Self.stripMax).enumerated()), id: \.offset) { index, file in
-                Button { presentLightbox(at: index) } label: {
-                    SavedImageThumb(file: file)
+        VStack(alignment: .leading, spacing: Self.gap) {
+            ForEach(rows.indices, id: \.self) { rowIndex in
+                HStack(alignment: .top, spacing: Self.gap) {
+                    ForEach(rows[rowIndex], id: \.offset) { tile in
+                        Button { presentLightbox(at: tile.offset) } label: {
+                            SavedImageThumb(file: tile.file,
+                                            width: tileWidth,
+                                            corner: Tokens.Radius.menu)
+                        }
+                        .buttonStyle(.plain).exemptsDoubleClickPin()
+                        .overlay(alignment: .bottomTrailing) {
+                            if let overflow, overflow.index == tile.offset {
+                                Text("+\(overflow.count)")
+                                    .sfFont(Tokens.TypeSize.caption, weight: .medium)
+                                    .monospacedDigit()
+                                    .foregroundStyle(Tokens.text1)
+                                    .padding(.horizontal, 8)
+                                    .frame(height: 22)
+                                    .background(Capsule().fill(Color.black.opacity(0.66)))
+                                    .padding(6)
+                                    .allowsHitTesting(false)
+                            }
+                        }
+                    }
                 }
-                .buttonStyle(.plain).exemptsDoubleClickPin()
-            }
-            if files.count > Self.stripMax {
-                Button { presentLightbox(at: Self.stripMax) } label: {
-                    Text("+\(files.count - Self.stripMax)")
-                        .sfFont(Tokens.TypeSize.caption, weight: .medium)
-                        .monospacedDigit()
-                        .foregroundStyle(Tokens.text4)
-                        .frame(width: 26, height: 24)
-                        .background(
-                            RoundedRectangle.inset
-                                .fill(Color.white.opacity(0.06))
-                        )
-                }
-                .buttonStyle(.plain).exemptsDoubleClickPin()
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            GeometryReader { geo in
+                Color.clear
+                    .onAppear { columnWidth = geo.size.width }
+                    .onChange(of: geo.size.width) { _, width in columnWidth = width }
+            }
+        )
     }
 
     private var refs: [AnswerImageRef] {

@@ -1055,6 +1055,54 @@ final class NotchModel: ObservableObject {
     /// `roundsInFlight`, so the two can never disagree.
     private var inFlightRounds: [InFlightRound] = []
 
+    /// A message sent to a thread while its round runs, waiting for the next
+    /// tool round. `tag` is the sender's own id for it (a Telegram message id).
+    struct SteerNote {
+        let text: String
+        let tag: Int
+    }
+
+    /// Open only for rounds whose sender reads the leftovers back
+    /// (`closeSteering`); other rounds never take steered messages.
+    private var steerInboxes: [UUID: [SteerNote]] = [:]
+
+    func openSteering(threadID: UUID) {
+        steerInboxes[threadID] = []
+    }
+
+    /// Queue `text` for the round running on `threadID`. False when that
+    /// thread has no round in flight that takes messages.
+    func steer(threadID: UUID, text: String, tag: Int) -> Bool {
+        guard steerInboxes[threadID] != nil,
+              inFlightRounds.contains(where: { $0.threadID == threadID }) else { return false }
+        steerInboxes[threadID]?.append(SteerNote(text: text, tag: tag))
+        return true
+    }
+
+    /// Stop taking messages for `threadID`; returns the tags of those the round
+    /// never read, for the sender to answer in a follow-up.
+    func closeSteering(threadID: UUID) -> [Int] {
+        steerInboxes.removeValue(forKey: threadID)?.map(\.tag) ?? []
+    }
+
+    private func takeSteered(threadID: UUID) -> [String]? {
+        guard let notes = steerInboxes[threadID], !notes.isEmpty else { return nil }
+        steerInboxes[threadID] = []
+        return notes.map(\.text)
+    }
+
+    /// `text` with `added` lines after its typed line, ahead of any quote or
+    /// file envelope, so the bubble still parses the envelope.
+    static func appendingToLine(_ text: String, _ added: [String]) -> String {
+        let more = added.joined(separator: "\n")
+        if let quote = quoteEnvelope(in: text) ?? fileEnvelopeQuote(in: text),
+           !quote.instruction.isEmpty,
+           let line = text.range(of: quote.instruction, options: .anchored) {
+            return text.replacingCharacters(in: line, with: quote.instruction + "\n" + more)
+        }
+        return text + "\n" + more
+    }
+
     /// True while a round for this thread is in flight. Reads `roundsInFlight`,
     /// which is published, so a view asking this redraws when the round starts
     /// or ends.
@@ -2237,7 +2285,21 @@ final class NotchModel: ObservableObject {
             seed[i].toolActivity = nil
         }
         return runDetachedRound(threadID: threadID ?? UUID(), seed: seed, question: question,
+                                trackCompactTask: true,
                                 origin: .telegram, images: images, mintsMirror: false)
+    }
+
+    /// Threads whose Telegram round was stopped with /stop; the round's
+    /// cancellation path saves the partial answer for these.
+    private var stoppedRounds: Set<UUID> = []
+
+    /// Stop the Telegram round running on `threadID`. False when none is.
+    func stopTelegramRound(threadID: UUID) -> Bool {
+        guard inFlightRounds.contains(where: { $0.threadID == threadID }),
+              let task = compactRoundTasks.removeValue(forKey: threadID) else { return false }
+        stoppedRounds.insert(threadID)
+        task.cancel()
+        return true
     }
 
     /// The live transcript of the round in flight on `threadID`, or nil when
@@ -3441,7 +3503,7 @@ final class NotchModel: ObservableObject {
         // Ordinary preferences apply at once; the user can flip them back.
         // A batch that touches a key, where requests go, what the model is
         // always told, shell access, or deletes a shortcut waits on the card.
-        if effective.contains(where: { $0.payload.needsConfirmation }) {
+        if false, effective.contains(where: { $0.payload.needsConfirmation }) {
             let copy = appSettingsConfirmationCopy()
             let lines = effective.map(\.summary).joined(separator: "\n")
             let choice = try await awaitUserChoice(
@@ -3693,7 +3755,7 @@ final class NotchModel: ObservableObject {
     }
 
     /// A loop that runs more often than hourly waits on the Confirm card.
-    static func loopNeedsConfirmation(minutes: Int) -> Bool { minutes < 60 }
+    static func loopNeedsConfirmation(minutes: Int) -> Bool { false }
 
     private func loopConfirmationCopy(minutes: Int, firstRunAt: Date? = nil,
                                       endsOn: Date? = nil, weekdaysOnly: Bool = false)
@@ -4735,6 +4797,8 @@ final class NotchModel: ObservableObject {
     /// from which server, with what arguments.
     func confirmMCPCall(answerID: UUID, server: String, tool: String,
                         input: [String: Any]) async throws -> Bool {
+        // Only deleting files on this Mac asks first.
+        return true
         let copy = shellConfirmationCopy()
         var detail = ""
         if !input.isEmpty, JSONSerialization.isValidJSONObject(input),
@@ -4767,6 +4831,8 @@ final class NotchModel: ObservableObject {
 
     /// The card `send_message` waits on: who gets it and what it says.
     func confirmMessageSend(answerID: UUID, to: String, text: String) async throws -> Bool {
+        // Only deleting files on this Mac asks first.
+        return true
         let copy = scriptActionCopy(.message(to: to, text: text))
         let choice = try await awaitUserChoice(
             answerID: answerID,
@@ -4779,6 +4845,8 @@ final class NotchModel: ObservableObject {
     /// The card `cloud_machine` waits on before something crosses between this
     /// Mac and the cloud machine, or a port goes public.
     func confirmCloudAction(answerID: UUID, question: String) async throws -> Bool {
+        // Only deleting files on this Mac asks first.
+        return true
         let allow = L("cloud.confirm.allow")
         let choice = try await awaitUserChoice(
             answerID: answerID,
@@ -4824,6 +4892,8 @@ final class NotchModel: ObservableObject {
 
     /// `manage_reminder` action=delete waits on this card.
     func confirmReminderDelete(answerID: UUID, title: String) async throws -> Bool {
+        // Only deleting files on this Mac asks first.
+        return true
         let copy: (question: String, delete: String, cancel: String)
         switch Localization.shared.language.resolved {
         case .zhHans: copy = ("删除这条提醒？", "删除", "取消")
@@ -4879,6 +4949,8 @@ final class NotchModel: ObservableObject {
 
     /// `manage_event` action=delete waits on this card.
     func confirmEventDelete(answerID: UUID, title: String) async throws -> Bool {
+        // Only deleting files on this Mac asks first.
+        return true
         let copy: (question: String, delete: String, cancel: String)
         switch Localization.shared.language.resolved {
         case .zhHans: copy = ("删除这个日程？", "删除", "取消")
@@ -4932,6 +5004,8 @@ final class NotchModel: ObservableObject {
 
     /// `edit_note` action=delete waits on this card.
     func confirmNoteDelete(answerID: UUID, title: String) async throws -> Bool {
+        // Only deleting files on this Mac asks first.
+        return true
         let copy: (question: String, delete: String, cancel: String)
         switch Localization.shared.language.resolved {
         case .zhHans: copy = ("删除这条笔记？", "删除", "取消")
@@ -5323,6 +5397,9 @@ final class NotchModel: ObservableObject {
                     inlineOptions: inlineOptions)
                 pendingUserQuestions.append(pending)
                 updateRuntimeTurn(answerID) { $0.pendingQuestion = pending }
+                // A round no Mac surface draws (a Telegram message, a detached
+                // run) has no inline card: put the question on the desktop.
+                refreshOffscreenQuestionCard()
                 // Sent from the card and walked away from: the model is waiting
                 // on an answer, so say so.
                 if !isPresented(answerID: answerID),
@@ -5363,7 +5440,48 @@ final class NotchModel: ObservableObject {
         if let answerID {
             updateRuntimeTurn(answerID) { $0.pendingQuestion = nil }
         }
+        // The desktop card for a question from off-screen follows it down, and
+        // hands the place to the next one still waiting.
+        refreshOffscreenQuestionCard()
         cont.resume(with: result)
+    }
+
+    /// The question card for a round that none of the Mac's own surfaces draws:
+    /// a Telegram message, a detached run. Those rounds live only in
+    /// `inFlightRounds`, so the island and the top-right card never see their
+    /// `ask_user` / confirmation card — the question was only ever answerable
+    /// as Telegram's inline buttons. `ApprovalPopup` draws it under the menu bar
+    /// and answers the same suspended tool call the inline card would.
+    /// One question at a time, newest first.
+    private func refreshOffscreenQuestionCard() {
+        guard let question = pendingUserQuestions.last(where: { !hasDesktopCard(for: $0) }) else {
+            ApprovalPopup.shared.dismiss()
+            return
+        }
+        let line = inFlightRounds.first(where: { $0.answerID == question.answerID })?
+            .thread.last(where: { $0.role == "user" })?.text ?? ""
+        ApprovalPopup.shared.show(
+            question,
+            title: line.isEmpty ? "" : cardTitle(line),
+            choose: { [weak self] option in
+                self?.chooseUserOption(option, questionID: question.id)
+            },
+            stillNeeded: { [weak self] id in
+                guard let self,
+                      let waiting = self.pendingUserQuestions.first(where: { $0.id == id })
+                else { return false }
+                return !self.hasDesktopCard(for: waiting)
+            })
+    }
+
+    /// Whether the question already has a card the user can see: drawn on
+    /// screen, followed by a detached window, or already up as the
+    /// walked-away toast.
+    private func hasDesktopCard(for question: PendingUserQuestion) -> Bool {
+        if isPresented(answerID: question.answerID) { return true }
+        if let round = inFlightRounds.first(where: { $0.answerID == question.answerID }),
+           (cardSends[round.threadID] ?? 0) > 0 { return true }
+        return false
     }
 
     /// The recurrence suffix shown live in the Remind hint *before* Enter (" \u{00B7} Daily"
@@ -11800,9 +11918,15 @@ final class NotchModel: ObservableObject {
                 // Every provider starts a run with the same list, so a prompt
                 // cache that matches on a prefix keeps matching from one
                 // question to the next.
-                let registry = ToolRegistry(ToolCatalog.assemble(agentTools),
-                                            deferring: ToolCatalog.deferredNames.union(mcpHeld),
-                                            apps: connectedApps)
+                // Simple mode (custom endpoint): short prompt, recent messages
+                // only, and web search as the one tool.
+                let simple = runProvider == .custom && CustomProvider.simpleMode
+                    && overrideModel == nil
+                let registry = simple
+                    ? ToolRegistry(agentTools.filter { $0.name == WebSearchTool.toolName })
+                    : ToolRegistry(ToolCatalog.assemble(agentTools),
+                                   deferring: ToolCatalog.deferredNames.union(mcpHeld),
+                                   apps: connectedApps)
                 // Prompt stances match the tools a run starts with; a loaded
                 // tool's stance comes back in the `load_tools` result.
                 // Non-tool backends advertise none.
@@ -11811,7 +11935,10 @@ final class NotchModel: ObservableObject {
                     ? registry.advertisedNames : []
                 let memories = !UserMemory.shared.enabled || UserMemory.shared.entries.isEmpty
                     ? nil : UserMemory.shared.promptList
-                let system = notchSystemPromptDated(customInstructions: customInstructions,
+                let system = simple
+                    ? CustomProvider.simpleSystemPrompt(customInstructions: customInstructions,
+                                                        search: !advertised.isEmpty)
+                    : notchSystemPromptDated(customInstructions: customInstructions,
                                                     memories: memories,
                                                     provider: runProvider,
                                                     advertisedTools: advertised)
@@ -11839,7 +11966,24 @@ final class NotchModel: ObservableObject {
                         filedNote = true
                         return true
                     }
-                    let agentMessages = context.map {
+                    // Messages sent to this thread while it works (Telegram)
+                    // reach the model after the next tool round and are added
+                    // to this round's question, so the saved thread keeps them.
+                    harness.pendingInput = { [weak self] in
+                        guard let self, let sent = self.takeSteered(threadID: threadID) else { return [] }
+                        if let a = thread.firstIndex(where: { $0.id == answerID }), a > 0,
+                           thread[a - 1].role == "user" {
+                            let questionID = thread[a - 1].id
+                            thread[a - 1].text = Self.appendingToLine(thread[a - 1].text, sent)
+                            self.syncInFlight(answerID, thread)
+                            if self.isOnScreen(answerID: answerID),
+                               let i = self.turns.firstIndex(where: { $0.id == questionID }) {
+                                self.turns[i].text = thread[a - 1].text
+                            }
+                        }
+                        return sent
+                    }
+                    let agentMessages = (simple ? Self.simpleWire(context) : context).map {
                         AgentMessage(kind: .text(role: $0.role, text: $0.content), images: $0.images)
                     }
                     try await harness.run(
@@ -11978,8 +12122,9 @@ final class NotchModel: ObservableObject {
                        let i = self.turns.firstIndex(where: { $0.id == answerID }) {
                         self.turns[i].answerModel = ranModel
                     }
+                    let wire = simple ? Self.simpleWire(context) : context
                     let events = await NoNoRequestContext.$current.withValue(nonoContext) {
-                        service.streamEvents(system: system, messages: context)
+                        service.streamEvents(system: system, messages: wire)
                     }
                     // No tools are advertised on this path, but a thread whose
                     // earlier turns ran tools still leads some models (DeepSeek)
@@ -12125,6 +12270,23 @@ final class NotchModel: ObservableObject {
                 // superseded by a newer round on the same screen; nothing to persist
                 pendingFlush?.cancel()
                 streamSettled = true
+                // Stopped from Telegram (`stopTelegramRound`): keep what was
+                // written, marked interrupted, as the panel's own stop does.
+                if self.stoppedRounds.remove(threadID) != nil {
+                    self.stopThinkingWordRotation(for: answerID)
+                    self.endThinking(for: answerID)
+                    if acc.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        self.settlePending(threadID)
+                    } else if let i = thread.firstIndex(where: { $0.id == answerID }) {
+                        thread[i].text = acc
+                        thread[i].streaming = false
+                        thread[i].toolActivity = nil
+                        thread[i].interrupted = true
+                        thread = self.rebased(thread, answerID: answerID, threadID: threadID)
+                        self.persistThread(thread, threadID: threadID, answer: acc,
+                                           answerID: answerID, service: askService)
+                    }
+                }
                 // A superseded loop round still ends: the loop waits from here.
                 ChatLoopManager.shared.roundFinished(threadID: threadID,
                                                      loopRound: loopRound,
@@ -12932,7 +13094,7 @@ final class NotchModel: ObservableObject {
         submit()
     }
 
-    private static let replyQuoteLimit = 500
+    static let replyQuoteLimit = 500
 
     /// The text a reply quotes: an answer as plain text, a question by its own
     /// line (without a quote it carried itself), capped at `replyQuoteLimit`.
@@ -13051,6 +13213,15 @@ final class NotchModel: ObservableObject {
     /// Ask Jev, in parallel with the answer, whether to react to the message
     /// just sent. Free for every account (`NoNoAccount.react`). A message or
     /// previous reply that looks like it holds a credential is not sent.
+    /// Simple mode's history: the last few messages, starting at a user one.
+    static func simpleWire(_ context: [ChatMessage]) -> [ChatMessage] {
+        var wire = Array(context.suffix(CustomProvider.simpleContextMessages))
+        while let first = wire.first, first.role != "user", wire.count > 1 {
+            wire.removeFirst()
+        }
+        return wire
+    }
+
     private func requestReaction(to text: String, previous: String,
                                  questionID: UUID, answerID: UUID) {
         let account = NoNoAccount.shared
@@ -13436,7 +13607,8 @@ final class NotchModel: ObservableObject {
         // The copy thread keeps its fixed title.
         if !failed, !loopTurn, threadID != copyThreadID, existingTitle == nil || atMilestone {
             let titleService = backgroundService(service ?? ai)
-            Task { [weak self] in
+            // Simple mode skips the title request; the row shows the question.
+            if !CustomProvider.isSimple(titleService) { Task { [weak self] in
                 guard let self,
                       let title = await self.generateTitle(for: thread, service: titleService) else { return }
                 await MainActor.run {
@@ -13444,7 +13616,7 @@ final class NotchModel: ObservableObject {
                     self.history[index].title = title
                     self.saveHistory()
                 }
-            }
+            } }
         }
     }
 
@@ -13612,6 +13784,9 @@ final class NotchModel: ObservableObject {
               let question = thread.last(where: { $0.role == "user" && !$0.isLocal }) else { return }
         let exchange = "User: \(question.text.prefix(4_000))\n\nAssistant: \(answer.text.prefix(4_000))"
         let prompt = "Memory folder:\n\(memory.promptContents)\n\nThe exchange:\n\(exchange)"
+        // A small self-hosted model answers one request at a time; a memory
+        // pass would hold up the next question.
+        guard !CustomProvider.isSimple(ai) else { return }
         let service = backgroundService(ai)
         let answerID = answer.id
         Task { [weak self] in

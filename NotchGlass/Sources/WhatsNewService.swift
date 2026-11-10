@@ -107,6 +107,30 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.9.30",
+            date: "2026-11-10",
+            features: [
+                "Custom endpoints have a Simple mode for small and local models.",
+                "Questions from a Telegram chat also appear as a card under the menu bar.",
+            ],
+            improvements: [
+                "In Telegram, messages sent while Notchi is working reach the current answer.",
+                "In Telegram, several messages sent in a row are answered as one request.",
+                "In Telegram, a reply to an older message continues that conversation without waiting.",
+                "In Telegram, /stop stops the current answer.",
+                "Notchi can read verification codes from recent emails in Mail.",
+                "Commands run without asking, except ones that delete files.",
+                "Image attachments in past chats show as larger pictures.",
+                "Custom endpoint fields save as you type and show the full request address.",
+                "Less space between an answer and the follow-up field.",
+            ],
+            fixes: [
+                "Fixed Mail calls timing out after Notchi searched a large inbox.",
+                "Fixed ssh commands hanging for minutes on an unreachable host.",
+                "Fixed a connected cloud machine key going unused.",
+            ]
+        ),
+        Entry(
             version: "0.9.29",
             date: "2026-11-09",
             features: [

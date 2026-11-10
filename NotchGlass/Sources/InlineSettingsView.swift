@@ -506,13 +506,15 @@ struct InlineSettingsView: View {
     /// finishes minutes after the click, is the case that needs it.
     @State private var cliTick = 0
 
-    /// The custom endpoint's three fields (see `CustomProvider`), edited together
-    /// and committed by one Save — unlike a key, an endpoint that's half-typed is
-    /// worse than the old one, so nothing is persisted keystroke by keystroke.
+    /// The custom endpoint's three fields (see `CustomProvider`). They save
+    /// themselves a short pause after the last keystroke (`scheduleCustomSave`).
     @State private var customName: String = CustomProvider.name
     @State private var customURL: String = CustomProvider.baseURL
     @State private var customModel: String = CustomProvider.model
-    @State private var customSaved = false
+    @State private var customSaveTask: Task<Void, Never>?
+    @State private var customSimple: Bool = CustomProvider.simpleMode
+    /// Focus for the key field, so tapping the masked key lands the caret in it.
+    @FocusState private var keyFieldFocused: Bool
 
     /// Whether any of the three differs from what's stored — the only state where
     /// the custom Save button lights up.
@@ -833,7 +835,7 @@ struct InlineSettingsView: View {
                         .padding(.leading, 14)
                         .background {
                             // Settings window only: the right pane is a darker
-                            // panel with a rounded leading corner, 8pt below
+                            // panel with a rounded leading corner, flush with
                             // the window's top edge.
                             if inWindow {
                                 GeometryReader { g in
@@ -846,7 +848,7 @@ struct InlineSettingsView: View {
                                                                    style: .continuous)
                                                 .strokeBorder(.white.opacity(0.07), lineWidth: 1)
                                         }
-                                        .padding(.top, -(top - 8))
+                                        .padding(.top, -top)
                                         .padding(.trailing, -(NotchBody.panelPadding + 1))
                                         .padding(.bottom, -(NotchBody.panelPadding + 1))
                                         .padding(.leading, -4)
@@ -1967,6 +1969,9 @@ struct InlineSettingsView: View {
         } else {
             keyRow
         }
+        if keyScope == .custom {
+            customSimpleRow
+        }
 
         // The CLI backends have no key to fetch — their own rows carry the
         // sign-in copy, so the generic "get a key at …" footer is wrong for
@@ -1993,62 +1998,88 @@ struct InlineSettingsView: View {
                     text: $customName)
         customField(label: L("model.custom.url"),
                     placeholder: L("model.custom.urlPlaceholder"),
-                    text: $customURL)
-        if let resolved = CustomProvider.normalized(customURL) {
-            Text(L("model.custom.resolved", resolved.absoluteString))
-                .font(.sf(Tokens.TypeSize.meta))
-                .foregroundStyle(Tokens.text3)
-                .lineLimit(1)
-                .truncationMode(.middle)
-                .padding(.leading, 76)
-        }
+                    text: $customURL,
+                    suffix: customURLSuffix)
         customField(label: L("model.custom.model"),
                     placeholder: L("model.custom.modelPlaceholder"),
                     text: $customModel)
-        HStack(spacing: 12) {
-            Spacer(minLength: 0)
-            // Test lives here rather than beside the key, because for this provider
-            // the thing worth probing is the endpoint — the key may not exist at all.
-            if testing {
-                ProgressView().controlSize(.small)
-            } else if CustomProvider.chatEndpoint != nil, !canSaveCustom {
-                SettingActionButton(title: L("model.test")) { test() }
-            }
-            SettingActionButton(title: customSaved ? L("model.saved") : L("model.save"),
-                                tone: canSaveCustom || customSaved ? Tokens.text2 : Tokens.text4) {
-                saveCustom()
-            }
-            .disabled(!canSaveCustom && !customSaved)
-            .animation(.easeOut(duration: 0.2), value: customSaved)
+    }
+
+    /// The custom endpoint's simple-mode switch, under its key row.
+    private var customSimpleRow: some View {
+        settingRow(label: L("model.custom.simple"), info: L("model.custom.simple.hint"),
+                   aligned: true) {
+            Toggle("", isOn: Binding(
+                get: { customSimple },
+                set: { on in
+                    Haptics.levelChange()
+                    customSimple = on
+                    CustomProvider.simpleMode = on
+                }
+            ))
+            .labelsHidden()
+            .toggleStyle(.switch)
+            .controlSize(.mini)
+            .tint(Tokens.text2)
         }
+    }
+
+    /// The path normalization appends to what the user typed (usually
+    /// `/v1/chat/completions`), drawn dimmed right after the typed text so the
+    /// field shows the full address requests go to. Empty when nothing is added.
+    private var customURLSuffix: String {
+        guard let resolved = CustomProvider.normalized(customURL)?.absoluteString else { return "" }
+        var typed = customURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        while typed.hasSuffix("/") { typed.removeLast() }
+        let withScheme = typed.contains("://") ? typed : "https://" + typed
+        guard resolved.hasPrefix(withScheme) else { return "" }
+        return String(resolved.dropFirst(withScheme.count))
     }
 
     /// One labelled text field in the key section's column, matching the key row's
     /// field chrome so the block reads as one form.
     private func customField(label: String, placeholder: String,
-                             text: Binding<String>) -> some View {
+                             text: Binding<String>, suffix: String = "") -> some View {
         HStack(spacing: 12) {
             Text(label)
                 .font(.sf(Tokens.TypeSize.form, weight: .medium))
                 .foregroundStyle(Tokens.text2)
                 .frame(width: 64, alignment: .leading)
-            ZStack(alignment: .leading) {
-                if text.wrappedValue.isEmpty {
-                    Text(placeholder)
-                        .font(.sf(Tokens.TypeSize.form))
-                        .foregroundStyle(Tokens.text3)
-                        .lineLimit(1)
-                        .allowsHitTesting(false)
-                }
-                TextField("", text: text)
-                    .textFieldStyle(.plain)
+            // One structure for every state, so the text field keeps its
+            // identity and focus while the suffix appears and disappears.
+            // A hidden copy of the typed text sizes the field when there is a
+            // suffix; it gives up width first when the address is too long.
+            HStack(spacing: 0) {
+                Text(text.wrappedValue)
                     .font(.sf(Tokens.TypeSize.form))
-                    .foregroundStyle(Tokens.text1)
-                    .onSubmit { saveCustom() }
-                    // Typing here counts as activity, so a pointer that drifted off
-                    // the island can't fold the panel mid-edit.
-                    .onChange(of: text.wrappedValue) { model.noteUserTyping() }
+                    .lineLimit(1)
+                    .padding(.trailing, 4)
+                    .hidden()
+                    .frame(minWidth: 24,
+                           maxWidth: suffix.isEmpty ? .infinity : nil,
+                           alignment: .leading)
+                    .overlay(alignment: .leading) {
+                        ZStack(alignment: .leading) {
+                            if text.wrappedValue.isEmpty {
+                                Text(placeholder)
+                                    .font(.sf(Tokens.TypeSize.form))
+                                    .foregroundStyle(Tokens.text3)
+                                    .lineLimit(1)
+                                    .fixedSize()
+                                    .allowsHitTesting(false)
+                            }
+                            customTextField(text)
+                        }
+                    }
+                Text(suffix)
+                    .font(.sf(Tokens.TypeSize.meta))
+                    .foregroundStyle(Tokens.text3)
+                    .lineLimit(1)
+                    .fixedSize()
+                    .allowsHitTesting(false)
+                Spacer(minLength: 0)
             }
+            .clipped()
             .padding(.horizontal, 12)
             .frame(height: 34)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -2056,10 +2087,38 @@ struct InlineSettingsView: View {
         }
     }
 
+    /// Save the custom fields 0.6 s after the last keystroke, so the model list
+    /// is not refetched on every character.
+    private func scheduleCustomSave() {
+        customSaveTask?.cancel()
+        guard canSaveCustom else { return }
+        customSaveTask = Task {
+            try? await Task.sleep(nanoseconds: 600_000_000)
+            guard !Task.isCancelled else { return }
+            saveCustom()
+        }
+    }
+
+    /// The plain text field used by `customField`.
+    private func customTextField(_ text: Binding<String>) -> some View {
+        TextField("", text: text)
+            .textFieldStyle(.plain)
+            .font(.sf(Tokens.TypeSize.form))
+            .foregroundStyle(Tokens.text1)
+            .onSubmit { saveCustom() }
+            // Typing here counts as activity, so a pointer that drifted off
+            // the island can't fold the panel mid-edit.
+            .onChange(of: text.wrappedValue) {
+                model.noteUserTyping()
+                scheduleCustomSave()
+            }
+    }
+
     /// Commit the custom endpoint. The catalog is dropped first: the model list
     /// belongs to whichever server the old URL pointed at, and keeping it would
     /// offer models the new one may not serve.
     private func saveCustom() {
+        customSaveTask?.cancel()
         guard canSaveCustom else { return }
         CustomProvider.name = customName
         CustomProvider.baseURL = customURL
@@ -2074,12 +2133,7 @@ struct InlineSettingsView: View {
         testResult = nil    // the last verdict belonged to the previous endpoint
         activateIfShown(.custom)
         NotificationCenter.default.post(name: .aiBackendChanged, object: nil)
-        withAnimation(.easeOut(duration: 0.2)) { customSaved = true }
         Task { await refreshModels() }
-        Task {
-            try? await Task.sleep(nanoseconds: 1_800_000_000)
-            withAnimation(.easeOut(duration: 0.3)) { customSaved = false }
-        }
     }
 
     /// Retarget the key section onto `p`, reloading its stored key and edit
@@ -2092,7 +2146,6 @@ struct InlineSettingsView: View {
         customName = CustomProvider.name
         customURL = CustomProvider.baseURL
         customModel = CustomProvider.model
-        customSaved = false
         apiKey = APIKeyStore.stored(for: p)
         saved = false
         testResult = nil   // last verdict belonged to the old provider/key
@@ -2187,6 +2240,7 @@ struct InlineSettingsView: View {
                             .font(.sf(Tokens.TypeSize.form))
                             .foregroundStyle(Tokens.text1)
                             .disabled(envOverride)
+                            .focused($keyFieldFocused)
                             // Return commits the paste — same as the Save button
                             // (which also unlocks the live model list).
                             .onSubmit { save() }
@@ -2208,6 +2262,12 @@ struct InlineSettingsView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .recessedSurface(in: RoundedRectangle.control, lit: editingKey)
                 .opacity(envOverride ? 0.5 : 1)
+                // The saved key's field is the way back into editing.
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    guard !editingKey, !envOverride else { return }
+                    startEditingKey()
+                }
 
                 if editingKey {
                     // While editing, only Save (and Cancel) — Test is deliberately
@@ -2226,7 +2286,6 @@ struct InlineSettingsView: View {
                     } else {
                         SettingActionButton(title: L("model.test")) { test() }
                     }
-                    SettingActionButton(title: L("model.change")) { startEditingKey() }
                 }
                 // One control: the button itself flips to "Saved" for a beat after
                 // a save, then settles back to "Save" — no separate badge, no green
@@ -3727,6 +3786,7 @@ struct InlineSettingsView: View {
         apiKey = ""
         testResult = nil
         withAnimation(.easeOut(duration: 0.16)) { editingKey = true }
+        DispatchQueue.main.async { keyFieldFocused = true }
     }
 
     /// Abandon the edit and fall back to the stored key's masked summary.
@@ -9291,6 +9351,9 @@ struct InlineSettingsView: View {
     /// verdict. Test is only offered once a key is saved, so it always checks
     /// what's on disk — never an unsaved draft. Guarded via `canTest`.
     private func test() {
+        // A custom field still inside its save delay is saved first, so Test
+        // probes what is on screen.
+        if keyScope == .custom, canSaveCustom { saveCustom() }
         guard canTest else { return }
         let target = keyScope
         let key = APIKeyStore.current(for: target) ?? APIKeyStore.stored(for: target)

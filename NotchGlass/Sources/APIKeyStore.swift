@@ -503,6 +503,43 @@ enum CustomProvider {
         }
     }
 
+    /// Simple mode: questions go to this endpoint with a short system prompt,
+    /// the last few messages and web search as the only tool, and no title or memory requests
+    /// follow the answer. On by default, for small self-hosted models.
+    static var simpleMode: Bool {
+        get { UserDefaults.standard.object(forKey: simpleKey) as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: simpleKey) }
+    }
+    private static let simpleKey = "custom_provider.simple"
+
+    /// Whether `service` is the custom endpoint running in simple mode.
+    static func isSimple(_ service: AIService) -> Bool {
+        simpleMode && (service as? OpenAICompatAIService)?.provider == .custom
+    }
+
+    /// How many messages simple mode sends: the question and the two exchanges
+    /// before it.
+    static let simpleContextMessages = 5
+
+    /// The whole system prompt in simple mode.
+    static func simpleSystemPrompt(customInstructions: String?, search: Bool) -> String {
+        let fmt = DateFormatter()
+        fmt.dateStyle = .full
+        fmt.timeStyle = .none
+        var prompt = "You are Notchi, an assistant on the user's Mac. Answer briefly "
+            + "and directly, in the language the user writes in. Today is "
+            + fmt.string(from: Date()) + "."
+        if search {
+            prompt += " Use web_search for news, prices, schedules and other facts that "
+                + "change; otherwise answer from what you know."
+        }
+        if let custom = customInstructions?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !custom.isEmpty {
+            prompt += "\n\nThe user's preferences:\n" + custom
+        }
+        return prompt
+    }
+
     /// The model id to call. Stored in the same per-provider slot every other
     /// provider's override uses, so nothing downstream needs a special case.
     static var model: String {

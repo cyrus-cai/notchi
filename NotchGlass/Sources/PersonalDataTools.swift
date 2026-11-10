@@ -1087,18 +1087,25 @@ struct ReadMailTool: NotchTool {
     static let toolName = "read_mail"
     let name = toolName
     let description = """
-    Reads the user's Apple Mail inbox: action=unread lists unread messages, \
-    action=search lists messages whose sender or subject contains `query`, \
-    then messages from the last `days` days (default 30, up to 365) whose text \
-    contains it (an order or \
+    Reads the user's Apple Mail inbox: action=codes returns the messages from \
+    the last `minutes` minutes (default 30) with the one-time codes found in \
+    them — use it for a verification code a site just sent; \
+    action=unread lists unread messages from the last 7 days, \
+    action=search lists messages from the last `days` days (default 30, up to \
+    365) whose sender or subject contains `query`, then those from the last 14 \
+    days whose text contains it (an order or \
     tracking number, an error message, an invoice number), with the line it \
     was found in, \
-    action=read returns one message's text by `id` from a list. Newest first.
+    action=read returns one message's text by `id` from a list. Newest first. \
+    One call at a time: Mail answers slowly, and a call made while another runs \
+    is refused.
     """
     let schema: [String: Any] = [
         "type": "object",
         "properties": [
-            "action": ["type": "string", "enum": ["unread", "search", "read"]],
+            "action": ["type": "string", "enum": ["codes", "unread", "search", "read"]],
+            "minutes": ["type": "integer", "minimum": 1, "maximum": 180,
+                        "description": "codes: how far back to look. Default 30."],
             "query": ["type": "string", "description": "search: text in the sender, subject or (last 30 days) message body."],
             "id": ["type": "string", "description": "read: the message id from a list."],
             "limit": ["type": "integer", "minimum": 1, "maximum": 30, "description": "unread/search: how many, default 10."],
@@ -1110,6 +1117,25 @@ struct ReadMailTool: NotchTool {
 
     func execute(_ input: [String: Any]) async throws -> String {
         let action = PersonalDataFormat.string(input["action"]) ?? "unread"
+        if action == "codes" {
+            let minutes = min(max(PersonalDataFormat.int(input["minutes"]) ?? 30, 1), 180)
+            let limit = min(max(PersonalDataFormat.int(input["limit"]) ?? 10, 1), 30)
+            switch await MailService.recent(minutes: minutes, limit: limit) {
+            case .failure(let error): return "Error: \(error.errorDescription ?? "")"
+            case .success(let rows):
+                guard !rows.isEmpty else {
+                    return "No message in the inbox from the last \(minutes) minutes. If a code was just sent, it may not have arrived yet; ask the user or call again in a minute, not at once."
+                }
+                return rows.map { row in
+                    let h = row.header
+                    let found = MailService.codes(in: h.subject + "\n" + row.body)
+                    let tail = found.isEmpty
+                        ? "\n  text: " + String(row.body.replacingOccurrences(of: "\n", with: " ").prefix(300))
+                        : "\n  code: " + found.joined(separator: " or ")
+                    return "- \(h.date) · \(h.sender) · \(h.subject) · id \(h.id)\(tail)"
+                }.joined(separator: "\n")
+            }
+        }
         if action == "read" {
             guard let id = PersonalDataFormat.string(input["id"]) else { return "Error: give the message id." }
             switch await MailService.read(id: id) {

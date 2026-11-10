@@ -855,7 +855,7 @@ struct NotchBody: View {
 
     /// Where a thread pull ends: the result page's geometry for the thread it
     /// opens, from the same constants `resultView` is built on. Short thread:
-    /// header row + 18pt gap, the whole stack, the 24pt gap, the follow-up row.
+    /// header row + 18pt gap, the whole stack, the 12pt gap, the follow-up row.
     /// Long thread: the 407pt scroller pinned to its bottom — the last turn
     /// rests 64pt (runway + anchor) above the frame's bottom, where the
     /// follow-up floats — with the top fade and frost under the header.
@@ -863,7 +863,7 @@ struct NotchBody: View {
         let height = revealThreadHeight
         guard height > answerMaxHeight || revealThreadPartial else {
             return ThreadRevealTargets(headerSlot: revealHeaderHeight + 18,
-                                       viewport: height, gap: 24, fade: 0)
+                                       viewport: height, gap: 12, fade: 0)
         }
         let tail = clippedBottomRunway + 2
         return ThreadRevealTargets(headerSlot: 0,
@@ -4346,14 +4346,14 @@ struct NotchBody: View {
     private let answerMaxHeight: CGFloat = 300
 
     /// Fixed frame height for `clippedConversation` when the follow-up input floats
-    /// over its bottom. = answerMaxHeight (300) + the .padding(.top, 24) gap that
-    /// today separates the scroll from the follow-up row (24) + followUpRow's own
-    /// rendered height (27pt content + 6+6 vertical padding = 39pt) = 363pt.
-    /// Absorbing those 63pt into the scroll frame keeps `resultView`'s total height
+    /// over its bottom. = answerMaxHeight (300) + the .padding(.top, 12) gap that
+    /// today separates the scroll from the follow-up row (12) + followUpRow's own
+    /// rendered height (27pt content + 6+6 vertical padding = 39pt) = 351pt.
+    /// Absorbing those 51pt into the scroll frame keeps `resultView`'s total height
     /// identical to today — the panel never resizes at the short↔long crossover,
     /// which also keeps the source-popup y-offset formula (`rect.minY - geo.size.height`)
     /// correct without needing to account for the shift.
-    private let clippedAnswerMaxHeight: CGFloat = 363
+    private let clippedAnswerMaxHeight: CGFloat = 351
 
     /// Height of the floating header block the clipped thread reaches UP behind:
     /// the 26pt back/pin row plus the 18pt gap the short layout keeps below it.
@@ -4374,13 +4374,13 @@ struct NotchBody: View {
 
     /// Bottom runway inside `clippedConversation`: empty scroll space the last turn
     /// scrolls DOWN into, behind the floating follow-up input. = the input's reach
-    /// from the viewport bottom (the 39pt box, no lift) + 23pt breathing room = 62pt.
+    /// from the viewport bottom (the 39pt box, no lift) + 11pt breathing room = 50pt.
     /// It lives
     /// ABOVE the `scrollBottomID` anchor in the VStack (not in `.padding(.bottom)`),
     /// so `scrollTo(anchor:.bottom)` pins the anchor's bottom to the viewport bottom
-    /// while the last real turn rests ~64pt above it — 13pt above the input's top
+    /// while the last real turn rests ~52pt above it — 13pt above the input's top
     /// edge, entirely within the dissolve zone.
-    private let clippedBottomRunway: CGFloat = 62
+    private let clippedBottomRunway: CGFloat = 50
 
     /// Height of the bottom blur band — kept 4pt SHORTER than the runway so the band
     /// tapers fully to clear before it touches the last resting row (mirrors the
@@ -4617,7 +4617,7 @@ struct NotchBody: View {
                 }
                 // The resume capsule already spends the 24pt gap under the answer;
                 // the input just needs to clear the capsule, not repeat that gap.
-                .padding(.top, model.openAgentResume == nil ? 24 : 10)
+                .padding(.top, model.openAgentResume == nil ? 12 : 10)
                 .transition(.opacity)
             } else if !model.isConfigured {
                 // Clipped + unconfigured: the setup CTA stays a sibling (it's a

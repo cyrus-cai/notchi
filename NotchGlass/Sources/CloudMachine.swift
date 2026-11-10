@@ -105,6 +105,18 @@ final class InstaBoxAccount: ObservableObject {
             && UserDefaults.standard.bool(forKey: enabledKey) && APIKeyStore.currentInstaBoxKey() != nil
     }
 
+    /// Why a round goes without `cloud_machine` while the feature is built in:
+    /// the system prompt says it, so the model tells the user instead of
+    /// looking for the tool on this Mac. `nil` when the tool is offered or the
+    /// feature is off.
+    nonisolated static var unavailableReason: String? {
+        guard DebugFeatureFlags.cloudMachine, !isAvailable else { return nil }
+        if !UserDefaults.standard.bool(forKey: enabledKey) {
+            return "it is turned off in Settings → Chat → Cloud machine"
+        }
+        return "it is not connected to an InstaBox account; turning it on in Settings → Chat → Cloud machine connects it"
+    }
+
     private init() {
         if Self.isAvailable {
             state = .connected(login: UserDefaults.standard.string(forKey: Self.loginKey) ?? "")
@@ -208,8 +220,11 @@ final class InstaBoxAccount: ObservableObject {
             throw InstaBoxFailure(status: 0, code: "expired_token", message: "The code expired.", retryAfter: nil)
         } catch is CancellationError {
         } catch {
+            // The switch keeps the value the user set. Writing false here once
+            // left a connected key unused: `isAvailable` went false, the tool
+            // dropped out of every round with no word to the model, and it
+            // spent a round hunting for it (2026-11-03).
             DiagnosticsLog.shared.record(provider: "InstaBox", kind: "claim-failed")
-            UserDefaults.standard.set(false, forKey: Self.enabledKey)
             state = .failed
         }
     }
@@ -501,7 +516,9 @@ struct CloudMachineTool: NotchTool {
     the page again. action=show_element takes a picture of element `index` (a \
     captcha image) and returns a Markdown image line for your answer, so the user \
     sees it. Every one of them returns the page as it is afterwards, with \
-    fresh numbers: use only numbers from the latest result. The browser keeps its \
+    fresh numbers: use only numbers from the latest result. On a long page, pass \
+    `find` (action=page_state find=Password) to get just the matching elements \
+    instead of reading the saved output in parts. The browser keeps its \
     cookies between calls. The first call can take a minute while the machine starts.
     """
     let schema: [String: Any] = [
@@ -519,6 +536,8 @@ struct CloudMachineTool: NotchTool {
             "direction": ["type": "string", "enum": ["up", "down"], "description": "action=scroll. Default down."],
             "app": ["type": "string",
                     "description": "Browser actions: another app on the cloud machine's desktop. Default Chromium."],
+            "find": ["type": "string",
+                     "description": "Browser actions: return only the elements whose line contains this text (a field label, a button's words) instead of the whole page."],
             "command": ["type": "string", "description": "action=shell: the bash command."],
             "timeout_seconds": ["type": "integer", "minimum": 1, "maximum": 600,
                                 "description": "action=shell: seconds before it is stopped. Default 60."],
@@ -570,6 +589,7 @@ struct CloudMachineTool: NotchTool {
         var job: [String: Any] = ["op": op]
         if let app = Self.text(input, "app") { job["app"] = app }
         let index = (input["index"] as? NSNumber)?.intValue ?? (input["index"] as? String).flatMap { Int($0) }
+        if let find = Self.text(input, "find") { job["find"] = find }
         switch action {
         case "browse":
             guard var url = Self.text(input, "url") else { return "Error: url is required." }
@@ -840,6 +860,7 @@ enum CloudDesktopBridge {
     // op: open, state, click, fill, select, type, key, back, scroll, snap, apps
     import net from 'node:net';
     import fs from 'node:fs';
+    import os from 'node:os';
     import { spawn } from 'node:child_process';
 
     const SOCK = '/tmp/notchi-cu.sock';
@@ -1100,6 +1121,71 @@ enum CloudDesktopBridge {
       return `Saved a picture of element ${index} to ${path}.`;
     }
 
+    // CPU ticks (utime + stime) of a process, from /proc/<pid>/stat.
+    function ticks(pid) {
+      try {
+        const s = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
+        const f = s.slice(s.lastIndexOf(')') + 2).split(' ');
+        return +f[11] + +f[12];
+      } catch { return null; }
+    }
+
+    // Processes using at least `floor` percent of one core over one second.
+    async function busyProcesses(floor) {
+      const first = new Map();
+      for (const p of fs.readdirSync('/proc')) {
+        if (!/^\d+$/.test(p)) continue;
+        const t = ticks(p);
+        if (t !== null) first.set(p, t);
+      }
+      await sleep(1000);
+      const out = [];
+      for (const [p, t0] of first) {
+        const t1 = ticks(p);
+        if (t1 === null) continue;
+        // At 100 ticks a second, ticks in one second are percent of a core.
+        const pct = t1 - t0;
+        if (pct < floor) continue;
+        let name = '';
+        try { name = fs.readFileSync(`/proc/${p}/comm`, 'utf8').trim(); } catch {}
+        out.push({ pid: +p, pct, name });
+      }
+      return out.sort((a, b) => b.pct - a.pct);
+    }
+
+    // Desktop processes that each held a full core on 2026-11-09 and made every
+    // accessibility call time out after 30 s. Chromium does not need them.
+    const SPINNERS = ['xfce4-panel', 'xfdesktop', 'xfsettingsd', 'xfce4-notifyd', 'xfwm4'];
+
+    // Stops any of SPINNERS that is using most of a core, when the machine is
+    // loaded. Returns a line for the result, or ''.
+    async function healDesktop() {
+      if (os.loadavg()[0] < os.cpus().length * 0.75) return '';
+      const killed = [];
+      for (const b of await busyProcesses(60)) {
+        if (!SPINNERS.includes(b.name)) continue;
+        try { process.kill(b.pid, 'SIGKILL'); killed.push(`${b.name} (${b.pct}%)`); } catch {}
+      }
+      if (!killed.length) return '';
+      log(`stopped spinning ${killed.join(', ')}`);
+      return `Stopped desktop processes that were each using a full core: ${killed.join(', ')}.`;
+    }
+
+    // Load and busy processes, appended to a timeout so the cause is in the
+    // result instead of found later.
+    async function diagnose() {
+      const [l1, l5] = os.loadavg();
+      const busy = (await busyProcesses(30)).slice(0, 5)
+        .map((b) => `${b.name} pid ${b.pid} ${b.pct}%`).join(', ') || 'none above 30%';
+      return `Machine load ${l1.toFixed(1)} (1 min), ${l5.toFixed(1)} (5 min) on ${os.cpus().length} cores. `
+        + `Busy processes: ${busy}. Waiting does not fix a busy process: stop it with action=shell `
+        + '(kill PID), or restart the browser with pkill chromium and action=browse.';
+    }
+
+    // The page as the model saw it, without element numbers, to tell whether a
+    // click changed anything.
+    const plainState = (s) => s.replace(/^(\s*)\d+ /gm, '$1');
+
     async function tool(name, args) {
       const { text, failed } = textOf(await ask({ tool: name, args }));
       if (failed) throw new Error(`${name}: ${text}`);
@@ -1135,6 +1221,12 @@ enum CloudDesktopBridge {
             await tool('perform_secondary_action', { app, element_index: index, action: own });
           } else {
             await tool('click', { app, element_index: index });
+          }
+          const box = frameOf(el.line);
+          if (box && (box.w <= 2 || box.h <= 2)) {
+            return `Clicked ${index} (${el.role}). It is ${Math.round(box.w)}x${Math.round(box.h)} pixels, `
+              + 'so it is likely a hidden input under a drawn box: if the page below shows no change, '
+              + 'click its label or the visible box next to it.';
           }
           return `Clicked ${index} (${el.role}).`;
         }
@@ -1214,22 +1306,45 @@ enum CloudDesktopBridge {
     async function run() {
       const job = JSON.parse(process.env.NOTCHI_CU || '{}');
       const app = job.app || 'Chromium';
-      await connected();
       const lines = [];
+      const healed = await healDesktop();
+      if (healed) lines.push(healed);
+      await connected();
+      let before = '';
+      if (job.op === 'click') {
+        try {
+          const raw = fs.readFileSync(stateFile(app), 'utf8');
+          before = plainState(compact(isChromium(app) ? pageOnly(raw) : raw));
+        } catch {}
+      }
       let said = '';
       try {
         said = await perform(job, app);
       } catch (e) {
-        process.stdout.write(`Error: ${e.message}\n`);
+        const extra = /timed out/i.test(e.message) ? '\n' + await diagnose() : '';
+        process.stdout.write([...lines, `Error: ${e.message}${extra}`].join('\n') + '\n');
         process.exit(1);
       }
       if (said) lines.push(said);
       if (job.op !== 'apps') {
         if (job.op !== 'state' && job.op !== 'open') await sleep(1200);
         try {
-          lines.push(await readState(app));
+          let state = await readState(app);
+          if (before && plainState(state) === before) {
+            lines.push('The page is the same as before this click: the click did not take effect. '
+              + 'Do not assume it worked; try the element\'s label, a neighbouring element, or action=key.');
+          }
+          if (job.find) {
+            const want = String(job.find).toLowerCase();
+            const hits = state.split('\n').filter((l) => l.toLowerCase().includes(want));
+            state = hits.length
+              ? `Elements matching "${job.find}" (${hits.length}):\n` + hits.map((l) => l.trim()).join('\n')
+              : `No element matches "${job.find}".`;
+          }
+          lines.push(state);
         } catch (e) {
-          lines.push(`Reading ${app} failed: ${e.message}`);
+          const extra = /timed out/i.test(e.message) ? '\n' + await diagnose() : '';
+          lines.push(`Reading ${app} failed: ${e.message}${extra}`);
         }
       }
       let out = lines.join('\n');

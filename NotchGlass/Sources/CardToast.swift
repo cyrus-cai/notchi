@@ -220,7 +220,7 @@ final class CardToasts {
     }
 }
 
-private final class ToastPanel: NSPanel {
+final class ToastPanel: NSPanel {
     init() {
         super.init(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel],
                    backing: .buffered, defer: false)
@@ -241,7 +241,7 @@ private final class ToastPanel: NSPanel {
 
 /// A click on a card lands while another app is active, so it must not be spent
 /// on activating the window.
-private final class ToastHostingView<Content: View>: NSHostingView<Content> {
+final class ToastHostingView<Content: View>: NSHostingView<Content> {
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }
 

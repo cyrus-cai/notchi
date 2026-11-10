@@ -4275,8 +4275,10 @@ struct DetachedThreadView: View {
         compactShortcut ? Self.restingTopGap : ThreadScroll.runway
     }
     private var scrollBottomInset: CGFloat {
-        compactShortcut ? Self.restingBottomGap : ThreadScroll.runway
+        compactShortcut ? Self.restingBottomGap : Self.sessionBottomGap
     }
+    /// The session window's rest under its last turn, above the follow-up line.
+    static let sessionBottomGap: CGFloat = 12
     /// The compact card keeps the panel's 18pt quiet gap above the thread and
     /// the detached window's short 8pt gap above the follow-up line. In the
     /// waiting state that separation keeps the lone thinking row from crowding
