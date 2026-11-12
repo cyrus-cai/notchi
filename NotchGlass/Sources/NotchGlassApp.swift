@@ -45,6 +45,21 @@ struct NotchGlassApp: App {
                             name: .checkForUpdatesRequested, object: nil)
                     }
                 }
+                // Same words, same path, as the routines empty state and the `/` row.
+                CommandGroup(after: .help) {
+                    Button(L("loop.discover")) {
+                        NotificationCenter.default.post(
+                            name: .startLoopRequested, object: nil)
+                    }
+                    .help(L("loop.discover.example"))
+                }
+                CommandMenu(L("menu.agents")) {
+                    Button(L("loop.discover")) {
+                        NotificationCenter.default.post(
+                            name: .startLoopRequested, object: nil)
+                    }
+                    .help(L("loop.discover.example"))
+                }
             }
     }
 }

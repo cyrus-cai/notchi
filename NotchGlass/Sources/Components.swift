@@ -8816,6 +8816,9 @@ struct MenuCardRow: View {
     var accessoryFontSize: CGFloat = MenuCard.accessoryFontSize
     var height: CGFloat = MenuCard.rowHeight
     var horizontalPadding: CGFloat = MenuCard.rowPad
+    /// A second line under the word. Nil on every ordinary row, so those rows
+    /// stay a single line at `height`.
+    var subtitle: String? = nil
     /// Draw the word in the emphasized weight — for menus where the highlight
     /// means "this is the one in effect" rather than "this is where the cursor is".
     var emphasized: Bool = false
@@ -8858,14 +8861,32 @@ struct MenuCardRow: View {
                         .foregroundStyle(selected ? Tokens.text1 : Tokens.text3)
                         .frame(width: MenuCard.symbolWidth)
                 }
-                Text(title)
-                    .font(brandTitle
-                          ? .brand(fontSize)
-                          : .sf(fontSize, weight: emphasized && selected ? .medium : .regular))
-                    .foregroundStyle(selected || (promptShortcutID != nil && hovering)
-                        ? Tokens.text1 : Tokens.text3)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
+                if let subtitle {
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(title)
+                            .font(brandTitle
+                                  ? .brand(fontSize)
+                                  : .sf(fontSize, weight: emphasized && selected ? .medium : .regular))
+                            .foregroundStyle(selected || (promptShortcutID != nil && hovering)
+                                ? Tokens.text1 : Tokens.text3)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                        Text(subtitle)
+                            .sfFont(accessoryFontSize, weight: .regular)
+                            .foregroundStyle(Tokens.text4)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
+                } else {
+                    Text(title)
+                        .font(brandTitle
+                              ? .brand(fontSize)
+                              : .sf(fontSize, weight: emphasized && selected ? .medium : .regular))
+                        .foregroundStyle(selected || (promptShortcutID != nil && hovering)
+                            ? Tokens.text1 : Tokens.text3)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
                 if lowBalance {
                     Spacer(minLength: 0)
                     LowBalanceTag()

@@ -2923,6 +2923,24 @@ final class NotchModel: ObservableObject {
         }
     }
 
+    /// Arm `/loop` the way the `/` row does, from a menu, the empty state, or
+    /// the focus hint. A thread, Settings, or What's New steps back to the
+    /// idle prompt first; a draft already in that prompt is kept.
+    func startLoopCompose(on display: CGDirectDisplayID? = nil) {
+        if !open { openPanel(on: display ?? activeDisplay) }
+        let fresh = mode == .idle && turns.isEmpty && agentDetailTaskID == nil
+            && !showSettings && !showWhatsNew
+        withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
+            showRoutines = false
+            if fresh {
+                showHistory = false
+            } else {
+                newChat()
+            }
+            applyComposeMode(.loop)
+        }
+    }
+
     /// Land on a row. Clear the command word FIRST (the field is now empty and
     /// ready for the real line), then pin where Enter will send it — that order
     /// matters, since emptying the field is exactly what clears

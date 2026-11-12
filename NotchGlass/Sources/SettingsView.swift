@@ -16,6 +16,8 @@ extension Notification.Name {
     /// Posted by the app menu's "Check for Updates…" command so `AppDelegate`
     /// can open Settings → About and kick off a user-initiated update check.
     static let checkForUpdatesRequested = Notification.Name("checkForUpdatesRequested")
+    /// Posted by the Help and Agents menu items that start `/loop`.
+    static let startLoopRequested = Notification.Name("startLoopRequested")
     /// Posted the instant before an installed update quits and reopens the app,
     /// so `AppDelegate` can fold the panel on purpose first. Without it the whole
     /// island blinks out mid-"Installing…" and comes back a second later with no

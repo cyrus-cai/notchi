@@ -4831,6 +4831,10 @@ struct DetachedThreadView: View {
                                         },
                                         onChangeInterval: {
                                             intervalPickerOpen = true
+                                        },
+                                        onStartLoop: {
+                                            metadataMenuOpen = false
+                                            model?.startLoopCompose()
                                         })
                                         .manageMenuCardBackground()
                                 }
