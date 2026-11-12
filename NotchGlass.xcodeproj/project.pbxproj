@@ -53,6 +53,8 @@
 		A1000A10 /* MenuBarController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000A11 /* MenuBarController.swift */; };
 		A1000072 /* UpdaterService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000073 /* UpdaterService.swift */; };
 		A1000C90 /* UpdatePrompt.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000C91 /* UpdatePrompt.swift */; };
+		A1000L90 /* NotchiLicense.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000L91 /* NotchiLicense.swift */; };
+		A1000P90 /* Proactive.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000P91 /* Proactive.swift */; };
 		A1000074 /* MouseVelocityTracker.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000075 /* MouseVelocityTracker.swift */; };
 		A1000076 /* OpenRouterAuth.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000077 /* OpenRouterAuth.swift */; };
 		A1000790 /* CodexCLIService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000791 /* CodexCLIService.swift */; };
@@ -122,6 +124,8 @@
 		A1000A11 /* MenuBarController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuBarController.swift; sourceTree = "<group>"; };
 		A1000073 /* UpdaterService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdaterService.swift; sourceTree = "<group>"; };
 		A1000C91 /* UpdatePrompt.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdatePrompt.swift; sourceTree = "<group>"; };
+		A1000L91 /* NotchiLicense.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotchiLicense.swift; sourceTree = "<group>"; };
+		A1000P91 /* Proactive.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Proactive.swift; sourceTree = "<group>"; };
 		A1000075 /* MouseVelocityTracker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MouseVelocityTracker.swift; sourceTree = "<group>"; };
 		A1000077 /* OpenRouterAuth.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenRouterAuth.swift; sourceTree = "<group>"; };
 		A1000791 /* CodexCLIService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodexCLIService.swift; sourceTree = "<group>"; };
@@ -242,6 +246,8 @@
 				A10000BB /* DiagnosticsLog.swift */,
 				A1000073 /* UpdaterService.swift */,
 				A1000C91 /* UpdatePrompt.swift */,
+				A1000L91 /* NotchiLicense.swift */,
+				A1000P91 /* Proactive.swift */,
 				A1000075 /* MouseVelocityTracker.swift */,
 				A1000077 /* OpenRouterAuth.swift */,
 				A1000791 /* CodexCLIService.swift */,
@@ -420,6 +426,8 @@
 				A10000AA /* DiagnosticsLog.swift in Sources */,
 				A1000072 /* UpdaterService.swift in Sources */,
 				A1000C90 /* UpdatePrompt.swift in Sources */,
+				A1000L90 /* NotchiLicense.swift in Sources */,
+				A1000P90 /* Proactive.swift in Sources */,
 				A1000074 /* MouseVelocityTracker.swift in Sources */,
 				A1000076 /* OpenRouterAuth.swift in Sources */,
 				A1000790 /* CodexCLIService.swift in Sources */,
@@ -549,7 +557,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.9.30;
+				MARKETING_VERSION = 0.9.31;
 				PRODUCT_BUNDLE_IDENTIFIER = com.notchglass.app;
 				PRODUCT_NAME = Notchi;
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -572,7 +580,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.9.30;
+				MARKETING_VERSION = 0.9.31;
 				PRODUCT_BUNDLE_IDENTIFIER = com.notchglass.app;
 				PRODUCT_NAME = Notchi;
 				SWIFT_EMIT_LOC_STRINGS = YES;

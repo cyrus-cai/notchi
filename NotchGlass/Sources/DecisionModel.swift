@@ -80,11 +80,19 @@ enum OwnDecisionModel {
             ? await TypeSafeJevClient.checkFollowUp(question: question, answer: answer)
             : await DecisionEndpointClient.checkFollowUp(question: question, answer: answer)
     }
+    static func checkProactive(kind: String, message: String, localTime: String,
+                               sentToday: Int) async -> NoNoAccount.ProactiveVerdict? {
+        DecisionModel.current == .jevKey
+            ? await TypeSafeJevClient.checkProactive(kind: kind, message: message,
+                                                     localTime: localTime, sentToday: sentToday)
+            : await DecisionEndpointClient.checkProactive(kind: kind, message: message,
+                                                          localTime: localTime, sentToday: sentToday)
+    }
 }
 
 /// Jev on TypeSafe's own API (`POST /v1/systemone`) with the user's key. The
 /// state and questions are the gateway's, word for word (`backend/src/sense.ts`,
-/// `react.ts`, `linkcheck.ts`, `followup.ts`), and so is reading the answers.
+/// `react.ts`, `linkcheck.ts`, `followup.ts`, `proactive.ts`), and so is reading the answers.
 enum TypeSafeJevClient {
     private static let url = URL(string: "https://api.typesafe.ai/v1/systemone")!
 
@@ -204,6 +212,14 @@ enum TypeSafeJevClient {
         "false": "The exchange reads as finished: the person thanked the assistant, said goodbye, or confirmed; the answer is a single fact, a short acknowledgement, a translation, a rewrite, or a saved note or reminder; or the message was small talk.",
     ]
 
+    /// `backend/src/proactive.ts`, word for word.
+    private static let proactiveInstructions = "An assistant on someone's Mac is about to write to them without being asked. `message` is what it would send. `kind` says where it comes from: `reminder` is a reminder of theirs that is due, `event` is a calendar event of theirs about to start, `followup` is something they said they would do by now. `local_time` is their time now, and `sent_today` is how many such messages they already got in the last day. The message is worth interrupting them for right now. The text may be in any language."
+
+    private static let proactiveCriteria: [String: String] = [
+        "true": "It names a concrete thing whose time is now or close: a meeting, an appointment, a deadline, a task that is due, a promise to someone. Missing it would cost them something.",
+        "false": "It is vague or trivial, a placeholder or a test entry, routine housekeeping that can wait, something at an hour most people are asleep, or one more message after many already today.",
+    ]
+
     static func sense(_ text: String) async -> NoNoAccount.SenseVerdict? {
         let questions: [String: Any] = ["kind": ["type": "choice", "instructions": memoryInstructions,
                                                  "criteria": memoryKinds]]
@@ -256,6 +272,18 @@ enum TypeSafeJevClient {
               let p = ((answers["continues"] as? [String: Any])?["noul"] as? NSNumber)?.doubleValue
         else { return nil }
         return NoNoAccount.FollowUpVerdict(verdict: p >= 0.5 ? "suggest" : "skip", probability: p)
+    }
+
+    static func checkProactive(kind: String, message: String, localTime: String,
+                               sentToday: Int) async -> NoNoAccount.ProactiveVerdict? {
+        let questions: [String: Any] = ["worth": ["type": "noul", "instructions": proactiveInstructions,
+                                                  "criteria": proactiveCriteria]]
+        let state: [String: Any] = ["kind": kind, "message": message,
+                                    "local_time": localTime, "sent_today": sentToday]
+        guard let answers = await ask(surface: "proactive", state: state, questions: questions, timeout: 4),
+              let p = ((answers["worth"] as? [String: Any])?["noul"] as? NSNumber)?.doubleValue
+        else { return nil }
+        return NoNoAccount.ProactiveVerdict(verdict: p >= 0.5 ? "send" : "hold", probability: p)
     }
 
     static func test() async -> ConnectivityTest.Result {
@@ -454,6 +482,25 @@ enum DecisionEndpointClient {
                                     user: "Question:\n\(question)\n\nAnswer:\n\(answer)", timeout: 4),
               let p = probability(reply["probability"]) else { return nil }
         return NoNoAccount.FollowUpVerdict(verdict: p >= 0.5 ? "suggest" : "skip", probability: p)
+    }
+
+    static func checkProactive(kind: String, message: String, localTime: String,
+                               sentToday: Int) async -> NoNoAccount.ProactiveVerdict? {
+        let system = """
+        An assistant on someone's Mac is about to write to them without being asked. Decide how likely the message is \
+        worth interrupting them for right now. The kind says where it comes from: "reminder" is a reminder of theirs that \
+        is due, "event" is a calendar event of theirs about to start, "followup" is something they said they would do by now. \
+        The text may be in any language.
+        Likely: it names a concrete thing whose time is now or close: a meeting, an appointment, a deadline, a task that is \
+        due, a promise to someone. Missing it would cost them something.
+        Unlikely: it is vague or trivial, a placeholder or a test entry, routine housekeeping that can wait, something at an \
+        hour most people are asleep, or one more message after many already today.
+        Answer with only a JSON object: {"probability": <0 to 1, how likely it is worth sending>}
+        """
+        let user = "Kind: \(kind)\nTheir time now: \(localTime)\nSuch messages in the last day: \(sentToday)\n\nMessage:\n\(message)"
+        guard let reply = await ask(surface: "proactive", system: system, user: user, timeout: 4),
+              let p = probability(reply["probability"]) else { return nil }
+        return NoNoAccount.ProactiveVerdict(verdict: p >= 0.5 ? "send" : "hold", probability: p)
     }
 
     static func test() async -> ConnectivityTest.Result {

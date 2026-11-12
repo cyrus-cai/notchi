@@ -274,7 +274,22 @@ struct NotchBody: View {
     /// prompt, and the bottom row.
     private var composerContent: some View {
         VStack(alignment: .leading, spacing: 0) {
-            if !model.askComposeImages.isEmpty {
+            // A failed Ask: the island's capsule (Open Settings, Try again with
+            // its model list, Retry on Notchi, Add credit) over the prompt.
+            if !model.agentComposeActive, let askError = model.visibleAskError {
+                errorActionRow(askError)
+                    .padding(.bottom, 10)
+                    .transition(moduleTransition)
+            }
+            if model.agentComposeActive {
+                if !model.agentComposeImages.isEmpty {
+                    ComposeImagesAttachedLine(images: model.agentComposeImages) {
+                        model.removeAgentComposeImage(at: $0)
+                    }
+                    .padding(.bottom, 8)
+                    .transition(moduleTransition)
+                }
+            } else if !model.askComposeImages.isEmpty {
                 ComposeImagesAttachedLine(images: model.askComposeImages) {
                     model.removeAskComposeImage(at: $0)
                 }
@@ -1370,8 +1385,8 @@ struct NotchBody: View {
                     loopIntervalChip
                         .transition(.opacity)
                 }
-                // The menu bar chat keeps its right edge empty: a granted gift
-                // and a waiting build sit after the model instead.
+                // The menu bar chat: a granted gift and a waiting build sit
+                // after the model, the ⋯ group on the right edge.
                 if composerOnly {
                     if !model.hasText && nono.justGrantedUSD > 0.0000005 {
                         giftCue
@@ -1382,23 +1397,25 @@ struct NotchBody: View {
                                   hovered: $updateCueIdleHovered)
                             .transition(.scale(scale: 0.7).combined(with: .opacity))
                     }
+                    // The island's ⋯ group: Release notes, History and
+                    // Settings, each opening in its own window from the card.
                     // The pin lives in the chat's header chips, not here. In
                     // Agent, live runs show as "N running", which opens Recent.
                     let running = model.agentComposeActive ? agentManager.runningTasks.count : 0
-                    if running > 0 {
-                        Spacer(minLength: 8)
-                        IdleTrailingCluster(
-                            pinned: false, recentOpen: false, showsRecent: false,
-                            runningCount: running,
-                            flat: model.unifiedThreadsEnabled,
-                            togglePin: {
-                                withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
-                                    model.toggleAnswerPin()
-                                }
-                            },
-                            toggleRecent: { model.showHistory = true })
-                            .transition(.scale(scale: 0.7).combined(with: .opacity))
-                    }
+                    Spacer(minLength: 8)
+                    IdleTrailingCluster(
+                        pinned: false, recentOpen: false, showsRecent: recentHasContent,
+                        runningCount: running,
+                        flat: model.unifiedThreadsEnabled,
+                        togglePin: {
+                            withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
+                                model.toggleAnswerPin()
+                            }
+                        },
+                        toggleRecent: { model.showHistory = true },
+                        openSettings: { model.openSettings() },
+                        openReleaseNotes: { model.showWhatsNew = true })
+                        .transition(.scale(scale: 0.7).combined(with: .opacity))
                 }
             }
             // The Recent (+ pin) cluster rides this row's trailing edge — on the
@@ -3374,7 +3391,7 @@ struct NotchBody: View {
                             if item.pending {
                                 RecentPendingDots()
                             } else if item.failed {
-                                Text(L(item.outOfCredit ? "recent.badge.outOfCredit" : "recent.badge.failed"))
+                                Text(L(item.outOfCredit ? "recent.badge.outOfCredit" : item.licenseRequired ? "recent.badge.licenseRequired" : "recent.badge.failed"))
                                     .sfFont(Tokens.TypeSize.caption, weight: .medium)
                                     .foregroundStyle(Tokens.danger.opacity(0.9))
                             } else if !item.source.isThread {
@@ -4096,7 +4113,7 @@ struct NotchBody: View {
                                     // say so — otherwise it reads as an ordinary
                                     // answer until you open it.
                                     if item.failed {
-                                        Text(L(item.outOfCredit ? "recent.badge.outOfCredit" : "recent.badge.failed"))
+                                        Text(L(item.outOfCredit ? "recent.badge.outOfCredit" : item.licenseRequired ? "recent.badge.licenseRequired" : "recent.badge.failed"))
                                             .sfFont(Tokens.TypeSize.meta, weight: .medium)
                                             .foregroundStyle(Tokens.danger.opacity(0.9))
                                     }
@@ -4900,6 +4917,7 @@ struct NotchBody: View {
                     .modifier(ThreadSearchMark(search: model.threadSearch, turnID: turn.id))
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
+                .modifier(ThreadScrollLagOffset())
                 .id(turn.id)
                 if let mark = copyMarks[turn.id] {
                     CopyMarkLine(mark: mark,
@@ -5542,6 +5560,7 @@ struct NotchBody: View {
         VStack(alignment: .leading, spacing: 16) {
             conversationTurns
         }
+        .modifier(ThreadScrollLagHost())
         .environment(\.answerMediaBaseDirectory, answerMediaBase)
         .padding(.trailing, 8)
         // Always the content's own height. Offered less, the answer cards
@@ -5580,6 +5599,7 @@ struct NotchBody: View {
                     VStack(alignment: .leading, spacing: 16) {
                         conversationTurns
                     }
+                    .modifier(ThreadScrollLagHost())
                     .environment(\.answerMediaBaseDirectory, answerMediaBase)
                     // The thread's intrinsic height, read off the live scroll
                     // content — a ScrollView proposes an unbounded height to its
@@ -5627,7 +5647,10 @@ struct NotchBody: View {
                                              loadNewer: { loadNewerTurns() }))
                 // The model asks this scroller whether the thread is at its
                 // bottom before an upward swipe folds it into the peek.
-                .background(EnclosingScrollViewReporter { model.threadScrollView = $0 })
+                .background(EnclosingScrollViewReporter {
+                    model.threadScrollView = $0
+                    ThreadScrollLag.shared.attach($0)
+                })
             }
             // Taller than `answerMaxHeight` (300): absorbs the 24pt gap + 39pt
             // follow-up row that don't sit as VStack siblings, PLUS the floating
@@ -6481,7 +6504,7 @@ struct NotchBody: View {
             .padding(.horizontal, flat ? 7 : 10)
             .frame(height: flat ? Tokens.Control.inline : Tokens.Control.chip)
             .modifier(ClusterChipSurface(flat: flat, hovering: giftCueHovered,
-                                         shape: Capsule()))
+                                         shape: Capsule(style: .continuous)))
         }
         .buttonStyle(GlassPressStyle())
         .onHover { giftCueHovered = $0 }
@@ -6559,7 +6582,7 @@ struct NotchBody: View {
                         .frame(width: max(0, geo.size.width * fill))
                 }
                 .clipShape(flat ? AnyShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                                : AnyShape(Capsule()))
+                                : AnyShape(Capsule(style: .continuous)))
                 .allowsHitTesting(false)
                 .opacity(working ? 1 : 0)
             }
@@ -7127,7 +7150,7 @@ struct ManageMenuRowStyle: ButtonStyle {
         return configuration.label
             .exemptsDoubleClickPin(pressed: configuration.isPressed)
             .background(
-                Capsule()
+                Capsule(style: .continuous)
                     .fill(.white.opacity(wash))
             )
             .contentShape(Rectangle())
@@ -7283,8 +7306,8 @@ private struct HistoryFooterButton: View {
             .foregroundStyle(tint)
             .padding(.horizontal, compact ? 9 : 10)
             .padding(.vertical, 6)
-            .glassCapsule(in: Capsule(), brighter: hovering)
-            .contentShape(Capsule())
+            .glassCapsule(in: Capsule(style: .continuous), brighter: hovering)
+            .contentShape(Capsule(style: .continuous))
         }
         .buttonStyle(GlassPressStyle())
         .onHover { hovering = $0 }
@@ -7338,8 +7361,8 @@ private struct ActiveFilterChip: View {
             // Match the ⋯ chip beside it exactly, so the pair reads as one bar of
             // same-height controls.
             .frame(height: Tokens.Control.rail)
-            .glassCapsule(in: Capsule(), brighter: hovering, tint: source.tint)
-            .contentShape(Capsule())
+            .glassCapsule(in: Capsule(style: .continuous), brighter: hovering, tint: source.tint)
+            .contentShape(Capsule(style: .continuous))
         }
         .buttonStyle(GlassPressStyle())
         .onHover { hovering = $0 }
@@ -7400,8 +7423,8 @@ struct SelectionContextChip: View {
         .padding(.leading, 10)
         .padding(.trailing, 5)
         .frame(height: 24)
-        .glassCapsule(in: Capsule(), brighter: hovering)
-        .contentShape(Capsule())
+        .glassCapsule(in: Capsule(style: .continuous), brighter: hovering)
+        .contentShape(Capsule(style: .continuous))
         // The chip names the source; the tooltip shows what is actually riding
         // along, so "which selection?" is answerable without sending anything.
         .notchTooltip(preview)
@@ -7583,7 +7606,7 @@ private struct ThreadSearchBar: View {
         .padding(.leading, 10)
         .padding(.trailing, 6)
         .frame(height: 26)
-        .glassCapsule(in: Capsule(), brighter: true)
+        .glassCapsule(in: Capsule(style: .continuous), brighter: true)
         .onAppear { focused = true }
     }
 }
@@ -7781,7 +7804,7 @@ struct SetupModelButtonStyle: ButtonStyle {
         let pressed = configuration.isPressed
         return configuration.label
             .exemptsDoubleClickPin(pressed: configuration.isPressed)
-            .recessedSurface(in: Capsule(), lit: hovering)
+            .recessedSurface(in: Capsule(style: .continuous), lit: hovering)
             .scaleEffect(pressed ? Tokens.platePressScale : 1)
             .onHover { hovering = $0 }
             .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
@@ -7969,7 +7992,7 @@ struct IdleTrailingCluster: View {
             .foregroundStyle(hovering ? Tokens.text1 : Tokens.text2)
             .padding(.horizontal, flat ? 7 : 10)
             .frame(height: flat ? Self.flatSize : chipSize)
-            .modifier(ClusterChipSurface(flat: flat, hovering: hovering, shape: Capsule()))
+            .modifier(ClusterChipSurface(flat: flat, hovering: hovering, shape: Capsule(style: .continuous)))
         }
         .buttonStyle(GlassPressStyle())
         .onHover { inside in
@@ -8020,12 +8043,12 @@ private struct UpdateCueSurface: ViewModifier {
 
     func body(content: Content) -> some View {
         if flat {
-            content.modifier(ClusterChipSurface(flat: true, hovering: hovering, shape: Capsule()))
+            content.modifier(ClusterChipSurface(flat: true, hovering: hovering, shape: Capsule(style: .continuous)))
         } else {
             content
-                .glassCapsule(in: Capsule(), brighter: hovering,
+                .glassCapsule(in: Capsule(style: .continuous), brighter: hovering,
                               tint: failed ? Tokens.danger : nil)
-                .contentShape(Capsule())
+                .contentShape(Capsule(style: .continuous))
         }
     }
 }
@@ -8237,7 +8260,7 @@ struct RecentEntryStyle: ButtonStyle {
             // label's wide rectangular bounds rendered as an oversized ellipse that
             // bled above and below the text.
             .background(
-                Capsule().fill(.white.opacity(hovering ? 0.08 : 0))
+                Capsule(style: .continuous).fill(.white.opacity(hovering ? 0.08 : 0))
             )
             .opacity(hovering ? 1 : 0.85)
             .scaleEffect(configuration.isPressed ? Tokens.platePressScale : 1)
@@ -8267,6 +8290,9 @@ struct UserQuestionBubble: View {
     /// The turn came in from Telegram (`Turn.fromTelegram`): a line under the
     /// text says so and opens the bot's chat.
     var fromTelegram: Bool = false
+    /// The quick-summon card: the question runs the card's full width as plain
+    /// text, with no fill, border or glass behind it.
+    var flat: Bool = false
     @State private var hoveringForwarded = false
 
     /// Set one step under `baseFont`, the same step the answer card takes.
@@ -8345,6 +8371,19 @@ struct UserQuestionBubble: View {
             .reduce(0) { $0 + 1 + $1.count / 48 }
     }
 
+    /// The wrapped glass bubble's height, from the string alone (no geometry
+    /// read, see `isTruncated`): ~19pt a line, full-width characters counted as
+    /// two columns. Only sizes the corner radius.
+    private var estimatedGlassHeight: CGFloat {
+        let wrapped = visibleText.split(separator: "\n", omittingEmptySubsequences: false)
+            .reduce(0) { total, line in
+                let columns = line.unicodeScalars.reduce(0) { $0 + ($1.value >= 0x2E80 ? 2 : 1) }
+                return total + 1 + columns / 48
+            }
+        let lines = expanded ? wrapped : min(wrapped, collapsedLineLimit)
+        return CGFloat(max(2, lines)) * 19 + ChatBubbleChrome.glassVerticalPad * 2
+    }
+
     /// Pill only for a genuinely short question; anything that could wrap past a line
     /// or two reads better as a rounded card.
     private var radius: CGFloat {
@@ -8379,7 +8418,7 @@ struct UserQuestionBubble: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.leading, 11)
                     .overlay(alignment: .leading) {
-                        Capsule()
+                        Capsule(style: .continuous)
                             .fill(Tokens.text4.opacity(0.8))
                             .frame(width: 2)
                             .padding(.vertical, 2)
@@ -8410,6 +8449,15 @@ struct UserQuestionBubble: View {
     @Environment(\.chatBubbleGlass) private var glass
 
     var body: some View {
+        if flat {
+            bubble
+                .frame(maxWidth: .infinity, alignment: .leading)
+        } else {
+            framedBody
+        }
+    }
+
+    private var framedBody: some View {
         FractionWidthLayout(fraction: cardWidthFraction, hugs: true) {
             // The reaction hangs `reactionOverhang` past the trailing edge.
             // Counted in the bubble's width so a bubble that runs to the
@@ -8480,11 +8528,12 @@ struct UserQuestionBubble: View {
                 .onHover { hoveringForwarded = $0 }
             }
         }
-        .padding(.horizontal, glass ? ChatBubbleChrome.glassHorizontalPad : ChatBubbleChrome.horizontalPad)
-        .padding(.vertical, glass ? ChatBubbleChrome.glassVerticalPad : ChatBubbleChrome.verticalPad)
-        .modifier(GlassBubbleSurface(on: glass, pill: radius == pillRadius, tint: tint))
+        .padding(.horizontal, flat ? 0 : (glass ? ChatBubbleChrome.glassHorizontalPad : ChatBubbleChrome.horizontalPad))
+        .padding(.vertical, flat ? 0 : (glass ? ChatBubbleChrome.glassVerticalPad : ChatBubbleChrome.verticalPad))
+        .modifier(GlassBubbleSurface(on: glass && !flat, pill: radius == pillRadius,
+                                     height: estimatedGlassHeight, tint: tint))
         .background {
-            if !glass {
+            if !glass && !flat {
                 RoundedRectangle(cornerRadius: radius, style: .continuous)
                     .fill(tint.opacity(0.18))
                     .overlay(
@@ -8522,13 +8571,17 @@ struct UserQuestionBubble: View {
 private struct GlassBubbleSurface: ViewModifier {
     let on: Bool
     let pill: Bool
+    /// Estimated height of a wrapped bubble; sizes its radius.
+    let height: CGFloat
     let tint: Color
 
     func body(content: Content) -> some View {
         if on {
             let r = pill
-                ? ChatBubbleChrome.pillRadius + ChatBubbleChrome.glassVerticalPad - ChatBubbleChrome.verticalPad
-                : ChatBubbleChrome.glassCardRadius
+                ? ChatBubbleChrome.glassPillRadius
+                : ChatBubbleChrome.wrappedRadius(ChatBubbleChrome.glassCardRadius,
+                                                 pill: ChatBubbleChrome.glassPillRadius,
+                                                 height: height)
             content.smokedGlass(radius: r, tint: tint)
         } else {
             content
@@ -8610,7 +8663,7 @@ private struct AgentChipFace<Icon: View>: View {
         .padding(.horizontal, flat ? 7 : 8)
         .padding(.vertical, flat ? 3.5 : 6)
         .frame(height: flat ? Tokens.Control.inline : nil)
-        .contentShape(Capsule())
+        .contentShape(Capsule(style: .continuous))
     }
 }
 
@@ -9337,14 +9390,14 @@ private struct BucketTogglePill: View {
         // spring and can never disagree with the words it sits behind (the model
         // picker card's armed-row wash learned this the same way).
         .background(alignment: .leading) {
-            Capsule().fill(
+            Capsule(style: .continuous).fill(
                 Color.white.opacity(0.17)
                     .shadow(.inner(color: .black.opacity(0.48), radius: 3, y: 1))
             )
             // A hairline top rim sells the recessed glass edge — the well reads as
             // a brighter, more solid pane than a barely-there wash.
             .overlay {
-                Capsule().strokeBorder(Color.white.opacity(0.14), lineWidth: 0.5)
+                Capsule(style: .continuous).strokeBorder(Color.white.opacity(0.14), lineWidth: 0.5)
             }
             .frame(width: Self.wordWidth(agentOn ? agent : ask, spelled: true))
             .padding(.vertical, 3)
@@ -9356,7 +9409,7 @@ private struct BucketTogglePill: View {
         .padding(.horizontal, Self.sidePad)
         // The glass takes the DESTINATION's colour, not a fixed Ask blue: the pill
         // is the routing's face, so Capture ambers the capsule.
-        .glassCapsule(in: Capsule(), brighter: false,
+        .glassCapsule(in: Capsule(style: .continuous), brighter: false,
                       tint: agentOn ? Tokens.agentTint : destination.intentTint)
         // Fast and all but critically damped. A 30pt switch is not a panel: the
         // old 0.34/0.82 took ~300ms and arrived with a visible bounce, where the
@@ -9450,7 +9503,7 @@ private struct BucketWord: View {
                 // uniform amount on every side, instead of being sized by the text
                 // and floating with an uneven top/bottom margin.
                 .frame(maxHeight: .infinity)
-                .contentShape(Capsule())
+                .contentShape(Capsule(style: .continuous))
         }
         .buttonStyle(.plain).exemptsDoubleClickPin()
         .onHover { hovering = $0 }
@@ -9672,14 +9725,19 @@ struct SettledPopover<PopContent: View>: ViewModifier {
 // MARK: - Main-thread reveal (Unified threads)
 
 /// Hands the AppKit scroll view around it to `report` once it is in a window.
-fileprivate struct EnclosingScrollViewReporter: NSViewRepresentable {
+struct EnclosingScrollViewReporter: NSViewRepresentable {
     let report: (NSScrollView) -> Void
 
     final class Host: NSView {
         var report: ((NSScrollView) -> Void)?
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
-            if window != nil, let scroll = enclosingScrollView { report?(scroll) }
+            guard window != nil, let scroll = enclosingScrollView else { return }
+            // The thread only scrolls vertically; a sideways trackpad swipe
+            // must not rubber-band the bubbles left and right.
+            scroll.horizontalScrollElasticity = .none
+            scroll.hasHorizontalScroller = false
+            report?(scroll)
         }
     }
 
@@ -10445,7 +10503,7 @@ struct RoutinesPanel: View {
                 .labelsHidden()
                 .toggleStyle(.switch)
                 .controlSize(.mini)
-                .tint(Tokens.text2)
+                .tint(Tokens.switchTint)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
@@ -10555,3 +10613,143 @@ struct SidePageChrome: ViewModifier {
     }
 }
 
+// MARK: - Scroll follow
+
+/// The thread's bubbles trail a user scroll and spring back, the way iMessage's
+/// do. A turn far from the pointer trails more than one under it. Only scrolls
+/// driven by a scroll-wheel event count, so auto-follow while streaming and
+/// `scrollTo` stay still. Off under Reduce Motion.
+final class ThreadScrollLag: ObservableObject {
+    static let shared = ThreadScrollLag()
+
+    /// The coordinate space `ThreadScrollLagHost` moves with the lag.
+    static let space = "threadScrollLag"
+
+    /// Current displacement in points, positive = down.
+    @Published private(set) var lag: CGFloat = 0 {
+        didSet { state.withLock { $0.lag = lag } }
+    }
+    /// The pointer's y in window (SwiftUI global) coordinates.
+    private(set) var anchorY: CGFloat = 0 {
+        didSet { state.withLock { $0.anchorY = anchorY } }
+    }
+    /// `lag` and `anchorY` for the turns' effects, which may run off the main
+    /// thread.
+    private let state = OSAllocatedUnfairLock(initialState: (lag: CGFloat(0), anchorY: CGFloat(0)))
+    var current: (lag: CGFloat, anchorY: CGFloat) { state.withLock { $0 } }
+
+    static let maxLag: CGFloat = 22
+    /// Share of each scroll step a far bubble falls behind by.
+    private static let pull: CGFloat = 0.35
+    private static let stiffness: CGFloat = 260
+    private static let damping: CGFloat = 24
+    private static let step: TimeInterval = 1.0 / 120
+
+    private struct Entry {
+        weak var clip: NSClipView?
+        var token: NSObjectProtocol
+        var lastY: CGFloat
+    }
+    private var entries: [ObjectIdentifier: Entry] = [:]
+    private var position: CGFloat = 0
+    private var velocity: CGFloat = 0
+    private var timer: Timer?
+
+    func attach(_ scroll: NSScrollView) {
+        let clip = scroll.contentView
+        let id = ObjectIdentifier(clip)
+        if let entry = entries[id], entry.clip === clip { return }
+        if let old = entries[id] { NotificationCenter.default.removeObserver(old.token) }
+        entries = entries.filter { $0.value.clip != nil }
+        clip.postsBoundsChangedNotifications = true
+        let token = NotificationCenter.default.addObserver(
+            forName: NSView.boundsDidChangeNotification, object: clip, queue: .main
+        ) { [weak self, weak clip] _ in
+            guard let self, let clip else { return }
+            self.clipMoved(clip)
+        }
+        entries[id] = Entry(clip: clip, token: token, lastY: clip.bounds.origin.y)
+    }
+
+    private func clipMoved(_ clip: NSClipView) {
+        let id = ObjectIdentifier(clip)
+        guard var entry = entries[id] else { return }
+        let y = clip.bounds.origin.y
+        let delta = y - entry.lastY
+        entry.lastY = y
+        entries[id] = entry
+        guard delta != 0, NSApp.currentEvent?.type == .scrollWheel,
+              !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else { return }
+        if let window = clip.window, let content = window.contentView {
+            anchorY = content.bounds.height - window.mouseLocationOutsideOfEventStream.y
+        }
+        position = max(-Self.maxLag, min(Self.maxLag, position + delta * Self.pull))
+        lag = position
+        startTimer()
+    }
+
+    private func startTimer() {
+        guard timer == nil else { return }
+        let t = Timer(timeInterval: Self.step, repeats: true) { [weak self] _ in self?.tick() }
+        RunLoop.main.add(t, forMode: .common)
+        timer = t
+    }
+
+    private func tick() {
+        let dt = CGFloat(Self.step)
+        let accel = -Self.stiffness * position - Self.damping * velocity
+        velocity += accel * dt
+        position += velocity * dt
+        if abs(position) < 0.05, abs(velocity) < 0.5 {
+            position = 0
+            velocity = 0
+            timer?.invalidate()
+            timer = nil
+        }
+        lag = position
+    }
+}
+
+/// Applies `ThreadScrollLag` to one turn, weighted by its distance from the
+/// pointer. Reads its frame in `visualEffect`, so it costs no layout pass.
+///
+/// The turn does not observe the lag. Observing it re-evaluated this modifier
+/// for every mounted turn on every scroll step and spring tick, which was most
+/// of the main thread's work during a scroll. The effect reads the current lag
+/// from `ThreadScrollLag.shared.current` and is run again by its frame in
+/// `ThreadScrollLag.space`, which `ThreadScrollLagHost` moves with the lag.
+struct ThreadScrollLagOffset: ViewModifier {
+    func body(content: Content) -> some View {
+        content.visualEffect { effect, proxy in
+            // Read for the dependency: the host shifts this space by the lag.
+            _ = proxy.frame(in: .named(ThreadScrollLag.space)).minY
+            let now = ThreadScrollLag.shared.current
+            guard now.lag != 0 else { return effect.offset(y: 0) }
+            // A turn out of view is left where it is: moving it changed what
+            // the scroller draws for nothing on screen.
+            if let viewport = proxy.bounds(of: .scrollView),
+               !viewport.insetBy(dx: 0, dy: -ThreadScrollLag.maxLag * 2)
+                   .intersects(CGRect(origin: .zero, size: proxy.size)) {
+                return effect.offset(y: 0)
+            }
+            let distance = abs(proxy.frame(in: .global).midY - now.anchorY)
+            return effect.offset(y: now.lag * min(1, distance / 320))
+        }
+    }
+}
+
+/// Around the turns that carry `ThreadScrollLagOffset`: the one view that
+/// observes the lag. It moves a named coordinate space by the lag and its
+/// content back by the same amount, so nothing is drawn elsewhere, and every
+/// turn's effect, which reads its frame in that space, is run again.
+struct ThreadScrollLagHost: ViewModifier {
+    @ObservedObject private var follow = ThreadScrollLag.shared
+
+    func body(content: Content) -> some View {
+        let lag = follow.lag
+        content
+            .offset(y: -lag)
+            .coordinateSpace(.named(ThreadScrollLag.space))
+            .offset(y: lag)
+    }
+}

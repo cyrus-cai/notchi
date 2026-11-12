@@ -19,13 +19,7 @@ enum HistoryArchiveScope: String {
 /// persisted history data itself (read-only browsing + delete) and the
 /// Notes/Reminders jump, which is an explicit "leave the app" action by nature.
 ///
-/// Visually it wears the **same Liquid Glass language as the notch island**: a
-/// transparent window filled with one dark smoked-glass slab (real system
-/// `.glassEffect` on macOS 26+, a dark blur below), the island's specular hairline
-/// rim, and the panel's whole token/chip vocabulary — glass capsules for the
-/// search field and filters, `Tokens.text*` ink, `glassCapsule`/`GlassPressStyle`
-/// chips — so opening History reads as the same surface as the notch, not a stock
-/// AppKit window.
+/// It wears `StandaloneWindowStyle`, like Settings.
 @MainActor
 final class HistoryArchiveWindowController: NSObject, NSWindowDelegate {
     static let shared = HistoryArchiveWindowController()
@@ -48,10 +42,9 @@ final class HistoryArchiveWindowController: NSObject, NSWindowDelegate {
             // Re-scope even when the window is already open: moving from Agent to
             // Chat (or back) must not retain the previous bucket's rows.
             search.query = ""
-            window.contentView = NSHostingView(
-                rootView: HistoryArchiveView(model: model, search: search, scope: scope)
-                    .notchTooltipClipBox()
-            )
+            window.contentView = StandaloneWindowStyle.content(
+                HistoryArchiveView(model: model, search: search, scope: scope)
+                    .notchTooltipClipBox())
             window.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
             return
@@ -64,22 +57,9 @@ final class HistoryArchiveWindowController: NSObject, NSWindowDelegate {
             defer: false
         )
         window.title = L("history.window.title")
-        window.titlebarAppearsTransparent = true
+        StandaloneWindowStyle.apply(to: window, toolbar: "NotchHistoryToolbar")
         window.isReleasedWhenClosed = false
         window.minSize = NSSize(width: 680, height: 400)
-
-        // Go transparent so the dark Liquid Glass slab the SwiftUI content draws is
-        // the ONLY visible surface — no stock light `windowBackgroundColor` behind
-        // it. The traffic-light controls and the drag-to-move titlebar stay (it's a
-        // `.titled` window with `fullSizeContentView`), but the title text and the
-        // titlebar's own material are hidden so the glass reaches edge to edge.
-        window.isOpaque = false
-        window.backgroundColor = .clear
-        window.titleVisibility = .hidden
-        // Force the dark side of every system control (traffic lights aside, the
-        // resize cursor, focus rings, text-selection) so they read against the dark
-        // glass instead of flipping to a light-mode treatment on a light desktop.
-        window.appearance = NSAppearance(named: .darkAqua)
 
         search.query = ""
         window.onEscape = { [weak self, weak window] in
@@ -94,8 +74,8 @@ final class HistoryArchiveWindowController: NSObject, NSWindowDelegate {
                 window.performClose(nil)
             }
         }
-        window.contentView = NSHostingView(
-            rootView: HistoryArchiveView(model: model, search: search, scope: scope)
+        window.contentView = StandaloneWindowStyle.content(
+            HistoryArchiveView(model: model, search: search, scope: scope)
                 // Same as the detached window: this window's edges are the wall
                 // its hover tooltips clamp to.
                 .notchTooltipClipBox())
@@ -117,58 +97,6 @@ final class HistoryArchiveWindowController: NSObject, NSWindowDelegate {
 
 /// The archive's search text, held outside the view so the window's Esc can
 /// read and clear it.
-/// What's New in its own window, opened from the menu bar chat, which has no
-/// page of its own to show it on.
-@MainActor
-final class WhatsNewWindowController: NSObject, NSWindowDelegate {
-    static let shared = WhatsNewWindowController()
-
-    private var window: NSWindow?
-
-    private override init() {}
-
-    func present(model: NotchModel) {
-        if let window {
-            window.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
-            return
-        }
-        let window = HistoryArchiveNSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 640, height: 360),
-            styleMask: [.titled, .closable, .miniaturizable, .fullSizeContentView],
-            backing: .buffered,
-            defer: false
-        )
-        window.title = L("whatsnew.title")
-        window.titlebarAppearsTransparent = true
-        window.titleVisibility = .hidden
-        window.isReleasedWhenClosed = false
-        window.isOpaque = false
-        window.backgroundColor = .clear
-        window.appearance = NSAppearance(named: .darkAqua)
-        window.onEscape = { [weak window] in window?.performClose(nil) }
-        let hosting = NSHostingView(rootView:
-            WhatsNewView(model: model, onBack: { [weak window] in window?.performClose(nil) })
-                .padding(.horizontal, 12)
-                .padding(.top, 22)
-                .padding(.bottom, 12)
-                .frame(width: 640)
-                .background(WindowGlassBackground())
-                .notchTooltipClipBox())
-        window.contentView = hosting
-        window.setContentSize(hosting.fittingSize)
-        window.delegate = self
-        window.center()
-        self.window = window
-        NSApp.activate(ignoringOtherApps: true)
-        window.makeKeyAndOrderFront(nil)
-    }
-
-    func windowWillClose(_ notification: Notification) {
-        window = nil
-    }
-}
-
 @MainActor
 private final class HistoryArchiveSearch: ObservableObject {
     @Published var query = ""
@@ -180,7 +108,13 @@ private final class HistoryArchiveNSWindow: NSWindow {
     /// Runs when Esc is pressed with no image or link confirmation open.
     var onEscape: (() -> Void)?
 
+    override func sendEvent(_ event: NSEvent) {
+        SelectableTextCopy.note(event, in: self)
+        super.sendEvent(event)
+    }
+
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if SelectableTextCopy.copyIfNeeded(event, in: self) { return true }
         // Arrow keys carry `.numericPad` and `.function`; a key pressed while an
         // input method is composing belongs to the input method.
         let bare = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
@@ -197,41 +131,6 @@ private final class HistoryArchiveNSWindow: NSWindow {
             }
         }
         return super.performKeyEquivalent(with: event)
-    }
-}
-
-// MARK: - Window glass surface
-
-/// The window's background — a rectangular sibling of the notch island's
-/// `GlassMaterial`: one even slab of dark smoked Liquid Glass (real system glass on
-/// macOS 26+, a dark blur below) wrapped in the island's specular hairline rim, so
-/// the whole History window reads as the same material as the notch. Rectangular
-/// (the window is resizable), so it uses a plain `Rectangle`/rounded-none surface
-/// rather than the `NotchShape` silhouette.
-struct WindowGlassBackground: View {
-    var body: some View {
-        Rectangle()
-            .fill(.clear)
-            .nativeGlass(in: Rectangle())
-            // One even dark veil so the slab reads as dark smoked glass and keeps
-            // text legible — the same idea as the panel's `darkVeil`, flattened to a
-            // single value since a rectangular window has no notch/melt band. The
-            // baked glass tint (see `GlassMaterial.bakedTint`) already carries part
-            // of the darkening, so this veil layers to the panel's settled tone.
-            .overlay(Color.black.opacity(0.30))
-            .overlay(
-                // A whisper-thin top sheen — the same touch of depth the island's
-                // veil paints just under its lip.
-                LinearGradient(
-                    colors: [.white.opacity(0.05), .white.opacity(0.0)],
-                    startPoint: .top, endPoint: .bottom
-                )
-                .frame(height: 90)
-                .frame(maxHeight: .infinity, alignment: .top)
-                .blendMode(.plusLighter)
-                .allowsHitTesting(false)
-            )
-            .ignoresSafeArea()
     }
 }
 
@@ -252,9 +151,8 @@ private struct GlassHairline: View {
 /// The archive's content: a master list on the left (search + source filter + every
 /// retained item) and a detail pane on the right that renders the selected
 /// conversation's full transcript. Entirely self-hosted — selecting a row only
-/// changes this window's own `selection`, nothing outside it. Everything sits over
-/// the one `WindowGlassBackground` slab; the panes are transparent so the glass
-/// shows through the whole window.
+/// changes this window's own `selection`, nothing outside it. The panes are
+/// transparent over the window's material (`StandaloneWindowStyle`).
 private struct HistoryArchiveView: View {
     @ObservedObject var model: NotchModel
     @ObservedObject var search: HistoryArchiveSearch
@@ -307,23 +205,6 @@ private struct HistoryArchiveView: View {
                 .frame(minWidth: 300, maxWidth: .infinity)
         }
         .frame(minWidth: 560, minHeight: 380)
-        .background(WindowGlassBackground())
-        // The specular hairline rim that wraps the whole window, the same lit bevel
-        // the island wears — stamped over the composited content so it traces the
-        // window edge crisply.
-        .overlay(
-            Rectangle()
-                .strokeBorder(
-                    LinearGradient(
-                        colors: [.white.opacity(0.14), .white.opacity(0.05)],
-                        startPoint: .top, endPoint: .bottom
-                    ),
-                    lineWidth: 0.75
-                )
-                .blendMode(.plusLighter)
-                .allowsHitTesting(false)
-        )
-        .ignoresSafeArea()
         .imageLightboxHost()
         // Link clicks on this surface go through the pre-check, and its
         // confirmation card is drawn here, inside the clip (see `LinkGate`).
@@ -344,11 +225,20 @@ private struct HistoryArchiveView: View {
         }
         // Transparent: the window glass shows through. A whisper-faint left-column
         // wash sets the master apart from the detail without a solid fill.
-        .background(Color.white.opacity(0.02))
+        .background(Tokens.ink.opacity(0.02))
     }
 
     private func header(count: Int) -> some View {
-        VStack(spacing: 10) {
+        VStack(alignment: .leading, spacing: 10) {
+            // The window names itself here, where Settings does, lifted into the
+            // empty strip under the traffic lights (see
+            // `StandaloneWindowStyle.titleLift`) so the search field keeps the
+            // place it had before the name existed.
+            StandaloneWindowTitle(text: L("history.window.title"))
+                .padding(.horizontal, 12)
+                .padding(.top, -StandaloneWindowStyle.titleLift)
+                .padding(.bottom, 4)
+
             HStack(spacing: 8) {
                 Image(systemName: "magnifyingglass")
                     .font(.sf(Tokens.TypeSize.label, weight: .medium))
@@ -371,8 +261,8 @@ private struct HistoryArchiveView: View {
             // The search field wears the panel's glass-capsule chrome — a real
             // translucent glass pill with the specular rim, matching the notch's
             // own input affordances.
-            .glassCapsule(in: Capsule(), brighter: false)
-            .contentShape(Capsule())
+            .glassCapsule(in: Capsule(style: .continuous), brighter: false)
+            .contentShape(Capsule(style: .continuous))
 
             filterRow(count: count)
         }
@@ -677,8 +567,8 @@ private struct HistoryDetailView: View {
                 .foregroundStyle(Tokens.text2)
                 .padding(.horizontal, 14)
                 .padding(.vertical, 8)
-                .glassCapsule(in: Capsule(), brighter: false, tint: item.source.tint)
-                .contentShape(Capsule())
+                .glassCapsule(in: Capsule(style: .continuous), brighter: false, tint: item.source.tint)
+                .contentShape(Capsule(style: .continuous))
             }
             .buttonStyle(GlassPressStyle())
             Spacer()
@@ -726,7 +616,7 @@ private struct TranscriptBubble: View {
                         // "hint of glass, not a slab" recipe the notch rows use.
                         .fill(isUser
                               ? NotchModel.Panel.chat.intentTint.opacity(0.06)
-                              : Color.white.opacity(0.03))
+                              : Tokens.ink.opacity(0.03))
                         .overlay(
                             RoundedRectangle.window
                                 .fill(.thinMaterial)
@@ -772,23 +662,15 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
             return
         }
         let window = HistoryArchiveNSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 760, height: 560),
+            contentRect: NSRect(x: 0, y: 0, width: 900, height: 760),
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
         window.title = L("settings.title")
-        window.titlebarAppearsTransparent = true
-        window.titleVisibility = .hidden
-        // An empty unified toolbar gives the taller titlebar row, so the traffic
-        // lights sit level with the Settings header.
-        let toolbar = NSToolbar(identifier: "NotchSettingsToolbar")
-        toolbar.showsBaselineSeparator = false
-        window.toolbar = toolbar
-        window.toolbarStyle = .unified
+        StandaloneWindowStyle.apply(to: window, toolbar: "NotchSettingsToolbar")
         window.isReleasedWhenClosed = false
-        window.minSize = NSSize(width: 640, height: 420)
-        window.appearance = NSAppearance(named: .darkAqua)
+        window.minSize = NSSize(width: 700, height: 480)
         window.onEscape = { [weak window, weak model] in
             guard let model else { return }
             if let section = InlineSettingsView.Section(rawValue: model.settingsSection),
@@ -801,26 +683,12 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
             }
         }
 
-        let material = NSVisualEffectView()
-        material.material = .hudWindow
-        material.blendingMode = .behindWindow
-        material.state = .active
-
-        let hosting = NSHostingView(rootView: SettingsWindowRoot(model: model)
+        window.contentView = StandaloneWindowStyle.content(SettingsWindowRoot(model: model)
             .environmentObject(Localization.shared)
             .notchTooltipClipBox())
-        hosting.translatesAutoresizingMaskIntoConstraints = false
-        material.addSubview(hosting)
-        NSLayoutConstraint.activate([
-            hosting.leadingAnchor.constraint(equalTo: material.leadingAnchor),
-            hosting.trailingAnchor.constraint(equalTo: material.trailingAnchor),
-            hosting.topAnchor.constraint(equalTo: material.topAnchor),
-            hosting.bottomAnchor.constraint(equalTo: material.bottomAnchor),
-        ])
-        window.contentView = material
         window.delegate = self
         window.center()
-        window.setFrameAutosaveName("NotchSettingsWindow")
+        window.setFrameAutosaveName("NotchSettingsWindow.v2")
         self.window = window
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
@@ -846,9 +714,102 @@ private struct SettingsWindowRoot: View {
                 .padding(.bottom, pad)
                 .frame(width: proxy.size.width, height: proxy.size.height, alignment: .top)
         }
-        // Darkens the window's material so text over a light wallpaper stays
-        // readable.
-        .background(Color.black.opacity(0.3))
         .ignoresSafeArea()
+    }
+}
+
+// MARK: - Standalone window style
+
+/// The one look every standalone page window wears (Settings, History): a
+/// transparent titlebar over an empty unified toolbar, the `.hudWindow` material
+/// behind the window, and a black veil over it so text stays readable on a light
+/// wallpaper.
+@MainActor
+enum StandaloneWindowStyle {
+    /// Opacity of the black veil over the window material. Heavy on purpose: the
+    /// material alone is a thin wash, so over a bright wallpaper the desktop
+    /// showed through strongly enough that the window's own text lost its
+    /// footing. This keeps the blurred backdrop as a hint of what is behind while
+    /// the window reads as a dark surface of its own in every lighting.
+    static let veilOpacity: Double = 0.55
+
+    /// How far a window's name is pulled up out of the content flow, into the
+    /// strip the traffic lights leave empty below them. The name belongs to the
+    /// window, not to the page, so it costs no content height and leaves no
+    /// empty band above the first row.
+    static let titleLift: CGFloat = 32
+
+    static func apply(to window: NSWindow, toolbar id: String) {
+        window.titlebarAppearsTransparent = true
+        window.titleVisibility = .hidden
+        // An empty unified toolbar gives the taller titlebar row, so the
+        // traffic lights sit level with a header drawn beside them.
+        let toolbar = NSToolbar(identifier: id)
+        toolbar.showsBaselineSeparator = false
+        window.toolbar = toolbar
+        window.toolbarStyle = .unified
+        // No pinned appearance: the window follows the system's light or dark.
+        window.appearance = nil
+    }
+
+    /// The veil over the material: black in dark mode, white in light, so text
+    /// keeps its footing over any wallpaper either way.
+    static let veil = Tokens.adaptive(dark: .black.withAlphaComponent(veilOpacity),
+                                      light: .white.withAlphaComponent(0.6))
+
+    /// `root` hosted over the material and the veil.
+    static func content<V: View>(_ root: V) -> NSView {
+        let material = AppearanceMaterialView()
+        material.blendingMode = .behindWindow
+        material.state = .active
+        let hosting = NSHostingView(rootView: root
+            .background(veil.ignoresSafeArea()))
+        hosting.translatesAutoresizingMaskIntoConstraints = false
+        material.addSubview(hosting)
+        NSLayoutConstraint.activate([
+            hosting.leadingAnchor.constraint(equalTo: material.leadingAnchor),
+            hosting.trailingAnchor.constraint(equalTo: material.trailingAnchor),
+            hosting.topAnchor.constraint(equalTo: material.topAnchor),
+            hosting.bottomAnchor.constraint(equalTo: material.bottomAnchor),
+        ])
+        return material
+    }
+}
+
+/// The window material: `.hudWindow` in dark mode (the look these windows had
+/// before light mode), the light window background in light mode.
+private final class AppearanceMaterialView: NSVisualEffectView {
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        updateMaterial()
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        updateMaterial()
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        updateMaterial()
+    }
+
+    private func updateMaterial() {
+        let dark = effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        material = dark ? .hudWindow : .underWindowBackground
+    }
+}
+
+/// The window's own name, drawn at the top-left of the content just under the
+/// traffic lights — the row Settings opens with, worn the same way by History so
+/// every standalone window names itself in the same place.
+struct StandaloneWindowTitle: View {
+    let text: String
+
+    var body: some View {
+        Text(text)
+            .font(.sf(17, weight: .semibold))
+            .foregroundStyle(Tokens.text1)
+            .lineLimit(1)
     }
 }

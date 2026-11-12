@@ -36,7 +36,7 @@ struct NotchShape: InsettableShape {
             let tc = min(topCornerRadius, min(rect.width, rect.height) / 2)
             return UnevenRoundedRectangle(topLeadingRadius: tc, bottomLeadingRadius: r,
                                           bottomTrailingRadius: r, topTrailingRadius: tc,
-                                          style: .circular)
+                                          style: .continuous)
                 .path(in: rect)
         }
         // The flare can never eat the bottom corners or cross the middle.
@@ -56,12 +56,15 @@ struct NotchShape: InsettableShape {
             p.addQuadCurve(to: CGPoint(x: rect.maxX - tr, y: flareY + tr),
                            control: CGPoint(x: rect.maxX - tr, y: flareY))
         }
-        p.addLine(to: CGPoint(x: rect.maxX - tr, y: rect.maxY - r))
-        p.addArc(center: CGPoint(x: rect.maxX - tr - r, y: rect.maxY - r),
-                 radius: r, startAngle: .degrees(0), endAngle: .degrees(90), clockwise: false)
-        p.addLine(to: CGPoint(x: rect.minX + tr + r, y: rect.maxY))
-        p.addArc(center: CGPoint(x: rect.minX + tr + r, y: rect.maxY - r),
-                 radius: r, startAngle: .degrees(90), endAngle: .degrees(180), clockwise: false)
+        // Bottom corners ease into the straight edges. Each may use the edge up
+        // to the shoulder above it and up to the middle of the bottom edge.
+        let budget = max(r, min(rect.width / 2 - tr, rect.height - tr))
+        p.addSmoothCorner(at: CGPoint(x: rect.maxX - tr, y: rect.maxY),
+                          from: CGVector(dx: 0, dy: 1), to: CGVector(dx: -1, dy: 0),
+                          radius: r, budget: budget)
+        p.addSmoothCorner(at: CGPoint(x: rect.minX + tr, y: rect.maxY),
+                          from: CGVector(dx: -1, dy: 0), to: CGVector(dx: 0, dy: -1),
+                          radius: r, budget: budget)
         // Top-left shoulder, mirrored.
         p.addLine(to: CGPoint(x: rect.minX + tr, y: flareY + tr))
         if tr > 0 {
@@ -76,6 +79,52 @@ struct NotchShape: InsettableShape {
         var copy = self
         copy.inset += amount
         return copy
+    }
+}
+
+extension Path {
+    /// Adds a convex 90° corner whose curvature rises from zero at the straight
+    /// edge to `1 / radius` and falls back to zero, instead of jumping as a
+    /// plain arc does. `corner` is the sharp corner point, `from` the unit
+    /// direction of travel into it and `to` the unit direction out of it.
+    /// `budget` is how much of each edge the corner may use, measured from
+    /// `corner`. With `budget` equal to `radius` the result is a plain arc, so
+    /// the corner stays continuous while the shape's size animates.
+    mutating func addSmoothCorner(at corner: CGPoint, from u: CGVector, to v: CGVector,
+                                  radius: CGFloat, budget: CGFloat,
+                                  smoothing: CGFloat = 0.6) {
+        let r = min(radius, budget)
+        guard r > 0.01 else {
+            addLine(to: corner)
+            return
+        }
+        let s = max(0, min(smoothing, budget / r - 1))
+        let reach = (1 + s) * r
+        let arcAngle = (CGFloat.pi / 2) * (1 - s)
+        let arcSpan = sin(arcAngle / 2) * r * 2.squareRoot()
+        let beta = (CGFloat.pi / 4) * s
+        let c = r * tan((CGFloat.pi / 2 - arcAngle) / 4) * cos(beta)
+        let d = c * tan(beta)
+        let b = (reach - arcSpan - c - d) / 3
+        let a = 2 * b
+        // (along, across): distance travelled along `u` from the corner's start
+        // point, and along `v`.
+        func point(_ along: CGFloat, _ across: CGFloat) -> CGPoint {
+            CGPoint(x: corner.x + u.dx * (along - reach) + v.dx * across,
+                    y: corner.y + u.dy * (along - reach) + v.dy * across)
+        }
+        addLine(to: point(0, 0))
+        addCurve(to: point(a + b + c, d), control1: point(a, 0), control2: point(a + b, 0))
+        // The circular middle, as one cubic with the two tangents the easing
+        // curves end and start on.
+        let k = 4 / 3 * tan(arcAngle / 4) * r
+        let arcEnd = a + b + c + arcSpan
+        addCurve(to: point(arcEnd, d + arcSpan),
+                 control1: point(a + b + c + cos(beta) * k, d + sin(beta) * k),
+                 control2: point(arcEnd - sin(beta) * k, d + arcSpan - cos(beta) * k))
+        addCurve(to: point(reach, reach),
+                 control1: point(arcEnd + d, d + arcSpan + c),
+                 control2: point(arcEnd + d, d + arcSpan + b + c))
     }
 }
 
@@ -187,7 +236,11 @@ struct GlassMaterial: View {
             GeometryReader { geo in
                 ZStack {
                     shape.fill(.black).opacity(expanded ? 0 : 1)
-                    shape.fill(bottomFade(height: geo.size.height))
+                    // A rectangle of the gradient, cut to the shape. Filled
+                    // into the shape's path it was a CoreGraphics shading the
+                    // size of the panel, redrawn on the CPU on every frame of
+                    // the open spring; the pixels are the same.
+                    Rectangle().fill(bottomFade(height: geo.size.height)).clipShape(shape)
                 }
             }
         }

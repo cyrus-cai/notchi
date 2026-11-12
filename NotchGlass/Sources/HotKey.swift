@@ -103,6 +103,30 @@ enum ShortcutRecording {
     }
 }
 
+/// Which physical key of a modifier pair a double-tap listens to.
+enum ModifierSide: Int {
+    case either = 0
+    case left = 1
+    case right = 2
+
+    /// (this side's bits, the other side's bits) in `NSEvent.modifierFlags`.
+    func deviceMasks(forCarbon carbon: UInt32) -> (UInt, UInt) {
+        let pair: (left: UInt, right: UInt)
+        switch carbon {
+        case UInt32(cmdKey):     pair = (0x08, 0x10)
+        case UInt32(optionKey):  pair = (0x20, 0x40)
+        case UInt32(controlKey): pair = (0x01, 0x2000)
+        case UInt32(shiftKey):   pair = (0x02, 0x04)
+        default:                 return (0, 0)
+        }
+        switch self {
+        case .either: return (0, 0)
+        case .left:   return (pair.left, pair.right)
+        case .right:  return (pair.right, pair.left)
+        }
+    }
+}
+
 /// Fires `action` when the user double-taps a *bare* modifier key (e.g. ⌥⌥),
 /// the way Raycast/CleanShot summon on a double-tapped ⌘. Carbon's
 /// `RegisterEventHotKey` can't represent a lone modifier, so this watches
@@ -131,8 +155,15 @@ final class DoubleTapModifierMonitor {
     /// - Parameters:
     ///   - carbonModifier: the modifier to watch, as a Carbon mask (`optionKey`…).
     ///   - window: max seconds between the two taps (default 0.30 — Raycast-ish).
-    init(carbonModifier: UInt32, window: TimeInterval = 0.30, action: @escaping () -> Void) {
+    /// Device-dependent flag bits (IOKit `NX_DEVICE*KEYMASK`) for the side this
+    /// monitor requires, and for the opposite side. Both zero ⇒ either key.
+    private let sideMask: UInt
+    private let otherSideMask: UInt
+
+    init(carbonModifier: UInt32, side: ModifierSide = .either,
+         window: TimeInterval = 0.30, action: @escaping () -> Void) {
         self.flag = DoubleTapModifierMonitor.cocoaFlag(forCarbon: carbonModifier)
+        (self.sideMask, self.otherSideMask) = side.deviceMasks(forCarbon: carbonModifier)
         self.action = action
         self.window = window
 
@@ -180,6 +211,16 @@ final class DoubleTapModifierMonitor {
         let onlyTargetHeld = active == flag
 
         if onlyTargetHeld {
+            // A side-specific trigger ignores the other key of the pair (and
+            // both held together).
+            if sideMask != 0 {
+                let raw = UInt(event.modifierFlags.rawValue)
+                guard raw & sideMask != 0, raw & otherSideMask == 0 else {
+                    pendingTap = false
+                    lastTapTime = nil
+                    return
+                }
+            }
             // Down edge: the target modifier just became the sole one held.
             pendingTap = true
             return
@@ -917,6 +958,8 @@ struct SummonHotKey: Equatable {
     /// value is that modifier's Carbon mask (e.g. `optionKey`). Zero ⇒ it's a
     /// Carbon chord described by `keyCode`/`modifiers`.
     var doubleTapModifier: UInt32 = 0
+    /// For a double-tap: which key of the pair counts (left ⌘ vs right ⌘).
+    var doubleTapSide: ModifierSide = .either
     /// When false the shortcut isn't registered at all — hover stays the only
     /// way in, for users who don't want a global key grabbing the summon.
     var enabled: Bool
@@ -928,6 +971,15 @@ struct SummonHotKey: Equatable {
     var chord: ShortcutChord {
         isDoubleTap ? .doubleTap(doubleTapModifier)
                     : ShortcutChord(keyCode: keyCode, modifiers: modifiers)
+    }
+
+    /// Whether two enabled double-tap configs can fire on the same key presses:
+    /// same modifier, and the sides are equal or one of them takes either key.
+    func doubleTapOverlaps(_ other: SummonHotKey) -> Bool {
+        guard enabled, other.enabled, isDoubleTap, other.isDoubleTap,
+              doubleTapModifier == other.doubleTapModifier else { return false }
+        return doubleTapSide == .either || other.doubleTapSide == .either
+            || doubleTapSide == other.doubleTapSide
     }
 
     /// Double-tap ⌥ — the shipped default. Reachable one-handed, taken by no
@@ -967,11 +1019,13 @@ struct SummonHotKey: Equatable {
             let code = UInt32(bitPattern: Int32(defaults.integer(forKey: keyCodeKey)))
             let mods = UInt32(bitPattern: Int32(defaults.integer(forKey: modifiersKey)))
             let dbl = UInt32(bitPattern: Int32(defaults.integer(forKey: doubleTapKey)))
+            let side = ModifierSide(rawValue: defaults.integer(forKey: prefix + ".doubleTapSide")) ?? .either
             // `enabled` defaults to true when the flag was never written (e.g. a
             // config saved before the flag existed); only an explicit false disables.
             let enabled = defaults.object(forKey: enabledKey) as? Bool ?? true
             return SummonHotKey(keyCode: code, modifiers: mods,
-                                doubleTapModifier: dbl, enabled: enabled)
+                                doubleTapModifier: dbl, doubleTapSide: side,
+                                enabled: enabled)
     }
 
     private static func write(_ value: SummonHotKey, prefix: String) {
@@ -979,6 +1033,7 @@ struct SummonHotKey: Equatable {
         defaults.set(Int(Int32(bitPattern: value.keyCode)), forKey: prefix + ".keyCode")
         defaults.set(Int(Int32(bitPattern: value.modifiers)), forKey: prefix + ".modifiers")
         defaults.set(Int(Int32(bitPattern: value.doubleTapModifier)), forKey: prefix + ".doubleTapModifier")
+        defaults.set(value.doubleTapSide.rawValue, forKey: prefix + ".doubleTapSide")
         defaults.set(value.enabled, forKey: prefix + ".enabled")
     }
 
@@ -987,7 +1042,11 @@ struct SummonHotKey: Equatable {
     var displayString: String {
         if isDoubleTap {
             let glyph = SummonHotKey.modifierSymbols(doubleTapModifier)
-            return glyph + glyph
+            switch doubleTapSide {
+            case .either: return glyph + glyph
+            case .left:   return L("general.shortcut.leftGlyph", glyph + glyph)
+            case .right:  return L("general.shortcut.rightGlyph", glyph + glyph)
+            }
         }
         return SummonHotKey.modifierSymbols(modifiers) + SummonHotKey.keyName(keyCode)
     }

@@ -411,6 +411,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             UpdatePrompt.shared.start(model: self.model) { [weak self] in
                 self?.updatePromptDisplay()
             }
+            // The license card uses the same screen rule (see `LicensePrompt`).
+            _ = NotchiLicense.shared
+            LicensePrompt.shared.start(model: self.model) { [weak self] in
+                self?.updatePromptDisplay()
+            }
             // Touch the What's New service so it resolves the "unseen version"
             // cue (and records the first-launch baseline) off the launch path.
             // Notes are bundled into the app — there's nothing to fetch.
@@ -564,16 +569,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                             p.resignKey()
                         }
                         target?.makeKeyAndOrderFront(nil)
-                        // Record who was frontmost, then bring Notch forward so
-                        // AX-based input tools can see the focused prompt field.
-                        // A display switch while already open re-runs this block
-                        // with Notch itself frontmost — the guard keeps the
-                        // original app on record instead of overwriting it.
+                        // No app activation: the panel is a non-activating
+                        // panel, so key status alone takes the keyboard and the
+                        // front app keeps focus. Still record the front app so a
+                        // path that did activate us can hand focus back on close.
                         if let front = NSWorkspace.shared.frontmostApplication,
                            front.processIdentifier != ProcessInfo.processInfo.processIdentifier {
                             self.appToRestoreOnClose = front
                         }
-                        NSApp.activate(ignoringOtherApps: true)
                         // Long-running agent: piggyback the daily update check on
                         // panel opens so it still happens without relaunches.
                         UpdaterService.shared.checkIfDue()
@@ -793,6 +796,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 UpdatePrompt.shared._debugShow(on: id, version: v)
             }
         }
+        // NOTCH_DEMO_LICENSE=offer unfolds the license card once the notch is at
+        // rest; =activated simulates a purchase (with NotchiLicensePreview on),
+        // which plays the activation ear. NOTCH_DEMO_LICENSE_RENDER=<dir>
+        // writes the license surfaces to PNGs.
+        #if DEBUG
+        if let dir = env["NOTCH_DEMO_LICENSE_RENDER"], !dir.isEmpty {
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                NotchiLicense.shared._debugRender(to: dir, model: self.model)
+            }
+        }
+        if let kind = env["NOTCH_DEMO_LICENSE"], kind == "offer" || kind == "activated" {
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 5_000_000_000)
+                NotchiLicense.shared._debugPresent(offer: kind == "offer")
+            }
+        }
+        #endif
         // NOTCH_DEMO_UPDATE_FLOW=<version> plays the whole update story on a timer
         // (waiting → downloading → installing → failed) against no real release,
         // so the chip's transitions can be watched without one. Debug aid only.
@@ -919,6 +940,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let target = InlineSettingsView.Section(rawValue: settings)
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
                 if let target { self.model.settingsSection = target.rawValue }
+                // NOTCH_SETTINGS_WINDOW=1 opens the standalone Settings window
+                // instead of the panel.
+                if env["NOTCH_SETTINGS_WINDOW"] != nil {
+                    self.model.presentSettingsWindow?()
+                    return
+                }
                 NotificationCenter.default.post(name: .openSettingsRequested, object: nil)
             }
         }
@@ -1319,6 +1346,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let fire: () -> Void = { [weak self] in self?.toggleMenuBarCard(tip: false) }
         if config.isDoubleTap {
             cardDoubleTap = DoubleTapModifierMonitor(carbonModifier: config.doubleTapModifier,
+                                                     side: config.doubleTapSide,
                                                      action: fire)
         } else {
             cardHotKey = HotKey(keyCode: config.keyCode, modifiers: config.modifiers, action: fire)
@@ -1344,6 +1372,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         if config.isDoubleTap {
             summonDoubleTap = DoubleTapModifierMonitor(carbonModifier: config.doubleTapModifier,
+                                                       side: config.doubleTapSide,
                                                        action: fire)
         } else {
             summonHotKey = HotKey(keyCode: config.keyCode, modifiers: config.modifiers, action: fire)

@@ -218,6 +218,7 @@ private final class DetachedWindow: NSPanel {
     /// a hole the press falls through. The glass is the card's surface; it takes
     /// the press.
     override func sendEvent(_ event: NSEvent) {
+        SelectableTextCopy.note(event, in: self)
         switch event.type {
         case .leftMouseDown:
             dragging = false
@@ -290,6 +291,7 @@ private final class DetachedWindow: NSPanel {
     /// LSUIElement app: there is no menu-bar Close item to catch ⌘W, so the
     /// window answers the equivalent itself — same path as the close chip.
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if SelectableTextCopy.copyIfNeeded(event, in: self) { return true }
         // Arrow keys carry `.numericPad` and `.function`; they are not modifiers
         // the user held. A key pressed while an input method is composing
         // belongs to the input method.
@@ -825,8 +827,8 @@ final class DetachedSessionWindowController: NSObject, NSWindowDelegate {
         window.title = title
         window.minSize = Self.compactMinSize
         // A fresh round with no composer behind it waits at the card again.
-        compactFloorHeight = Self.compactWaitingHeight
-        resizeCompactThread(to: Self.compactWaitingHeight, reset: true)
+        compactFloorHeight = Self.compactInitialHeight
+        resizeCompactThread(to: Self.compactInitialHeight, reset: true)
         showWithoutActivating()
     }
 
@@ -948,7 +950,7 @@ final class DetachedSessionWindowController: NSObject, NSWindowDelegate {
         // submitted from an open ledger opened a card as tall as the whole recent
         // list, its answer stranded at the top of a void.
         compactFloorHeight = max(composerHeightWithoutLedger(),
-                                 Self.compactWaitingHeight)
+                                 Self.compactInitialHeight)
         // The box the user typed in opens DOWNWARD and nothing else: same width,
         // same top edge, same left edge. Widening to the answer's reading box
         // (`compactWidth`) would move the trailing edge — and, at a screen edge,
@@ -1459,23 +1461,20 @@ final class DetachedSessionWindowController: NSObject, NSWindowDelegate {
     /// The composer is that same box before it has anything to say.
     static let composerWidth: CGFloat = compactWidth
     /// The waiting card — what an answer window is before a word has landed: the
-    /// window chrome an answered card carries (margins, header, follow-up row),
-    /// its own top/bottom padding, the resting gaps the one orb row rests
-    /// between, and that row. A single line never scrolls, so it wears the
-    /// resting rhythm rather than the runways (`DetachedThreadView`), which
-    /// would open the wait taller than the card it becomes.
+    /// window chrome an answered card carries (margins and header), its own
+    /// top/bottom padding, the resting gaps the one orb row rests between, and
+    /// that row. A single line never scrolls, so it wears the resting rhythm
+    /// rather than the runways (`DetachedThreadView`), which would open the wait
+    /// taller than the card it becomes.
+    ///
+    /// The wait and the answered card are the same frame around different
+    /// content now that the pointer-side card carries no follow-up row, so this
+    /// is also the floor every answer opens from.
     private static let compactInitialHeight: CGFloat =
         CompactShortcutMetrics.answerChrome
-            + DetachedThreadView.compactCardPadding * 2
+            + DetachedThreadView.compactCardVerticalInset * 2
             + DetachedThreadView.restingTopGap + DetachedThreadView.restingBottomGap
             + DetachedThreadView.waitingRowHeight
-    /// The first round's wait carries no follow-up line (`DetachedThreadView
-    /// .firstRoundThinking`), so its card is shorter by that row and its gap,
-    /// and keeps `waitingBottomGap` under the typing bubble instead.
-    private static let compactWaitingHeight: CGFloat =
-        compactInitialHeight
-            - DetachedThreadView.compactFollowUpGap - DetachedThreadView.followUpHeight
-            + DetachedThreadView.waitingBottomGap
     fileprivate static let compactMaxHeight: CGFloat = 520
     /// Kept at or below `compactWidth` — a compact composer opens into its
     /// answer at its OWN width, and a floor wider than that is a floor
@@ -1721,7 +1720,7 @@ final class DetachedSessionWindowController: NSObject, NSWindowDelegate {
             size: size ?? NSSize(width: Self.compactWidth,
                                  height: asComposer
                                      ? composerRestingHeight
-                                     : Self.compactWaitingHeight))
+                                     : Self.compactInitialHeight))
     }
 
     /// The frame itself. Static and public to the module because
@@ -2599,17 +2598,19 @@ struct DetachedSessionRootView: View {
     private var compactChrome: some View {
         if isBareComposer {
             HStack(spacing: 0) {
-                CompactNotificationCloseButton(action: onClose)
-
+                CompactCloseLight(action: onClose)
                 Spacer(minLength: 0)
             }
-            // The card begins at this y/x inset. Pulling the 18pt control 4pt
-            // across that boundary leaves a deliberate notification-style
-            // overhang without clipping it against the NSWindow.
-            .padding(.horizontal, 2)
+            // The light rides the transparent band just above the card's top
+            // edge, lined up with the answer face's: a window control in the
+            // strip of chrome this face keeps clear for one, rather than a badge
+            // hanging off the capsule's shoulder. Its whole 22pt slot sits above
+            // the card (11 + the band's 12pt of clearance).
+            .padding(.horizontal, CompactShortcutMetrics.inset
+                     + DetachedThreadView.compactCardInset - Tokens.Control.inline / 2)
             .padding(.top, CompactShortcutMetrics.inset
                      + CompactShortcutMetrics.band
-                     + CompactShortcutMetrics.gap - 4)
+                     + CompactShortcutMetrics.gap - Tokens.Control.inline / 2 - 12)
             // Shown whenever the window is, like the close on the answer face.
             .opacity(state.pressDepth == nil ? 1 : 0)
             .allowsHitTesting(state.pressDepth == nil)
@@ -2623,13 +2624,12 @@ struct DetachedSessionRootView: View {
 
     /// The corner's two marks HAND OVER — they never share the corner.
     ///
-    /// They are different objects in different places: the composer's close is an
-    /// 18pt circle at (2, 44), deliberately overhanging the card's top edge by
-    /// 4pt the way a notification's does; the card's is a ~62x32 segment cluster
-    /// at (16, 56), sitting inside the card. Twelve points apart vertically,
-    /// fourteen horizontally, and different sizes. Cross-fading them — which is
-    /// what an undeclared `if/else` inside an animated transaction does — puts
-    /// two rounded glass shapes over each other in one 40pt corner, on top of the
+    /// They are different objects in different places: the composer's close
+    /// light rides the transparent band above the card's top edge; the card's
+    /// sits inside it, in the header row, beside whatever acts on the answer.
+    /// Twelve points apart vertically, and different sizes. Cross-fading them —
+    /// which is what an undeclared `if/else` inside an animated transaction does
+    /// — puts two controls over each other in one 40pt corner, on top of the
     /// composer's own input line still dissolving underneath. That is the pile-up
     /// at the top-left, and it only shows when the pointer is on the card, which
     /// a force click guarantees.
@@ -2648,15 +2648,10 @@ struct DetachedSessionRootView: View {
 
     private var compactAnswerChips: some View {
         let pinned = state.pinned
-        // Close leads the cluster on the card's upper-LEFT corner, matching the
-        // bare composer's notification-style close rather than sitting opposite
-        // it.
-        var segments: [GlassSegmentCluster.Segment] = [
-            .init(id: "compact-close", tooltip: L("detached.close"), action: onClose) {
-                Image(systemName: "xmark")
-                    .font(.sf(Tokens.TypeSize.meta, weight: .semibold))
-            }
-        ]
+        // Close leads the corner — the window's own light, on the upper LEFT,
+        // where a window's controls live. What rides beside it is what acts on
+        // the answer.
+        var segments: [GlassSegmentCluster.Segment] = []
         // A Force Touch card carries its own composer and ledger — the answer is
         // one face of THIS window, not a dead end. Back returns to it in place.
         if state.forceTouchInvocation {
@@ -2677,11 +2672,19 @@ struct DetachedSessionRootView: View {
                 PinStateGlyph(pinned: true, size: 12.5, weight: .semibold)
             })
         }
-        return GlassSegmentCluster(segments: segments, showsTooltips: false)
+        // One 32pt row — the card's header — so the light keeps its place
+        // whether or not a cluster rides beside it.
+        return HStack(spacing: 8) {
+            CompactCloseLight(action: onClose)
+            if !segments.isEmpty {
+                GlassSegmentCluster(segments: segments, showsTooltips: false)
+            }
+        }
+        .frame(height: DetachedThreadView.headerHeight, alignment: .leading)
         .padding(.top, CompactShortcutMetrics.inset + CompactShortcutMetrics.band
-                 + CompactShortcutMetrics.gap + DetachedThreadView.compactCardPadding)
+                 + CompactShortcutMetrics.gap + DetachedThreadView.compactCardVerticalInset)
         .padding(.leading, CompactShortcutMetrics.inset
-                 + DetachedThreadView.compactCardPadding)
+                 + DetachedThreadView.compactCardInset - Tokens.Control.inline / 2)
         // While a force click is still being decided the window is drawn as a
         // bare cap — the same gate the card's own content is behind.
         .opacity(state.pressDepth == nil ? 1 : 0)
@@ -3058,11 +3061,11 @@ enum CompactShortcutMetrics {
     /// What an ANSWER window carries around its scrolling thread. It is the
     /// composer's own `chrome` — the margins AND the band the card hangs below,
     /// which the answer keeps rather than rising into (see `compactGlass`) —
-    /// plus the header row and the follow-up line. The card's own padding is
-    /// added by the caller (`DetachedThreadView`).
+    /// plus the header row. The card's own padding is added by the caller
+    /// (`DetachedThreadView`), and no follow-up line is counted: the
+    /// pointer-side card has none.
     static var answerChrome: CGFloat {
         chrome + DetachedThreadView.headerHeight
-            + DetachedThreadView.compactFollowUpGap + DetachedThreadView.followUpHeight
     }
 
     // MARK: Where the caret lands
@@ -3218,18 +3221,50 @@ private struct CompactHistoryDisclosure: View {
     }
 }
 
-/// The compact composer's close control, in the notification position: the
-/// same glass circle as every other close control, at the in-row size.
-private struct CompactNotificationCloseButton: View {
+/// The card's close, in the shape of a macOS close light: a 12pt dot whose
+/// glyph appears under the pointer. It carries no colour — the card is a dark
+/// glass surface on someone else's work, and a window's red is the one thing on
+/// it that would shout. It keeps the 22pt chip footprint every other in-row
+/// control uses, so the corner's geometry does not change with its tone.
+private struct CompactCloseLight: View {
     var action: () -> Void
+    @State private var hovering = false
+
+    private static let dot: CGFloat = 12
+    /// The card's own glass, in a dot: the control reads as a piece of the
+    /// surface until the pointer names it. Hover lifts the fill a step so the
+    /// dot does not flicker a glyph out of nothing.
+    private static let fill: CGFloat = 0.13
+    private static let hoverFill: CGFloat = 0.2
+    private static let rim = Color.white.opacity(0.09)
 
     var body: some View {
-        GlassIconButton(systemName: "xmark",
-                        help: L("detached.close"),
-                        size: Tokens.Control.inline,
-                        glyphSize: Tokens.TypeSize.badge,
-                        showsTooltip: false,
-                        action: action)
+        Button(action: action) {
+            Circle()
+                .fill(Color.white.opacity(hovering ? Self.hoverFill : Self.fill))
+                .overlay(Circle().strokeBorder(Self.rim, lineWidth: 0.5))
+                .overlay {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 7.5, weight: .bold))
+                        .foregroundStyle(Tokens.text2)
+                        .opacity(hovering ? 1 : 0)
+                }
+                .frame(width: Self.dot, height: Self.dot)
+                .frame(width: Tokens.Control.inline, height: Tokens.Control.inline)
+                .contentShape(Circle())
+                .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
+        }
+        .buttonStyle(CloseLightPressStyle())
+        .onHover { hovering = $0 }
+        .accessibilityLabel(L("detached.close"))
+    }
+}
+
+/// Native behaviour under the press: the light dims rather than changing shape.
+private struct CloseLightPressStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .opacity(configuration.isPressed ? 0.72 : 1)
     }
 }
 
@@ -4279,23 +4314,19 @@ struct DetachedThreadView: View {
     }
     /// The session window's rest under its last turn, above the follow-up line.
     static let sessionBottomGap: CGFloat = 12
-    /// The compact card keeps the panel's 18pt quiet gap above the thread and
-    /// the detached window's short 8pt gap above the follow-up line. In the
-    /// waiting state that separation keeps the lone thinking row from crowding
-    /// the disabled composer; ordinary detached windows additionally carry the
-    /// full `ThreadScroll.runway` below their content.
+    /// The compact card keeps the panel's 18pt quiet gap above the thread.
+    /// Below it, a torn-out session leaves room for its follow-up line; the
+    /// pointer-side card has none, so its last row rests one prose inset (the
+    /// sides') off the card's bottom edge, its own top/bottom padding already
+    /// counted separately (`compactWindowHeight`).
     static let restingTopGap: CGFloat = 18
-    static let restingBottomGap: CGFloat = 0
-    /// The first round's typing bubble: one line of answer text in the answer
-    /// card's vertical padding (`AssistantTurnView.typingBubble`).
+    static let restingBottomGap: CGFloat = compactCardInset - compactCardVerticalInset
+    /// The first round's typing bubble: one line of answer text. The compact
+    /// card's answer is flat (`AnswerCard.flat`) — no bubble padding around it —
+    /// so the row is the line alone, which is what the waiting card budgets.
     static var waitingRowHeight: CGFloat {
         AssistantTurnView.lineHeight(Tokens.TypeSize.stepDown(Tokens.TypeSize.reading))
-            + ChatBubbleChrome.verticalPad * 2
     }
-    /// Under the typing bubble while no follow-up line stands there. With the
-    /// card's own bottom padding it puts the bubble as far from the bottom edge
-    /// as it is from the side (`cardHorizontalPadding`).
-    static let waitingBottomGap: CGFloat = cardHorizontalPadding - compactCardPadding
     /// The panel's own rhythm — `NotchBody.panelPadding`, the SAME on all four
     /// sides, so the follow-up capsule sits as far from the bottom edge as it
     /// does from the sides and 15 reads concentric against the window's 30pt
@@ -4306,19 +4337,34 @@ struct DetachedThreadView: View {
     /// The answer keeps its established reading inset; the tighter nested
     /// padding is local to the composer input treatment.
     static let compactCardPadding: CGFloat = 8
+    /// The pointer-side card's inset from its rim on all four sides. The panel's
+    /// 15 (`cardHorizontalPadding`) is measured against the island's 30pt corner,
+    /// where the glass runs to the screen edge; this card floats alone on the
+    /// desktop, and at the panel's number its prose and its close light read as
+    /// pinned to the glass. 22 is what makes them sit IN the card.
+    static let compactCardInset: CGFloat = 22
+    /// The card's own top and bottom padding. Smaller than the prose inset on
+    /// purpose: the 32pt header row stands at the top, and the last row already
+    /// keeps `restingBottomGap` under it.
+    static let compactCardVerticalInset: CGFloat = 12
     /// The header pill's height (`GlassSegmentCluster` — a 26pt chip in 3pt of
-    /// glass) and the follow-up row's, so the compact window can budget for the
-    /// chrome it carries (`CompactShortcutMetrics.answerChrome`).
+    /// glass), so the compact window can budget for the chrome it carries
+    /// (`CompactShortcutMetrics.answerChrome`).
     static let headerHeight: CGFloat = 32
-    static let compactFollowUpGap: CGFloat = 8
+    /// The detached session window's follow-up line: the gap above it and its
+    /// row. The pointer-side card carries no follow-up, so neither is counted
+    /// into its height.
     static let followUpGap: CGFloat = 8
     static let followUpHeight: CGFloat = Tokens.Control.rail
     /// The fade and frost bands are exactly the gaps the thread rests between —
     /// never deeper — so a card at rest is crisp edge to edge and only content
     /// that has actually travelled into a gap gets dissolved.
-    /// The card's own insets for this face — the composer's on the compact one
-    /// (see `compactCardPadding`), the panel's uniform inset everywhere else.
-    private var cardHorizontal: CGFloat { Self.cardHorizontalPadding }
+    /// The card's own insets for this face — the wider reading inset on the
+    /// compact card (see `compactCardInset`), the panel's uniform inset
+    /// everywhere else.
+    private var cardHorizontal: CGFloat {
+        compactShortcut ? Self.compactCardInset : Self.cardHorizontalPadding
+    }
     /// The header row alone rides the compact card's tighter inset — those two
     /// marks are the composer's chips, in the composer's exact spot, and they
     /// may not move when Enter replaces what is under them. Prose does not
@@ -4331,29 +4377,30 @@ struct DetachedThreadView: View {
     /// The follow-up capsule rides the tighter inset too — it IS the composer's
     /// own input capsule, in the composer's own spot, so it stands as close to
     /// the card's sides as that one does. Only the prose between them is held at
-    /// the reading margin.
+    /// the reading margin. (Only a torn-out session draws one.)
     private var followUpHorizontal: CGFloat { headerHorizontal }
     private var cardTop: CGFloat {
-        compactShortcut ? Self.compactCardPadding : Self.cardTopPadding
+        compactShortcut ? Self.compactCardVerticalInset : Self.cardTopPadding
     }
     private var cardBottom: CGFloat {
-        compactShortcut ? Self.compactCardPadding : Self.cardBottomPadding
+        compactShortcut ? Self.compactCardVerticalInset : Self.cardBottomPadding
     }
     private var topFade: CGFloat { scrollTopInset }
     private var topBand: CGFloat { min(ThreadScroll.band, scrollTopInset) }
     /// The gap the composer stands in above the card's bottom edge.
-    private var followUpGap: CGFloat {
-        compactShortcut ? Self.compactFollowUpGap : Self.followUpGap
-    }
+    private var followUpGap: CGFloat { Self.followUpGap }
     /// The runway the thread travels DOWN into, behind the floating composer:
     /// the box's own 34pt reach from the viewport's bottom edge, its gap, and
     /// whatever resting space this face already keeps under its content. The
     /// thread dissolves behind the box instead of ending on a hard cut above it
     /// (the result view's design, one composer treatment everywhere).
     private var followUpRunway: CGFloat {
+        // The pointer-side card carries no composer at all, so nothing floats
+        // over the thread's tail: it simply rests off the card's bottom edge.
+        if compactShortcut { return scrollBottomInset }
         // No composer stands there during the first round's wait.
-        firstRoundThinking
-            ? (compactShortcut ? Self.waitingBottomGap : scrollBottomInset)
+        return firstRoundThinking
+            ? scrollBottomInset
             : scrollBottomInset + followUpGap + Self.followUpHeight
     }
     /// Fade and frost fall across the runway, never over resting text: the band
@@ -4375,7 +4422,7 @@ struct DetachedThreadView: View {
     /// asked about the compact face, whose runways are exactly these gaps.
     static func compactWindowHeight(forContentHeight bare: CGFloat) -> CGFloat {
         bare + restingTopGap + restingBottomGap
-            + compactCardPadding * 2
+            + compactCardVerticalInset * 2
             + CompactShortcutMetrics.answerChrome
     }
     private var latestAnswerText: String {
@@ -4540,8 +4587,10 @@ struct DetachedThreadView: View {
 
                 // The first round's wait has nothing to follow up on yet, so the
                 // line is absent until the thread has an answer (or a question
-                // of its own to put to the user).
-                if !firstRoundThinking {
+                // of its own to put to the user). The pointer-side card never
+                // carries one at all: it is an answer at the cursor, not a
+                // thread to keep typing into.
+                if !firstRoundThinking, !compactShortcut {
                     followUpRow
                         .padding(.horizontal, followUpHorizontal)
                         .transition(.opacity)
@@ -4902,7 +4951,7 @@ struct DetachedThreadView: View {
                         .padding(.leading, 12)
                 }
                 UserQuestionBubble(text: turn.text, isAgent: turn.isAgent, reaction: turn.reaction,
-                                   fromTelegram: turn.fromTelegram)
+                                   fromTelegram: turn.fromTelegram, flat: compactShortcut)
                     .contextMenu {
                         QuestionTurnMenu(onReply: replyAction(for: turn),
                                          onDelete: deleteAction(for: turn))
@@ -4951,7 +5000,8 @@ struct DetachedThreadView: View {
             folders: turn.folders,
             onOpenCapture: model.map { model in { model.openTurnCapture($0) } },
             onUndoCapture: model.map { model in { model.undoTurnCapture($0) } },
-            turnID: turn.id
+            turnID: turn.id,
+            flat: compactShortcut
         )
     }
 

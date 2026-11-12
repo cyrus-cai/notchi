@@ -1,10 +1,12 @@
 import AppKit
 import SwiftUI
 
-/// The "What's New" release-notes panel, rendered *inside* the notch in place of
-/// the recent list — same full-body takeover as `InlineSettingsView`. Reached
-/// from the menu bar, the Recent menu, or About in Settings
+/// The "What's New" release-notes reader. In the notch it takes over the body in
+/// place of the recent list — same full-body takeover as `InlineSettingsView`,
+/// reached from the menu bar, the Recent menu, or About in Settings
 /// (`NotchModel.openWhatsNew`); the back chevron / Esc returns to the idle prompt.
+/// The Settings window hosts the same reader as its own What's New page, which is
+/// where About sends you there.
 ///
 /// Content comes from `WhatsNewService`, whose notes are bundled into the app —
 /// so the normal case is just a scrollable column of per-version sections, always
@@ -19,9 +21,13 @@ import SwiftUI
 /// version in the rail scrolls the notes to it.
 struct WhatsNewView: View {
     @ObservedObject var model: NotchModel
-    /// The back pill's action in its own window (`WhatsNewWindowController`);
-    /// nil in the panel, where it closes the page.
-    var onBack: (() -> Void)? = nil
+    /// The panel draws its own back pill over the reader. The Settings window's
+    /// What's New page already has one in its header, so it turns this off.
+    var showsHeader: Bool = true
+    /// Height both columns take. Nil keeps the panel's fixed budget
+    /// (`NotchBody.immersiveListHeight`); the Settings window hands it its pane
+    /// height so the reader fills the window instead of a 320pt strip.
+    var height: CGFloat? = nil
     @ObservedObject private var service = WhatsNewService.shared
 
     /// Which release the notes column is currently parked in — the row the rail
@@ -59,12 +65,17 @@ struct WhatsNewView: View {
     /// (12 + 26 + 8) comes out of the same budget. A longer history just scrolls.
     private static let headerChrome: CGFloat = 12 + 26 + 8
     private var columnHeight: CGFloat {
-        NotchBody.immersiveListHeight - Self.headerChrome
+        height ?? (NotchBody.immersiveListHeight - Self.headerChrome)
     }
 
     /// Length of the bottom taper where the notes dissolve as they scroll past the
     /// frame edge, matching the recent list's `edgeFade`.
     private let edgeFade: CGFloat = 64
+
+    /// Empty room above the first release. The panel keeps a generous runway for
+    /// its own back pill to hand off to; the Settings page already has that pill
+    /// in its header, so its notes rest closer to the top of the pane.
+    private var topRunway: CGFloat { showsHeader ? 28 : 8 }
 
     /// Keep the in-notch reader focused on the latest changes. The website is
     /// the complete archive once the bundled history grows beyond this point.
@@ -97,10 +108,14 @@ struct WhatsNewView: View {
 
     // MARK: - Header
 
+    @ViewBuilder
     private var header: some View {
+        if showsHeader { panelHeader }
+    }
+
+    private var panelHeader: some View {
         HStack(spacing: 10) {
             PanelBackPill(title: L("whatsnew.title"), help: L("whatsnew.back")) {
-                if let onBack { onBack(); return }
                 withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
                     model.closeWhatsNew()
                 }
@@ -159,7 +174,7 @@ struct WhatsNewView: View {
         .padding(.leading, 6)
         // The rail's first tick sits level with the notes' first line: both
         // columns sit below the same runway (see `notesColumn`).
-        .padding(.top, 30)
+        .padding(.top, topRunway + 2)
         .frame(width: railWidth, height: columnHeight, alignment: .topLeading)
     }
 
@@ -222,7 +237,7 @@ struct WhatsNewView: View {
                 .padding(.horizontal, 4)
                 // Breathing room the top taper falls across, so the newest release
                 // rests below the gradient at full strength before any scrolling.
-                .padding(.top, 28)
+                .padding(.top, topRunway)
                 .padding(.bottom, 20)
             }
             .onChange(of: jumpTarget) { _, target in
@@ -544,7 +559,7 @@ struct RailTick: View {
 
     var body: some View {
         Button(action: action) {
-            Capsule()
+            Capsule(style: .continuous)
                 .fill(selected || hoverDistance == 0 ? Tokens.text1 : Tokens.text4)
                 .frame(width: width, height: 1.5)
                 .frame(width: Self.hitWidth, height: Self.rowHeight, alignment: alignment)
@@ -594,8 +609,8 @@ private struct WhatsNewActionStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .exemptsDoubleClickPin(pressed: configuration.isPressed)
-            .glassCapsule(in: Capsule(), brighter: hovering)
-            .contentShape(Capsule())
+            .glassCapsule(in: Capsule(style: .continuous), brighter: hovering)
+            .contentShape(Capsule(style: .continuous))
             .scaleEffect(configuration.isPressed ? Tokens.chipPressScale : 1)
             .onHover { hovering = $0 }
             .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)

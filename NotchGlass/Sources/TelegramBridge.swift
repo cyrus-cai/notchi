@@ -25,7 +25,7 @@ import UniformTypeIdentifiers
 /// The bot answers one chat: the first private chat that taps Start within
 /// `pairingWindow` of the token being entered. Everyone else is ignored.
 ///
-/// A chat continues one thread until `/new`. Replying to one of the bot's
+/// A chat continues one thread. Replying to one of the bot's
 /// messages continues the thread that message belongs to.
 ///
 /// Anything a message carries goes to the model: photos, stills from videos,
@@ -74,6 +74,8 @@ final class TelegramBridge: ObservableObject {
     private var steered: [UUID: [Int: [[String: Any]]]] = [:]
     /// Option buttons sent for a pending question, by the question's id.
     private var questionOptions: [UUID: [String]] = [:]
+    /// The model rows each /model message offers, by the id in its buttons.
+    private var modelOptions: [UUID: [AskModelMRU.Entry]] = [:]
     /// Messages collect here per chat until no new one has come for a short
     /// wait, then go out as one round: people split one request over several
     /// messages. An album arrives as one message per item, sharing a
@@ -165,8 +167,7 @@ final class TelegramBridge: ObservableObject {
         UserDefaults.standard.removeObject(forKey: Self.pausedKey)
         // getUpdates and a webhook cannot both be on.
         await call("deleteWebhook", [:])
-        await call("setMyCommands", ["commands": [["command": "new", "description": L("telegram.command.new")],
-                                                  ["command": "stop", "description": L("telegram.command.stop")]]])
+        await registerCommands()
         await call("setMyShortDescription", ["short_description": L("telegram.description")])
         openPairing()
         poll()
@@ -270,9 +271,17 @@ final class TelegramBridge: ObservableObject {
         pollTask = nil
     }
 
+    /// The command menu next to the message field. Sent on every start so a
+    /// bot paired by an older version also gets new commands.
+    private func registerCommands() async {
+        await call("setMyCommands", ["commands": [["command": "model", "description": L("telegram.command.model")],
+                                                  ["command": "stop", "description": L("telegram.command.stop")]]])
+    }
+
     private func poll() {
         guard pollTask == nil, !token.isEmpty else { return }
         pollTask = Task { [weak self] in
+            await self?.registerCommands()
             var backoff: UInt64 = 1
             while !Task.isCancelled {
                 guard let self else { return }
@@ -476,6 +485,12 @@ final class TelegramBridge: ObservableObject {
             flushAlbum(chatID: chatID)
             return
         }
+        // Not queued either: a switch made during an answer applies to the next one.
+        if let text, text == "/model" || text.hasPrefix("/model@") || text.hasPrefix("/model ") {
+            Task { await offerModels(chatID: chatID) }
+            flushAlbum(chatID: chatID)
+            return
+        }
         let isCommand = text?.hasPrefix("/") == true
         if isCommand { flushAlbum(chatID: chatID) }
         if !isCommand {
@@ -577,11 +592,6 @@ final class TelegramBridge: ObservableObject {
             .joined(separator: "\n")
         let messageID = (message["message_id"] as? NSNumber)?.intValue ?? 0
 
-        if text == "/new" || text.hasPrefix("/new@") {
-            setThread(nil, chat: chatID)
-            await call("sendMessage", ["chat_id": chatID, "text": L("telegram.newThread")])
-            return
-        }
         if text.hasPrefix("/start") {
             await call("sendMessage", ["chat_id": chatID, "text": L("telegram.paired")])
             return
@@ -877,10 +887,69 @@ final class TelegramBridge: ObservableObject {
                                    "reply_markup": ["inline_keyboard": buttons]])
     }
 
+    /// The models the menu bar's Model menu lists: the serving one, then the
+    /// recently used ones that are still set up.
+    private static func modelRows() -> [AskModelMRU.Entry] {
+        let current = APIKeyStore.selectedProvider
+        let currentModel = APIKeyStore.effectiveModel(for: current) ?? current.defaultModel
+        var rows: [AskModelMRU.Entry] = []
+        if ModelCatalogStore.ready(current), !currentModel.isEmpty {
+            rows.append(.init(provider: current, model: currentModel))
+        }
+        for entry in AskModelMRU.entries where ModelCatalogStore.ready(entry.provider) {
+            if !rows.contains(entry) { rows.append(entry) }
+        }
+        return Array(rows.prefix(AskModelMRU.capacity))
+    }
+
+    private static func modelName(_ entry: AskModelMRU.Entry) -> String {
+        "\(ModelRatings.prettyName(for: entry.model, provider: entry.provider)) (\(entry.provider.displayName))"
+    }
+
+    private func offerModels(chatID: Int64) async {
+        let rows = Self.modelRows()
+        guard let first = rows.first else {
+            await call("sendMessage", ["chat_id": chatID, "text": L("menuBar.noModel")])
+            return
+        }
+        let current = APIKeyStore.selectedProvider
+        let currentModel = APIKeyStore.effectiveModel(for: current) ?? current.defaultModel
+        let serving = first.provider == current && first.model == currentModel
+        let id = UUID()
+        modelOptions[id] = rows
+        let buttons = rows.enumerated().map { index, row in
+            [["text": (index == 0 && serving ? "✓ " : "") + Self.modelName(row),
+              "callback_data": "model|\(id.uuidString)|\(index)"]]
+        }
+        let text = serving ? String(format: L("telegram.model.current"), Self.modelName(first))
+                           : L("telegram.command.model")
+        await call("sendMessage", ["chat_id": chatID, "text": text,
+                                   "reply_markup": ["inline_keyboard": buttons]])
+    }
+
+    private func chooseModel(_ parts: [Substring], message: [String: Any]?) async {
+        guard parts.count == 3, let id = UUID(uuidString: String(parts[1])),
+              let index = Int(parts[2]),
+              let rows = modelOptions.removeValue(forKey: id),
+              rows.indices.contains(index) else { return }
+        let row = rows[index]
+        ModelCatalogStore.select(provider: row.provider, model: row.model)
+        if let message,
+           let chatID = ((message["chat"] as? [String: Any])?["id"] as? NSNumber)?.int64Value,
+           let messageID = (message["message_id"] as? NSNumber)?.intValue {
+            await call("editMessageText", ["chat_id": chatID, "message_id": messageID,
+                                           "text": String(format: L("telegram.model.current"), Self.modelName(row))])
+        }
+    }
+
     private func answerCallback(_ callback: [String: Any]) async {
         guard let id = callback["id"] as? String else { return }
         await call("answerCallbackQuery", ["callback_query_id": id])
         guard let data = callback["data"] as? String else { return }
+        if data.hasPrefix("model|") {
+            await chooseModel(data.split(separator: "|"), message: callback["message"] as? [String: Any])
+            return
+        }
         let parts = data.split(separator: "|")
         guard parts.count == 2, let questionID = UUID(uuidString: String(parts[0])),
               let index = Int(parts[1]),

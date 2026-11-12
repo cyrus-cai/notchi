@@ -217,53 +217,39 @@ struct StatsDigest: Equatable {
 /// leaves the Mac. The figures that used to sit beside it (messages, tokens,
 /// active days) live in About now, with the activity grid they describe.
 struct StatsPane: View {
-    @State private var hoveringReveal = false
-    @State private var hoveringPolicy = false
-
     var body: some View {
-        HStack(spacing: 14) {
+        VStack(alignment: .leading, spacing: 0) {
             privacyLine
-            // The request log is a file on this Mac; this opens it where it is,
-            // right after the line that says it stays here.
-            if let url = RequestAudit.shared.fileURL {
-                Button {
-                    NSWorkspace.shared.activateFileViewerSelecting([url])
-                } label: {
-                    Text(L("audit.viewRawData"))
-                        .font(.sf(Tokens.TypeSize.meta))
-                        .foregroundStyle(hoveringReveal ? Tokens.text1 : Tokens.text4.opacity(0.8))
-                        .lineLimit(1)
-                        .fixedSize()
-                        .contentShape(Rectangle())
+            // The ways off this page, drawn like the wallet's: underlined meta
+            // text on a row of their own, right-aligned, with the outbound
+            // arrow on the one that leaves the app.
+            HStack(spacing: 14) {
+                Spacer(minLength: 0)
+                // The request log is a file on this Mac; this opens it where it
+                // is, right after the line that says it stays here.
+                if let url = RequestAudit.shared.fileURL {
+                    UnderlineLink(title: L("audit.viewRawData")) {
+                        NSWorkspace.shared.activateFileViewerSelecting([url])
+                    }
                 }
-                .buttonStyle(.plain).exemptsDoubleClickPin()
-                .onHover { hoveringReveal = $0 }
+                UnderlineLink(title: L("audit.privacyPolicy"), external: true) {
+                    LinkGate.shared.open(URL(string: "https://www.notch.website/privacy")!)
+                }
             }
-            Button {
-                LinkGate.shared.open(URL(string: "https://www.notch.website/privacy")!)
-            } label: {
-                Text(L("audit.privacyPolicy"))
-                    .font(.sf(Tokens.TypeSize.meta))
-                    .foregroundStyle(hoveringPolicy ? Tokens.text1 : Tokens.text4.opacity(0.8))
-                    .lineLimit(1)
-                    .fixedSize()
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain).exemptsDoubleClickPin()
-            .onHover { hoveringPolicy = $0 }
+            .padding(.top, 8)
         }
     }
 
     /// "Who else sees this?" — answered on the page that shows the requests.
+    /// The answer is the second line under the question.
     private var privacyLine: some View {
-        HStack(spacing: 2) {
-            Text(L("stats.privacy"))
+        VStack(alignment: .leading, spacing: 2) {
+            // One line: a heading above it said the same thing again.
+            Text(privacyHint)
                 .font(.sf(Tokens.TypeSize.meta))
                 .foregroundStyle(Tokens.text4.opacity(0.8))
-                .lineLimit(1)
-                .fixedSize()
-            SettingInfo(privacyHint, glyph: 11, hit: 14)
-                .accessibilityHidden(true)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding(.leading, 2)
     }
@@ -295,26 +281,22 @@ struct StatsSummaryLines: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 2) {
-                Text(L("stats.line.totals",
-                       StatsFormat.total(digest.chatMessages),
-                       StatsFormat.total(digest.captures),
-                       StatsFormat.total(digest.agentMessages),
-                       StatsFormat.compact(tokens.total)))
-                // The token figure is the only one here the reader can't verify
-                // by counting their own rows, so it keeps its ⓘ.
-                SettingInfo(L("stats.tokens.info"), glyph: 10, hit: 13)
-                    .accessibilityHidden(true)
-            }
+            Text(L("stats.line.totals",
+                   StatsFormat.total(digest.chatMessages),
+                   StatsFormat.total(digest.captures),
+                   StatsFormat.total(digest.agentMessages),
+                   StatsFormat.compact(tokens.total)))
+                .lineLimit(1)
+                .minimumScaleFactor(0.75)
             Text(L("stats.line.days",
                    StatsFormat.total(digest.activeDays),
                    StatsFormat.total(digest.currentStreak),
                    digest.peakHour.map { StatsFormat.hour($0) } ?? "—"))
+                .lineLimit(1)
+                .minimumScaleFactor(0.75)
         }
         .font(.sf(Tokens.TypeSize.meta))
         .foregroundStyle(Tokens.text4)
-        .lineLimit(1)
-        .minimumScaleFactor(0.75)
         .padding(.leading, 2)
     }
 }
@@ -627,7 +609,7 @@ private struct StatsHeatmap: View {
     private func highlight(_ grid: Grid) -> some View {
         if let hovered {
             RoundedRectangle(cornerRadius: Self.radius, style: .continuous)
-                .strokeBorder(Color.white.opacity(0.55), lineWidth: 1)
+                .strokeBorder(Tokens.ink.opacity(0.55), lineWidth: 1)
                 .frame(width: Self.cell, height: Self.cell)
                 .offset(x: CGFloat(hovered.week) * grid.stride,
                         y: CGFloat(hovered.row) * (Self.cell + Self.gap))
@@ -666,7 +648,7 @@ private struct StatsHeatmap: View {
         case 2:  return Tokens.accent.opacity(0.42)
         case 3:  return Tokens.accent.opacity(0.70)
         case 4:  return Tokens.accent
-        default: return Color.white.opacity(0.075)
+        default: return Tokens.ink.opacity(0.075)
         }
     }
 

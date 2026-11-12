@@ -1229,10 +1229,10 @@ struct ModelDetailCard: View {
         /// the shadow of the lip above it and its bottom edge catching the light
         /// that made it — which is the whole of what tells an eye "recessed".
         static var groove: some View {
-            Capsule()
+            Capsule(style: .continuous)
                 .fill(Color.black.opacity(0.40))
                 .overlay(
-                    Capsule().strokeBorder(
+                    Capsule(style: .continuous).strokeBorder(
                         LinearGradient(colors: [.black.opacity(0.8), .black.opacity(0.35),
                                                 .white.opacity(0.24)],
                                        startPoint: .top, endPoint: .bottom),
@@ -1245,13 +1245,13 @@ struct ModelDetailCard: View {
         /// band just inside the top edge, and a faint spill onto the groove so the
         /// run sits *in* the track instead of on it.
         static var lozenge: some View {
-            Capsule()
+            Capsule(style: .continuous)
                 .fill(LinearGradient(colors: [.white.opacity(0.36),
                                               .white.opacity(0.24),
                                               .white.opacity(0.13)],
                                      startPoint: .top, endPoint: .bottom))
                 .overlay(
-                    Capsule()
+                    Capsule(style: .continuous)
                         .fill(LinearGradient(colors: [.white.opacity(0.58), .white.opacity(0)],
                                              startPoint: .top, endPoint: .bottom))
                         // Inset off every edge so it reads as a reflection floating
@@ -1263,7 +1263,7 @@ struct ModelDetailCard: View {
                         .blendMode(.plusLighter)
                 )
                 .overlay(
-                    Capsule().strokeBorder(
+                    Capsule(style: .continuous).strokeBorder(
                         LinearGradient(colors: [.white.opacity(0.55), .white.opacity(0.06)],
                                        startPoint: .top, endPoint: .bottom),
                         lineWidth: 0.5)

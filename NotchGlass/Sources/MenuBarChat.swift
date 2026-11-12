@@ -26,11 +26,12 @@ struct MenuBarChat: View {
     static let maxMessagesHeight: CGFloat = 440
     /// The fade older messages scroll into, under the menu bar.
     private static let topFade: CGFloat = 36
-    /// Room under the last message while the messages scroll, so it rests
-    /// clear of most of `bottomBlur`.
-    private static let bottomFade: CGFloat = 18
-    /// The band above the composer where scrolling messages blur out.
-    private static let bottomBlur: CGFloat = 28
+    /// Room under the last message while the messages scroll. None: the
+    /// column's own 10pt gap is the only space above the composer.
+    private static let bottomFade: CGFloat = 0
+    /// The band above the composer where scrolling messages blur out. No
+    /// taller than the gap, so the resting last message stays sharp.
+    private static let bottomBlur: CGFloat = 10
     /// How far the scrolling messages run on under the composer: the gap
     /// above it plus the depth of its rounded corners, so no strip of
     /// backdrop shows between the two and a message blurs on behind it.
@@ -76,11 +77,21 @@ struct MenuBarChat: View {
     /// only when the reader leaves or returns to the end.
     @State private var followsEnd = true
     @State private var recentCardsCache = RecentCardsCache()
-    /// 0 folded up into the menu bar icon, 1 unfolded. Driven on open and on
-    /// `cardRetracting`.
+    /// The oldest message mounted. A long thread opens with its newest
+    /// `mountBatch`; scrolling to the top mounts the next batch above. Back to
+    /// one batch on each open and on a thread change.
+    ///
+    /// An id, not a count of the newest: counted from the end, every message
+    /// sent pushed the two oldest out of the list. The lazy list then took
+    /// their height off its own while the scroll offset stayed, and the
+    /// messages left the viewport until the next scroll to the end.
+    @State private var mountedFromID: UUID?
+    static let mountBatch = 24
+    /// The card is drawn. False while it is closed, so the window comes up
+    /// empty and `fold` unfolds the card into it.
     @State private var revealed = false
-    /// Underdamped, so the card overshoots its rest size and settles back.
-    static let unfoldSpring = Animation.spring(response: 0.5, dampingFraction: 0.6)
+    /// The fold down out of the menu bar icon and back up into it.
+    @State private var fold = CardFold()
     /// The pointer is over the composer: its bottom row shows.
     @State private var composerHovering = false
     /// The header's side-page mark has its menu down.
@@ -143,7 +154,8 @@ struct MenuBarChat: View {
             composer
         }
         .frame(width: NotchMetrics.chatWidth)
-        .modifier(UnfoldFromTop(progress: revealed ? 1 : 0, reduceMotion: reduceMotion))
+        .opacity(revealed ? 1 : 0)
+        .background(CardFoldAnchor(fold: fold))
         .padding(.top, NotchMetrics.chatTopGap)
         .environment(\.chatBubbleGlass, true)
         .environment(\.cardWidthFraction, Self.bubbleWidthFraction)
@@ -165,6 +177,7 @@ struct MenuBarChat: View {
                     // shows the chat, not the side page.
                     model.showRoutines = false
                 }
+                fold.reset()
             }
         }
         .animation(.spring(response: 0.4, dampingFraction: 0.86), value: model.showRoutines)
@@ -173,12 +186,11 @@ struct MenuBarChat: View {
         .onChange(of: model.showWhatsNew) { _, _ in openPagesInWindows() }
         .onChange(of: model.cardRetracting) { _, retracting in
             if retracting {
-                withAnimation(.easeIn(duration: NotchModel.cardFlightDuration * 0.9)) {
-                    revealed = false
-                }
-            } else if isOpen, !revealed {
+                fold.fold(duration: NotchModel.cardFlightDuration * 0.9, reduceMotion: reduceMotion)
+            } else if isOpen, fold.isFolding {
                 // A reopen turned the fold back: unfold from where it is.
-                withAnimation(Self.unfoldSpring) { revealed = true }
+                show()
+                fold.unfold(fromCurrent: true, reduceMotion: reduceMotion)
             }
         }
     }
@@ -198,12 +210,17 @@ struct MenuBarChat: View {
             model.attachLiveMainThreadRound()
         }
         scroll.atBottom = true
+        // The open scrolls to the end after the first layout; until then the
+        // top of the list is in view, and must not read as a reader there.
+        scroll.pinnedUntil = Date().addingTimeInterval(0.6)
+        pinMountedBatch()
         endRequest += 1
         unfold()
     }
 
-    /// Recent and What's New, asked for from the card (its ⋯ menu, ↓ on the
-    /// prompt, the menu bar menu), open in their own windows.
+    /// Recent, asked for from the card (its ⋯ menu, ↓ on the prompt, the menu bar
+    /// menu), opens in its own window; What's New is a page of the Settings
+    /// window, which is the only window that reads release notes now.
     private func openPagesInWindows() {
         // The card's view stays mounted while the card is closed; the island's
         // own Recent and What's New pages are not this view's to move.
@@ -214,7 +231,8 @@ struct MenuBarChat: View {
         }
         if model.showWhatsNew {
             model.showWhatsNew = false
-            WhatsNewWindowController.shared.present(model: model)
+            model.settingsSection = InlineSettingsView.Section.whatsNew.rawValue
+            SettingsWindowController.shared.present(model: model)
         }
     }
 
@@ -224,8 +242,26 @@ struct MenuBarChat: View {
         quiet.disablesAnimations = true
         withTransaction(quiet) { revealed = false }
         DispatchQueue.main.async {
-            withAnimation(Self.unfoldSpring) { revealed = true }
+            // The layer is held folded while SwiftUI draws the card for the
+            // first time since it was hidden. That draw blocks the main
+            // thread, so the timer below fires once it is done, and the
+            // spring starts on a card that is already on the layer. Started
+            // here, the spring ran while the card was still being drawn and
+            // was over by the time it showed.
+            fold.holdFolded()
+            show()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) {
+                guard isOpen else { return }
+                fold.unfold(fromCurrent: false, reduceMotion: reduceMotion)
+            }
         }
+    }
+
+    /// Draw the card at its rest size, without animation: `fold` moves it.
+    private func show() {
+        var quiet = Transaction()
+        quiet.disablesAnimations = true
+        withTransaction(quiet) { revealed = true }
     }
 
 
@@ -269,7 +305,7 @@ struct MenuBarChat: View {
             ZStack {
                 BackdropBlur(radius: 12, spot: true)
                     .padding(-Self.chipBlurSpread)
-                Capsule()
+                Capsule(style: .continuous)
                     .fill(Color.black.opacity(0.6))
                     .padding(-4)
                     .blur(radius: 8)
@@ -356,9 +392,12 @@ struct MenuBarChat: View {
                                     onScreen: false,
                                     live: nil, streamingNow: false, askFailed: false)
                                 .equatable()
+                                .modifier(ThreadScrollLagOffset())
                         }
                     }
+                    .modifier(ThreadScrollLagHost())
                     .padding(.bottom, NotchBody.panelPadding)
+                    .background(EnclosingScrollViewReporter { ThreadScrollLag.shared.attach($0) })
                     Color.clear.frame(height: 0).id(Self.bottomID)
                 }
                 .environment(\.cardWidthFraction, 1)
@@ -376,8 +415,11 @@ struct MenuBarChat: View {
             ScrollView(.vertical, showsIndicators: false) {
               VStack(spacing: 0) {
                 Color.clear.frame(height: 0).id(Self.topID)
-                // Lazy: a long thread builds only the messages near the
-                // viewport.
+                // Not lazy. Only `mountBatch` messages are mounted, so all of
+                // them are built. A lazy stack built the ones near the offset
+                // it was closed at, and when the card reopened and jumped to
+                // the end it did not build the ones there: the messages area
+                // stayed empty until something else laid the list out again.
                 // Keyed by id alone: diffing `[Turn]` compared every message's
                 // full text on each update, which froze long threads for
                 // seconds mid-scroll.
@@ -386,8 +428,21 @@ struct MenuBarChat: View {
                 let index = Dictionary(thread.enumerated().map { ($1.id, $0) },
                                        uniquingKeysWith: { _, b in b })
                 let lastID = turns.last?.id
-                LazyVStack(alignment: .leading, spacing: Self.bubbleGap) {
-                    ForEach(turns.map(\.id), id: \.self) { id in
+                let start = mountedStart(in: turns)
+                let shown = turns[start...].map(\.id)
+                if #unavailable(macOS 15.0) {
+                  if start > 0, let firstShown = shown.first {
+                    // Without scroll geometry: mounts the next batch when the
+                    // view is inserted. On macOS 15 `TrackScrollEnd` reports
+                    // the reader reaching the top instead; this view sits in a
+                    // plain VStack, so its onAppear ran once, at the bottom,
+                    // and older messages never mounted.
+                    Color.clear.frame(height: 1)
+                        .onAppear { loadOlder(proxy, keeping: firstShown) }
+                  }
+                }
+                VStack(alignment: .leading, spacing: Self.bubbleGap) {
+                    ForEach(shown, id: \.self) { id in
                         if let turn = byID[id] {
                             ChatRow(turn: turn, model: model,
                                     isLast: id == thread.last?.id,
@@ -401,9 +456,12 @@ struct MenuBarChat: View {
                                     streamingNow: id == lastID && model.isStreaming,
                                     askFailed: id == lastID && model.visibleAskError != nil)
                                 .equatable()
+                                .modifier(ThreadScrollLagOffset())
                         }
                     }
                 }
+                .modifier(ThreadScrollLagHost())
+                .background(EnclosingScrollViewReporter { ThreadScrollLag.shared.attach($0) })
                 .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height in
                     scroll.measured = height
                     // Any growth (streamed text, a settled answer's layout,
@@ -435,9 +493,14 @@ struct MenuBarChat: View {
             .id(turns.first?.id)
             .modifier(OpensAtEnd(followsEnd: followsEnd))
             .scrollDisabled(!overflows)
-            .modifier(TrackScrollEnd(position: scroll) { end in
+            .modifier(TrackScrollEnd(position: scroll, changed: { end in
                 if followsEnd != end { followsEnd = end }
-            })
+            }, reachedTop: {
+                let turns = shownTurns
+                let start = mountedStart(in: turns)
+                guard start > 0 else { return }
+                loadOlder(proxy, keeping: turns[start].id)
+            }))
             .frame(height: overflows ? messagesCap + Self.composerOverlap
                    : contentHeight + Self.glassGutter * 2)
             .mask(fadeMask)
@@ -460,7 +523,12 @@ struct MenuBarChat: View {
             .onChange(of: turns.last?.id) { _, _ in
                 scroll.atBottom = true
                 scroll.pinnedUntil = Date().addingTimeInterval(0.8)
-                scrollToEnd(proxy, animated: true)
+                // Not animated. The new message's own spring (`turns.count`,
+                // on the card) already moves the list, and the end stays in
+                // view through it by the size-change anchor. An animated
+                // scroll on top of that put the list 291 pt short of its end
+                // for a frame, which showed as every message jumping away.
+                scrollToEnd(proxy, animated: false)
                 // Again once the new message has laid out: the lazy list's
                 // estimate of its height stops the first scroll short.
                 for delay in [0.15, 0.4, 0.75] {
@@ -488,6 +556,7 @@ struct MenuBarChat: View {
                     contentHeight = scroll.measured
                 }
                 recentCardsCache.clear()
+                pinMountedBatch()
                 scroll.atBottom = true
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { endRequest += 1 }
             }
@@ -498,6 +567,34 @@ struct MenuBarChat: View {
                     scrollToEnd(proxy, animated: false)
                 }
             }
+        }
+    }
+
+    /// The index of the oldest mounted message: `mountedFromID`'s, or with
+    /// none pinned (or one that left the thread) the newest batch's first.
+    private func mountedStart(in turns: [NotchModel.Turn]) -> Int {
+        if let id = mountedFromID, let index = turns.lastIndex(where: { $0.id == id }) {
+            return index
+        }
+        return max(0, turns.count - Self.mountBatch)
+    }
+
+    /// Mount the newest batch, and hold its first message as the list's start.
+    private func pinMountedBatch() {
+        let turns = shownTurns
+        mountedFromID = turns.isEmpty ? nil : turns[max(0, turns.count - Self.mountBatch)].id
+    }
+
+    /// Mount the next batch of older messages above the ones shown, and keep
+    /// the message that was at the top where it was.
+    private func loadOlder(_ proxy: ScrollViewProxy, keeping anchor: UUID) {
+        guard overflowLatched, !scroll.pinned else { return }
+        if #available(macOS 15.0, *), scroll.atBottom { return }
+        let turns = shownTurns
+        guard !turns.isEmpty else { return }
+        mountedFromID = turns[max(0, mountedStart(in: turns) - Self.mountBatch)].id
+        DispatchQueue.main.async {
+            proxy.scrollTo(anchor, anchor: .top)
         }
     }
 
@@ -730,25 +827,156 @@ private struct ChatRow: View, Equatable {
 
 /// The chat unfolding down out of the menu bar icon: it grows down from its
 /// top edge while it drops into place and fades in. The spring overshoots, so
-/// the card stretches past its height and springs back. At rest it is the
-/// plain view, with no mask or offscreen pass left on the glass. Reduce Motion
-/// fades instead.
-private struct UnfoldFromTop: ViewModifier, Animatable {
-    var progress: CGFloat
-    let reduceMotion: Bool
+/// the card stretches past its height and springs back. Reduce Motion fades
+/// instead.
+///
+/// The motion runs on the window's content layer, in the render server. As a
+/// SwiftUI scale on the card it was laid out and drawn again on the main
+/// thread for every frame, each bubble's glass included, at 80 to 100 ms a
+/// frame on a long thread. SwiftUI now draws the card once, at rest.
+final class CardFold {
+    /// A view with the card's frame (`CardFoldAnchor`).
+    weak var anchor: NSView?
+    /// A fold back into the icon is running or held.
+    private(set) var isFolding = false
 
-    var animatableData: CGFloat {
-        get { progress }
-        set { progress = newValue }
+    private static let key = "menuBarChat.fold"
+    /// Underdamped, so the card overshoots its rest size and settles back.
+    private static let response: Double = 0.5
+    private static let dampingFraction: Double = 0.6
+    private static let frame: Double = 1.0 / 120
+
+    /// Unfold to rest: from folded, or with `fromCurrent` from wherever a fold
+    /// under way has got to.
+    func unfold(fromCurrent: Bool, reduceMotion: Bool) {
+        guard let layer else { return }
+        isFolding = false
+        let start = fromCurrent ? currentProgress(of: layer) : 0
+        guard start < 1 else { return }
+        let omega = 2 * Double.pi / Self.response
+        let zeta = Self.dampingFraction
+        let damped = omega * (1 - zeta * zeta).squareRoot()
+        // Until the spring is within a thousandth of rest.
+        let duration = log(1000) / (zeta * omega)
+        var samples: [CGFloat] = []
+        var t = 0.0
+        while t < duration {
+            let spring = 1 - exp(-zeta * omega * t)
+                * (cos(damped * t) + zeta * omega / damped * sin(damped * t))
+            samples.append(start + (1 - start) * CGFloat(spring))
+            t += Self.frame
+        }
+        samples.append(1)
+        run(samples, duration: duration, on: layer, holds: false, reduceMotion: reduceMotion)
     }
 
-    func body(content: Content) -> some View {
-        let p = max(0, progress)
-        content
-            .scaleEffect(x: reduceMotion ? 1 : 0.92 + 0.08 * p,
-                         y: reduceMotion ? 1 : 0.55 + 0.45 * p, anchor: .top)
-            .offset(y: reduceMotion ? 0 : -30 * (1 - p))
-            .opacity(Double(min(1, p * 1.6)))
+    /// Fold back up into the icon, easing in, and stay folded until `reset`.
+    func fold(duration: Double, reduceMotion: Bool) {
+        guard let layer else { return }
+        isFolding = true
+        let start = currentProgress(of: layer)
+        let ease = CAMediaTimingFunction(name: .easeIn)
+        var c1: [Float] = [0, 0], c2: [Float] = [0, 0]
+        ease.getControlPoint(at: 1, values: &c1)
+        ease.getControlPoint(at: 2, values: &c2)
+        let count = max(2, Int(duration / Self.frame))
+        let samples = (0...count).map { i -> CGFloat in
+            let eased = Self.bezier(Double(i) / Double(count),
+                                    Double(c1[0]), Double(c1[1]), Double(c2[0]), Double(c2[1]))
+            return start * CGFloat(1 - eased)
+        }
+        run(samples, duration: duration, on: layer, holds: true, reduceMotion: reduceMotion)
+    }
+
+    /// Drop a held fold: the card is closed and SwiftUI no longer draws it.
+    func reset() {
+        isFolding = false
+        layer?.removeAnimation(forKey: Self.key)
+    }
+
+    /// Keep the card folded and clear until `unfold` replaces this.
+    func holdFolded() {
+        guard let layer else { return }
+        run([0, 0], duration: 1, on: layer, holds: true, reduceMotion: false)
+    }
+
+    private var layer: CALayer? { anchor?.window?.contentView?.layer }
+
+    private func currentProgress(of layer: CALayer) -> CGFloat {
+        guard layer.animation(forKey: Self.key) != nil,
+              let shown = layer.presentation() else { return 1 }
+        // Opacity is `min(1, 1.6 p)`, so it gives p below 0.625; the y scale,
+        // `0.55 + 0.45 p`, gives it above (and under Reduce Motion is 1).
+        let opacity = CGFloat(shown.opacity)
+        if opacity < 1 { return opacity / 1.6 }
+        return min(1, max(0.625, (shown.transform.m22 - 0.55) / 0.45))
+    }
+
+    private func run(_ samples: [CGFloat], duration: Double, on layer: CALayer,
+                     holds: Bool, reduceMotion: Bool) {
+        guard let anchor, let content = anchor.window?.contentView else { return }
+        // The card's top centre, which the scale holds still, and the layer's
+        // own centre, which the layer's transform is taken about.
+        let top = NSPoint(x: anchor.bounds.midX,
+                          y: anchor.isFlipped ? anchor.bounds.minY : anchor.bounds.maxY)
+        let pivot = content.convert(top, from: anchor)
+        let centre = CGPoint(x: layer.bounds.minX + layer.bounds.width * layer.anchorPoint.x,
+                             y: layer.bounds.minY + layer.bounds.height * layer.anchorPoint.y)
+        // The layer's transform has y up from the bottom edge, whichever way
+        // the view's own coordinates run.
+        let pivotY = content.isFlipped ? layer.bounds.height - pivot.y : pivot.y
+        let up: CGFloat = 1
+        let transforms = samples.map { raw -> CATransform3D in
+            let p = max(0, raw)
+            guard !reduceMotion else { return CATransform3DIdentity }
+            let dx = pivot.x - centre.x, dy = pivotY - centre.y
+            let affine = CGAffineTransform(translationX: -dx, y: -dy)
+                .concatenating(CGAffineTransform(scaleX: 0.92 + 0.08 * p, y: 0.55 + 0.45 * p))
+                .concatenating(CGAffineTransform(translationX: dx, y: dy + up * 30 * (1 - p)))
+            return CATransform3DMakeAffineTransform(affine)
+        }
+        let scale = CAKeyframeAnimation(keyPath: "transform")
+        scale.values = transforms.map { NSValue(caTransform3D: $0) }
+        let fade = CAKeyframeAnimation(keyPath: "opacity")
+        fade.values = samples.map { Float(min(1, max(0, $0) * 1.6)) }
+        let group = CAAnimationGroup()
+        group.animations = [scale, fade]
+        group.duration = duration
+        if holds {
+            group.fillMode = .forwards
+            group.isRemovedOnCompletion = false
+        }
+        layer.add(group, forKey: Self.key)
+    }
+
+    /// y of the cubic Bézier through (0,0), (x1,y1), (x2,y2), (1,1) at `x`.
+    private static func bezier(_ x: Double, _ x1: Double, _ y1: Double,
+                               _ x2: Double, _ y2: Double) -> Double {
+        func at(_ t: Double, _ a: Double, _ b: Double) -> Double {
+            3 * (1 - t) * (1 - t) * t * a + 3 * (1 - t) * t * t * b + t * t * t
+        }
+        var low = 0.0, high = 1.0
+        for _ in 0..<24 {
+            let mid = (low + high) / 2
+            if at(mid, x1, x2) < x { low = mid } else { high = mid }
+        }
+        return at((low + high) / 2, y1, y2)
+    }
+}
+
+/// Gives `CardFold` a view with the card's frame, to find the card's window
+/// and its top centre by.
+private struct CardFoldAnchor: NSViewRepresentable {
+    let fold: CardFold
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView(frame: .zero)
+        fold.anchor = view
+        return view
+    }
+
+    func updateNSView(_ view: NSView, context: Context) {
+        fold.anchor = view
     }
 }
 
@@ -830,6 +1058,9 @@ private struct ScrollSample: Equatable {
 private struct TrackScrollEnd: ViewModifier {
     let position: ChatScrollEnd
     var changed: (Bool) -> Void = { _ in }
+    /// The reader scrolled to within `topReach` of the top.
+    var reachedTop: () -> Void = {}
+    static let topReach: CGFloat = 240
 
     func body(content: Content) -> some View {
         if #available(macOS 15.0, *) {
@@ -837,7 +1068,13 @@ private struct TrackScrollEnd: ViewModifier {
                 ScrollSample(offset: geo.contentOffset.y,
                              end: geo.contentOffset.y + geo.containerSize.height
                                  >= geo.contentSize.height - 24)
-            } action: { _, new in
+            } action: { old, new in
+                // Once per crossing: the batch it mounts moves the offset
+                // back down past the line.
+                if position.userScrolling, new.offset < Self.topReach,
+                   old.offset >= Self.topReach {
+                    reachedTop()
+                }
                 // Only the reader's own scroll lets go of the end. Content
                 // growing or shrinking under the offset (an answer streaming,
                 // settling, a message laying out) is not the reader leaving.

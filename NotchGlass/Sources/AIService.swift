@@ -1968,6 +1968,9 @@ struct OpenAICompatAIService: AIService {
                 if status == 402, body.contains("insufficient_balance") {
                     return L("service.error.outOfCredit")
                 }
+                if status == 402, body.contains("license_required") {
+                    return L("service.error.licenseRequired")
+                }
                 // The status alone is not enough to act on. The body says what
                 // went wrong.
                 if let detail = Self.detail(from: body) {
@@ -2014,6 +2017,13 @@ struct OpenAICompatAIService: AIService {
 
         /// The Notchi gateway refused the request because the balance cannot
         /// cover it. Retrying fails the same way until credit is added.
+        /// The Notchi gateway refused a free model because this account holds
+        /// no license (`NotchiLicense`).
+        var isLicenseRequired: Bool {
+            if case .http(_, 402, let body, _) = self { return body.contains("license_required") }
+            return false
+        }
+
         var isOutOfCredit: Bool {
             if case .http(_, 402, let body, _) = self { return body.contains("insufficient_balance") }
             return false

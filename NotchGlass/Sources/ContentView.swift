@@ -255,8 +255,8 @@ struct ContentView: View {
             if event.keyCode == 124, ImageLightboxCenter.shared.step(1, in: event.window) { return true }
             // Esc: if the recent list is open, fold just that back to the input
             // first (one step "out"); only a second Esc closes the whole panel.
-            // Works mid-request too — closing detaches the in-flight answer, which
-            // finishes in the background and lands in Recent (see NotchModel).
+            // Mid-request it closes too — the in-flight answer finishes in the
+            // background and lands in Recent (see NotchModel).
             if event.keyCode == 53 {
                 // An opened image is the topmost thing on the glass → first Esc
                 // just puts it back down, before any panel-level step-out.
@@ -328,28 +328,8 @@ struct ContentView: View {
                     }
                     return true
                 }
-                // Agent detail page with a live run → first Esc STOPS that run,
-                // keeping the whole trail on screen; a second Esc (now settled)
-                // closes the panel. The page carries no cancel control of its own
-                // — the tray row's two-step ✕ is behind the back chevron — so this
-                // is the only stop verb while you're watching the run, and it
-                // reads the way a terminal's Esc does. Not destructive in the
-                // one-way sense: the session id survives, so a follow-up resumes
-                // right where the run stopped.
-                if let id = model.agentDetailTaskID,
-                   AgentTaskManager.shared.cancel(taskID: id) {
-                    return true
-                }
-                // Streaming → first Esc STOPS generation (XII-122), keeping the
-                // partial answer on screen; a second Esc (now settled) closes the
-                // panel as before. Stepping out one level at a time, same as the
-                // history/settings unwinds above.
-                if model.isStreaming {
-                    withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
-                        model.stopStreaming()
-                    }
-                    return true
-                }
+                // Esc never stops a run or a streaming answer: it closes. The
+                // in-flight round finishes detached and lands in Recent.
                 model.beginClose(sequenced: !reduceMotion)
                 return true
             }
@@ -581,27 +561,37 @@ final class RestingResult: ObservableObject {
         let id = UUID()
         let text: String
         let failed: Bool
+        var kind: Kind = .task
     }
+
+    /// `.license`: a license landed (`LicensePrompt`). The ear carries a line
+    /// next to Notchi's nod instead of the nod alone. `.message`: Notchi wrote
+    /// to the user on its own (`ProactiveEngine`); the ear carries the item's
+    /// title next to the eyes, and stays longer.
+    enum Kind: Equatable { case task, license, message }
 
     @Published private(set) var item: Item?
     weak var model: NotchModel?
 
     /// How long the result stays on the notch.
     private static let hold: TimeInterval = 3
+    /// A message is read, not glanced at.
+    private static let messageHold: TimeInterval = 6
     private var clearWork: DispatchWorkItem?
 
     @discardableResult
-    func show(_ text: String, failed: Bool) -> Bool {
+    func show(_ text: String, failed: Bool, kind: Kind = .task) -> Bool {
         guard let model, !model.open, model.liveActivityEnabled, !Self.screenLocked
         else { return false }
         let line = text.split(whereSeparator: \.isNewline).first.map(String.init)?
             .trimmingCharacters(in: .whitespaces) ?? ""
         guard !line.isEmpty else { return false }
-        item = Item(text: line, failed: failed)
+        item = Item(text: line, failed: failed, kind: kind)
         clearWork?.cancel()
         let work = DispatchWorkItem { [weak self] in self?.item = nil }
         clearWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.hold, execute: work)
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + (kind == .message ? Self.messageHold : Self.hold), execute: work)
         return true
     }
 
@@ -624,6 +614,8 @@ private struct BackgroundWorkEars: View {
     enum Stage: Equatable {
         case running(mood: NotchiMark.Mood)
         case finished(failed: Bool)
+        case licensed
+        case message(String)
     }
     let stage: Stage
     /// The drawn hardware-notch width the ears flank (content-free gap).
@@ -634,8 +626,8 @@ private struct BackgroundWorkEars: View {
     let earRight: CGFloat
 
     private var isFinished: Bool {
-        if case .finished = stage { return true }
-        return false
+        if case .running = stage { return false }
+        return true
     }
 
     var body: some View {
@@ -650,9 +642,15 @@ private struct BackgroundWorkEars: View {
                     case .finished(let failed):
                         NotchiFace(expression: failed ? .alert : .saved)
                             .transition(.opacity)
+                    case .licensed:
+                        RestingLicenseEar()
+                            .transition(.opacity)
+                    case .message(let text):
+                        RestingMessageEar(text: text)
+                            .transition(.opacity)
                     }
                 }
-                .frame(width: NotchiFace.slotWidth)
+                .frame(minWidth: NotchiFace.slotWidth, alignment: .leading)
                 .animation(.smooth(duration: 0.3), value: isFinished)
             }
             .frame(width: earLeft, alignment: .leading)
@@ -674,6 +672,8 @@ struct NotchIsland: View {
     @ObservedObject private var agentManager = AgentTaskManager.shared
     /// The update card the resting notch unfolds into (`UpdatePrompt`).
     @ObservedObject private var updatePrompt = UpdatePrompt.shared
+    /// The license card the resting notch unfolds into (`LicensePrompt`).
+    @ObservedObject private var licensePrompt = LicensePrompt.shared
     /// A finished task the resting notch shows for a few seconds.
     @ObservedObject private var restingResult = RestingResult.shared
     @Environment(\.notchMetrics) private var metrics
@@ -725,7 +725,15 @@ struct NotchIsland: View {
         return showing
     }
 
-    private var showsPrompt: Bool { promptShowing != nil }
+    /// The license offer, when it is up on THIS screen's resting notch.
+    private var licenseShowing: CGDirectDisplayID? {
+        guard !isOpen, promptShowing == nil, let display = licensePrompt.offerDisplay,
+              display == metrics.displayID else { return nil }
+        return display
+    }
+
+    /// Either card. Both are drawn at the same width on the same glass.
+    private var showsPrompt: Bool { promptShowing != nil || licenseShowing != nil }
 
     /// True when the panel is fully closed (on every display) and background
     /// work is running or has just finished — a detached Ask round, or an
@@ -751,7 +759,11 @@ struct NotchIsland: View {
     /// reports itself.
     private var workStage: BackgroundWorkEars.Stage {
         if let item = restingResult.item {
-            return .finished(failed: item.failed)
+            switch item.kind {
+            case .license: return .licensed
+            case .message: return .message(item.text)
+            case .task: return .finished(failed: item.failed)
+            }
         }
         return .running(mood: busyMood)
     }
@@ -807,6 +819,12 @@ struct NotchIsland: View {
 
     private var earLeftContent: CGFloat {
         if busy {
+            if restingResult.item?.kind == .license {
+                return faceEar(RestingLicenseEar.textWidth)
+            }
+            if let item = restingResult.item, item.kind == .message {
+                return faceEar(RestingMessageEar.textWidth(item.text))
+            }
             // The ear is just the mark.
             return NotchiFace.slotWidth + 6
         }
@@ -1116,6 +1134,12 @@ struct NotchIsland: View {
             // the panel: no focus is taken and the app stays in the background.
             if let showing = promptShowing {
                 UpdatePromptCard(showing: showing)
+                    .padding(.horizontal, topFlare)
+                    .transition(.asymmetric(
+                        insertion: .opacity,
+                        removal: .opacity.combined(with: .scale(scale: 0.92, anchor: .top))))
+            } else if let display = licenseShowing {
+                LicensePromptCard(display: display, model: model)
                     .padding(.horizontal, topFlare)
                     .transition(.asymmetric(
                         insertion: .opacity,

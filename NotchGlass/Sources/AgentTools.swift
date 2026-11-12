@@ -779,7 +779,7 @@ Supported setting ids and values:
 - display_placement: all or built_in
 - hover_sensitivity: low, balanced, or instant
 - note_destination: apple_notes or markdown_folder; notes_folder: absolute path
-- summon_shortcut: disabled, default, double_option, double_command, double_control, double_shift, or a chord such as command+shift+k
+- summon_shortcut: disabled, default, double_option, double_command, double_control, double_shift, double_left_command, double_right_command, or a chord such as command+shift+k
 - action_shortcut: a chord such as command+shift+c, or default to restore the shipped one. scope is required: regenerate, pin, new_chat, filter, picker, or detach
 - prompt_shortcut: value is the key chord itself (e.g. option+a), or remove to delete, or keep to edit only its text — never a name. prompt is the instruction it runs on the selected text, required when creating one. scope picks an existing binding by chord or prompt text; omit scope to create. Example, "Option+A 做语句优化": {"setting":"prompt_shortcut","value":"option+a","prompt":"Polish the selected text: clearer and shorter, same meaning, same language. Output only the result."}
 - custom_instructions: text (empty clears it); proxy: URL/host, or auto to clear

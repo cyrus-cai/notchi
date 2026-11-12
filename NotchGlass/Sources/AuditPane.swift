@@ -252,7 +252,7 @@ private struct AuditFlow: View {
             // A faint track, so an empty lane still reads as a lane.
             let track = CGRect(x: -start, y: 0, width: max(size.width + start, contentWidth),
                                height: size.height)
-            context.fill(Path(roundedRect: track, cornerRadius: 3), with: .color(.white.opacity(0.05)))
+            context.fill(Path(roundedRect: track, cornerRadius: 3), with: .color(Tokens.ink.opacity(0.05)))
             // With one bar selected the rest step back, so the card below and
             // the bar it describes are unmistakably the same request.
             for segment in segments where segment.x + segment.width >= start

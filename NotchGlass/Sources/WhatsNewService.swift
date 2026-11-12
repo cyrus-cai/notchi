@@ -107,6 +107,25 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.9.31",
+            date: "2026-11-12",
+            features: [
+                "Notchi can message you first about due reminders, upcoming events and things you said you'd do. Set it in Settings → Chat.",
+                "The shortcut can be a double-tap of Left or Right Command.",
+                "In Telegram, /model switches the model.",
+            ],
+            improvements: [
+                "Settings and History open in redesigned windows.",
+                "Answers on the quick card show as plain text without a bubble.",
+                "Long chats under the menu bar open faster and load older messages as you scroll.",
+                "Esc closes the notch during an answer. The answer finishes and appears in Recent.",
+            ],
+            fixes: [
+                "Fixed ⌘C not copying text selected in an answer.",
+                "Fixed messages in a long chat scrolling out of view after sending.",
+            ]
+        ),
+        Entry(
             version: "0.9.30",
             date: "2026-11-10",
             features: [

@@ -1069,8 +1069,8 @@ struct SendButton: View {
         .transition(.scale(scale: 0.7).combined(with: .opacity))
         .padding(.horizontal, 13)
         .frame(height: size)
-        .glassCapsule(in: Capsule(), brighter: hovering)
-        .contentShape(Capsule())
+        .glassCapsule(in: Capsule(style: .continuous), brighter: hovering)
+        .contentShape(Capsule(style: .continuous))
     }
 
     /// The bare form: just the send arrow in a glass circle (mid-thread follow-up).
@@ -1467,10 +1467,10 @@ private struct ComposerBoxChrome<S: InsettableShape>: ViewModifier {
             content
                 // Just enough floor to separate the field from the page — a
                 // wash, not the glass chip's lit fill.
-                .background(shape.fill(Color.white.opacity(focused ? 0.12 : 0.08)))
+                .background(shape.fill(Tokens.ink.opacity(focused ? 0.12 : 0.08)))
                 .contentShape(shape)
                 .overlay(
-                    shape.strokeBorder(Color.white.opacity(focused ? 0.30 : 0.20),
+                    shape.strokeBorder(Tokens.ink.opacity(focused ? 0.30 : 0.20),
                                        lineWidth: 0.5)
                         .allowsHitTesting(false)
                 )
@@ -1518,7 +1518,7 @@ struct ComposeImagesAttachedLine: View {
                         .clipShape(RoundedRectangle.inset)
                         .overlay(
                             RoundedRectangle.inset
-                                .strokeBorder(Color.white.opacity(0.14), lineWidth: 1)
+                                .strokeBorder(Tokens.ink.opacity(0.14), lineWidth: 1)
                         )
                 }
                 .buttonStyle(.plain).exemptsDoubleClickPin()
@@ -1553,11 +1553,11 @@ struct ComposeImagesAttachedLine: View {
                         .frame(width: 26, height: 24)
                         .background(
                             RoundedRectangle.inset
-                                .fill(Color.white.opacity(0.06))
+                                .fill(Tokens.ink.opacity(0.06))
                         )
                         .overlay(
                             RoundedRectangle.inset
-                                .strokeBorder(Color.white.opacity(0.14), lineWidth: 1)
+                                .strokeBorder(Tokens.ink.opacity(0.14), lineWidth: 1)
                         )
                 }
                 .buttonStyle(.plain).exemptsDoubleClickPin()
@@ -1799,7 +1799,7 @@ struct GlassSegmentCluster: View {
                 // hover is what makes it a control: the whole capsule comes back
                 // — glass, rim and all — under the pointer (see `rim:`).
                 Color.clear
-                    .glassCapsule(in: Capsule(), brighter: lit, smoked: smoked,
+                    .glassCapsule(in: Capsule(style: .continuous), brighter: lit, smoked: smoked,
                                   rim: lit ? 1 : 0)
                     .opacity(smoked ? 1 : (lit ? 1 : 0.15))
             }
@@ -1830,7 +1830,7 @@ struct GlassSegmentCluster: View {
                 .frame(width: chip, height: chip)
                 .background {
                     if glass {
-                        Circle().fill(.white.opacity(
+                        Circle().fill(Tokens.ink.opacity(
                             segmentHighlight
                                 ? (seg.engaged ? 0.20 : (hovering ? 0.12 : 0))
                                 : 0))
@@ -1884,8 +1884,8 @@ struct GlassTextButton: View {
                                  : (hovering ? Tokens.text1 : Tokens.text2))
                 .padding(.horizontal, 12)
                 .padding(.vertical, 6)
-                .glassCapsule(in: Capsule(), brighter: hovering, tint: tint)
-                .contentShape(Capsule())
+                .glassCapsule(in: Capsule(style: .continuous), brighter: hovering, tint: tint)
+                .contentShape(Capsule(style: .continuous))
         }
         .buttonStyle(GlassPressStyle())
         .onHover { hovering = $0 }
@@ -1915,19 +1915,17 @@ struct PanelBackPill: View {
         Button(action: action) {
             HStack(spacing: 5) {
                 Image(systemName: "chevron.left")
-                    .sfFont(Tokens.TypeSize.meta, weight: .semibold)
+                    .sfFont(Tokens.TypeSize.label, weight: .regular)
                 Text(title)
-                    .sfFont(Tokens.TypeSize.meta, weight: .medium)
-                    .tracking(0.4)
-                    .textCase(.uppercase)
+                    .sfFont(Tokens.TypeSize.label, weight: .regular)
                     .lineLimit(1)
             }
             .foregroundStyle(hovering ? Tokens.text1 : Tokens.text3)
             .padding(.leading, 8)
             .padding(.trailing, 11)
             .frame(height: 26)
-            .glassCapsule(in: Capsule(), brighter: hovering)
-            .contentShape(Capsule())
+            .glassCapsule(in: Capsule(style: .continuous), brighter: hovering)
+            .contentShape(Capsule(style: .continuous))
         }
         .buttonStyle(GlassPressStyle())
         .onHover { hovering = $0 }
@@ -1988,8 +1986,8 @@ struct TabChip: View {
             .lineLimit(1)
             .padding(.horizontal, 11)
             .frame(height: Self.height)
-            .background(tile.fill(Color.white.opacity(active ? 0.17 : (hovering ? 0.11 : 0.06))))
-            .overlay(tile.strokeBorder(Color.white.opacity(active ? 0.22 : (hovering ? 0.16 : 0.11)),
+            .background(tile.fill(Tokens.ink.opacity(active ? 0.17 : (hovering ? 0.11 : 0.06))))
+            .overlay(tile.strokeBorder(Tokens.ink.opacity(active ? 0.22 : (hovering ? 0.16 : 0.11)),
                                        lineWidth: 0.5))
             .contentShape(tile)
         }
@@ -2188,8 +2186,8 @@ struct CaptureJumpButton: View {
             .foregroundStyle(hovering ? Tokens.text2 : Tokens.text3)
             .padding(.vertical, 3)
             .padding(.horizontal, 8)
-            .glassCapsule(in: Capsule(), brighter: hovering, tint: tint)
-            .contentShape(Capsule())
+            .glassCapsule(in: Capsule(style: .continuous), brighter: hovering, tint: tint)
+            .contentShape(Capsule(style: .continuous))
         }
         .buttonStyle(GlassPressStyle())
         .onHover { hovering = $0 }
@@ -2397,6 +2395,8 @@ struct ConfirmationDialogOverlay<Content: View>: View {
                 .exemptsDoubleClickPin()
 
             content
+                // Dark glass in either system appearance (see `Tokens.adaptive`).
+                .environment(\.colorScheme, .dark)
                 .background {
                     ConfirmationDialogGlass(cornerRadius: cornerRadius,
                                             edgeGlow: edgeGlow)
@@ -2758,7 +2758,7 @@ struct ConfirmDialogButton: View {
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 10)
                 .glassButtonSkin(kind: kind, hovering: hovering)
-                .contentShape(Capsule())
+                .contentShape(Capsule(style: .continuous))
         }
         .buttonStyle(ConfirmDialogPressStyle())
         .onHover { hovering = $0 }
@@ -2773,11 +2773,11 @@ private extension View {
     func glassButtonSkin(kind: ConfirmDialogButton.Kind, hovering: Bool) -> some View {
         switch kind {
         case .quiet:
-            self.background(Capsule().fill(Color.white.opacity(hovering ? 0.08 : 0)))
+            self.background(Capsule(style: .continuous).fill(Tokens.ink.opacity(hovering ? 0.08 : 0)))
         case .neutral:
-            self.glassCapsule(in: Capsule(), brighter: hovering)
+            self.glassCapsule(in: Capsule(style: .continuous), brighter: hovering)
         case .destructive:
-            self.glassCapsule(in: Capsule(), brighter: hovering, tint: Tokens.danger)
+            self.glassCapsule(in: Capsule(style: .continuous), brighter: hovering, tint: Tokens.danger)
         }
     }
 }
@@ -3280,6 +3280,11 @@ struct AssistantTurnView: View {
     /// The turn this is, so the bubbles after the first land at a person's
     /// pace (`BubblePacer`). `nil` shows them all at once.
     var turnID: UUID? = nil
+    /// The compact pointer-side card: the answer is plain text on the card's own
+    /// surface, with no bubble fill, border or padding of its own, running the
+    /// card's full column — the same treatment its question already gets
+    /// (`UserQuestionBubble.flat`).
+    var flat: Bool = false
     @ObservedObject private var pacer = BubblePacer.shared
 
     /// One opacity beat, shared by the wait-overlay fade so the handoff reads as
@@ -3370,6 +3375,9 @@ struct AssistantTurnView: View {
     /// much, it is concentric with the pill's rounded end: the same gap on the
     /// left as on the top and bottom.
     private var waitOrbPull: CGFloat {
+        // A flat card has no padding to pull the orb back through: the row
+        // already starts on the card's own text edge.
+        guard !flat else { return 0 }
         if toolWaitOnly || readingWaitOnly || dotsWaitOnly { return ChatBubbleChrome.horizontalPad }
         return max(0, ChatBubbleChrome.horizontalPad - waitOrbInset)
     }
@@ -3700,6 +3708,8 @@ struct AssistantTurnView: View {
     /// headline stays put when the list opens.
     private func topInset(working: Bool) -> CGFloat {
         guard agentTrail.isEmpty else { return 0 }
+        // A flat card has no top padding for the orb to clear.
+        if flat { return 0 }
         if working { return waitOrbInset - ChatBubbleChrome.verticalPad }
         return 0
     }
@@ -3769,7 +3779,8 @@ struct AssistantTurnView: View {
                 AnswerCard(visible: cardHasContent,
                            idealAtLeast: FractionWidthLayout.minimumLineWidth(layout.lead, fontSize: cardFont),
                            chrome: !toolWaitOnly && !readingWaitOnly && !dotsWaitOnly,
-                           bare: leadIsTableOnly) {
+                           bare: leadIsTableOnly,
+                           flat: flat) {
                     cardContent
                 }
                     .contextMenu { answerTurnMenu }
@@ -3786,7 +3797,8 @@ struct AssistantTurnView: View {
                         .transition(Self.landing)
                 case .text(let body):
                     AnswerCard(idealAtLeast: FractionWidthLayout.minimumLineWidth(body, fontSize: cardFont),
-                               bare: MarkdownParser.isTableOnly(body)) {
+                               bare: MarkdownParser.isTableOnly(body),
+                               flat: flat) {
                         MarkdownBlocks(source: body, baseFont: cardFont, color: color,
                                        onInAppCopy: onInAppCopy)
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -3823,7 +3835,7 @@ struct AssistantTurnView: View {
             if !streaming, hasText, !typing, let onContinue {
                 AnswerLineButton(title: L("result.continue"),
                                  font: waitFont, action: onContinue)
-                    .padding(.leading, ChatBubbleChrome.horizontalPad)
+                    .padding(.leading, flat ? 0 : ChatBubbleChrome.horizontalPad)
                     .transition(.opacity)
             }
         }
@@ -3852,19 +3864,22 @@ struct AssistantTurnView: View {
     /// The typing indicator between two bubbles: the waiting mark, or the
     /// running tool's line when the model went back to search. Never boxed.
     private var typingBubble: some View {
-        AnswerCard(chrome: false) {
+        // A chrome-less card keeps its padding, so the mark is pulled back
+        // through it onto the column edge; a flat card has no padding to pull.
+        let pull = flat ? 0 : ChatBubbleChrome.horizontalPad
+        return AnswerCard(chrome: false, flat: flat) {
             if let waitLine {
                 // No chrome around a wait line: the mark sits on the column edge.
                 // One text line tall, like the dots: the orb is taller than the
                 // line and would otherwise make this bubble taller than theirs.
                 waitRow(waitLine)
-                    .padding(.leading, -ChatBubbleChrome.horizontalPad)
+                    .padding(.leading, -pull)
                     .frame(height: Self.lineHeight(cardFont), alignment: .leading)
             } else {
                 // No chrome either: the mark on the column edge, unboxed.
                 ThinkingDots(minHeight: Self.lineHeight(cardFont))
                     .fixedSize()
-                    .padding(.leading, -ChatBubbleChrome.horizontalPad)
+                    .padding(.leading, -pull)
             }
         }
         .allowsHitTesting(false)
@@ -4015,7 +4030,7 @@ struct AssistantTurnView: View {
                         // opacity 0 — every frame, scrolling or not.
                         if !streaming {
                         } else if waitLine == nil {
-                            let pull = dotsWaitOnly ? ChatBubbleChrome.horizontalPad : 0
+                            let pull = dotsWaitOnly && !flat ? ChatBubbleChrome.horizontalPad : 0
                             ThinkingDots(minHeight: Self.lineHeight(cardFont))
                                 .fixedSize()
                                 .onGeometryChange(for: CGFloat.self) { $0.size.width } action: {
@@ -4223,7 +4238,17 @@ enum ChatBubbleChrome {
 
     static func radius(forHeight height: CGFloat) -> CGFloat {
         guard height > 0 else { return pillRadius }
-        return height <= pillHeight ? height / 2 : cardRadius
+        return height <= pillHeight ? height / 2
+            : wrappedRadius(cardRadius, pill: pillRadius, height: height)
+    }
+
+    /// A continuous corner needs about 1.53 × its radius of straight edge to
+    /// ease into, and two corners share the bubble's height. A radius near half
+    /// the height leaves no room for that, and the corner is drawn as an arc.
+    /// So a wrapped bubble's radius starts at the pill's and grows with the
+    /// height up to `full`.
+    static func wrappedRadius(_ full: CGFloat, pill: CGFloat, height: CGFloat) -> CGFloat {
+        min(full, max(pill, height / 3.06))
     }
 
     /// A glass bubble (`chatBubbleGlass`) is roomier, and rounder once it wraps.
@@ -4232,10 +4257,13 @@ enum ChatBubbleChrome {
     static let glassCardRadius: CGFloat = 26
 
     static func glassRadius(forHeight height: CGFloat) -> CGFloat {
-        guard height > 0 else { return pillRadius + glassVerticalPad - verticalPad }
+        guard height > 0 else { return glassPillRadius }
         return height <= pillHeight + (glassVerticalPad - verticalPad) * 2
-            ? height / 2 : glassCardRadius
+            ? height / 2
+            : wrappedRadius(glassCardRadius, pill: glassPillRadius, height: height)
     }
+
+    static var glassPillRadius: CGFloat { pillRadius + glassVerticalPad - verticalPad }
 }
 
 /// The card an answer sits in: the question bubble's recipe (`UserQuestionBubble`
@@ -4259,6 +4287,11 @@ struct AnswerCard<Content: View>: View {
     /// True for content that carries its own box, such as a table: no fill,
     /// border or padding, so the box is not drawn inside a second one.
     var bare: Bool = false
+    /// The compact pointer-side card: no bubble at all. No fill, border or
+    /// padding, and the text runs the card's full column instead of hugging a
+    /// three-quarter one — an unboxed answer left at a bubble's width would wrap
+    /// for a box that is no longer there.
+    var flat: Bool = false
     @ViewBuilder let content: Content
     @State private var cardHeight: CGFloat = 0
     @Environment(\.cardWidthFraction) private var widthFraction
@@ -4284,9 +4317,9 @@ struct AnswerCard<Content: View>: View {
     /// so that card gets the padding back.
     private var glassBody: some View {
         let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)
-        let pad = visible && !bare
-        return FractionWidthLayout(fraction: visible ? widthFraction : 1,
-                                   hugs: visible && hugs, idealAtLeast: idealAtLeast) {
+        let pad = visible && !bare && !flat
+        return FractionWidthLayout(fraction: visible && !flat ? widthFraction : 1,
+                                   hugs: visible && hugs && !flat, idealAtLeast: idealAtLeast) {
             content
                 .padding(.leading, pad && !chrome ? ChatBubbleChrome.horizontalPad : 0)
                 .padding(.horizontal, pad ? ChatBubbleChrome.glassHorizontalPad : 0)
@@ -4301,18 +4334,19 @@ struct AnswerCard<Content: View>: View {
 
     private var panelBody: some View {
         let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)
-        return FractionWidthLayout(fraction: visible ? widthFraction : 1,
-                            hugs: visible && hugs, idealAtLeast: idealAtLeast) {
+        let pad = visible && !bare && !flat
+        return FractionWidthLayout(fraction: visible && !flat ? widthFraction : 1,
+                            hugs: visible && hugs && !flat, idealAtLeast: idealAtLeast) {
             content
-                .padding(.horizontal, visible && !bare ? ChatBubbleChrome.horizontalPad : 0)
-                .padding(.vertical, visible && !bare ? ChatBubbleChrome.verticalPad : 0)
+                .padding(.horizontal, pad ? ChatBubbleChrome.horizontalPad : 0)
+                .padding(.vertical, pad ? ChatBubbleChrome.verticalPad : 0)
                 .background(
                     shape
-                        .fill(Color.white.opacity(visible ? 0.06 : 0))
+                        .fill(Tokens.ink.opacity(pad ? 0.06 : 0))
                         .overlay(
-                            shape.strokeBorder(visible ? Tokens.hairline : .clear, lineWidth: 1)
+                            shape.strokeBorder(pad ? Tokens.hairline : .clear, lineWidth: 1)
                         )
-                        .opacity(chrome && !bare ? 1 : 0)
+                        .opacity(chrome && pad ? 1 : 0)
                         .animation(.easeOut(duration: 0.2), value: chrome)
                 )
                 .contentShape(shape)
@@ -4444,6 +4478,9 @@ struct UserQuestionCard: View {
     var font: CGFloat = Tokens.TypeSize.stepDown(Tokens.TypeSize.reading)
     /// Called with the option's text when the user picks it.
     var choose: (String) -> Void
+    /// On the desktop (`MenuBarChat`) there is no panel glass under the card,
+    /// so it wears the bubbles' smoked glass instead of the airy panel recipe.
+    @Environment(\.chatBubbleGlass) private var onDesktop
 
     /// `manage_app_settings` hands its confirmation over as one string: the
     /// question on the first line, then one `Label → value` summary per changed
@@ -4498,7 +4535,13 @@ struct UserQuestionCard: View {
         // questions keep the full-column layout so their option labels can wrap.
         .frame(maxWidth: question.inlineOptions ? 340 : .infinity,
                alignment: .leading)
-        .background { glass }
+        .background {
+            if onDesktop {
+                Color.clear.smokedGlass(radius: Tokens.Radius.menu)
+            } else {
+                glass
+            }
+        }
     }
 
     /// One pending change, already written as a whole sentence upstream ("Dock
@@ -4563,7 +4606,7 @@ private struct UserQuestionOptionRow: View {
                 .padding(.vertical, 7)
                 .background(
                     RoundedRectangle.control
-                        .fill(Color.white.opacity(hovering ? 0.13 : 0.07))
+                        .fill(Tokens.ink.opacity(hovering ? 0.13 : 0.07))
                 )
                 .contentShape(RoundedRectangle.control)
         }
@@ -6648,7 +6691,7 @@ private struct MarkdownTableView: View {
         }
         .background(
             RoundedRectangle.control
-                .fill(Color.white.opacity(0.04))
+                .fill(Tokens.ink.opacity(0.04))
         )
         .overlay(
             RoundedRectangle.control
@@ -6986,9 +7029,9 @@ private func openAnswerMediaURL(_ urlString: String) {
 private struct MediaLoadingPlaceholder: View {
     var body: some View {
         RoundedRectangle.control
-            .fill(Color.white.opacity(0.04))
+            .fill(Tokens.ink.opacity(0.04))
             .frame(height: 120)
-            .overlay(ProgressView().controlSize(.small).tint(.white.opacity(0.4)))
+            .overlay(ProgressView().controlSize(.small).tint(Tokens.ink.opacity(0.4)))
             .overlay(
                 RoundedRectangle.control
                     .strokeBorder(Tokens.hairline, lineWidth: 0.5)
@@ -7028,9 +7071,9 @@ struct MediaLinkChip: View {
             .foregroundStyle(color.opacity(0.75))
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
-            .background(Capsule().fill(Color.white.opacity(0.05)))
-            .overlay(Capsule().strokeBorder(Tokens.hairline, lineWidth: 0.5))
-            .contentShape(Capsule())
+            .background(Capsule(style: .continuous).fill(Tokens.ink.opacity(0.05)))
+            .overlay(Capsule(style: .continuous).strokeBorder(Tokens.hairline, lineWidth: 0.5))
+            .contentShape(Capsule(style: .continuous))
         }
         .buttonStyle(.plain).exemptsDoubleClickPin()
     }
@@ -7117,7 +7160,7 @@ private struct AnswerImageView: View {
                 if let knownSize {
                     let ratio = knownSize.width / max(knownSize.height, 1)
                     RoundedRectangle.control
-                        .fill(Color.white.opacity(0.04))
+                        .fill(Tokens.ink.opacity(0.04))
                         .aspectRatio(ratio, contentMode: .fit)
                         .frame(maxWidth: min(knownSize.width, Self.heightCap * ratio))
                 } else {
@@ -7180,7 +7223,7 @@ private struct AnswerPDFView: View {
                     }
                     .background(
                         RoundedRectangle.control
-                            .fill(Color.white.opacity(0.04))
+                            .fill(Tokens.ink.opacity(0.04))
                     )
                     .clipShape(RoundedRectangle.control)
                     .overlay(
@@ -7243,6 +7286,10 @@ struct CodeBlockView: View {
     @State private var copied = false
     /// The copy button's sticky drop (`stickyOffset(in:)`).
     @State private var stickyY: CGFloat = 0
+    /// The block's drawn height. A block no taller than the button's corner box
+    /// is one line: the button centers on that line instead of riding the top.
+    @State private var blockHeight: CGFloat = 0
+    private var singleLine: Bool { blockHeight > 0 && blockHeight <= Self.side + Self.inset * 2 + 4 }
     /// A block longer than `foldOver` lines shows its first `foldTo` until the
     /// toggle under it is pressed. Copy always takes the whole block.
     @State private var unfolded = false
@@ -7290,6 +7337,8 @@ struct CodeBlockView: View {
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .fixedSize(horizontal: false, vertical: true)
+                    // Keeps the line clear of the copy button.
+                    .padding(.trailing, Self.side)
             }
             // The question bubble's Show more toggle, in its quiet text4.
             if folds {
@@ -7308,17 +7357,23 @@ struct CodeBlockView: View {
             .padding(.vertical, 8)
             .background(
                 RoundedRectangle.inset
-                    .fill(Color.white.opacity(0.06))
+                    .fill(Tokens.ink.opacity(0.06))
             )
             .overlay(
                 RoundedRectangle.inset
                     .strokeBorder(Tokens.hairline, lineWidth: 0.5)
             )
-            .overlay(alignment: .topTrailing) {
-                copyButton
-                    .padding(Self.inset)
-                    .offset(y: stickyY)
+            .overlay(alignment: singleLine ? .trailing : .topTrailing) {
+                if singleLine {
+                    copyButton
+                        .padding(.trailing, Self.inset)
+                } else {
+                    copyButton
+                        .padding(Self.inset)
+                        .offset(y: stickyY)
+                }
             }
+            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { blockHeight = $0 }
             // Read on every scroll frame, but the button only redraws when the
             // clamped offset changes — a block fully in view or off screen keeps
             // the same value, so a long thread's other blocks stay put while one
@@ -7347,15 +7402,10 @@ struct CodeBlockView: View {
                 // instead of hard-cutting.
                 .contentTransition(.symbolEffect(.replace))
                 .frame(width: Self.side, height: Self.side)
-                // Sticky, this chip spends most of its life parked over dense code
-                // rather than over the island's quiet first line — so it wears the
-                // same Liquid Glass circle as every other icon chip that floats ON
-                // the glass (`GlassIconButton`), not a flat wash that lets the code
-                // read straight through it.
-                .glassCapsule(in: Circle(), brighter: hovering)
-                .contentShape(Circle())
+                // A bare glyph, no glass circle behind it.
+                .contentShape(Rectangle())
         }
-        .buttonStyle(GlassPressStyle())
+        .buttonStyle(.plain)
         // Quiet at rest, full on hover and while showing the check.
         .opacity(copied ? 1.0 : hovering ? 1.0 : 0.6)
         .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
@@ -7647,7 +7697,7 @@ struct SavedImageThumb: View {
                 .clipShape(RoundedRectangle(cornerRadius: corner, style: .continuous))
                 .overlay(
                     RoundedRectangle(cornerRadius: corner, style: .continuous)
-                        .strokeBorder(Color.white.opacity(0.14), lineWidth: 1)
+                        .strokeBorder(Tokens.ink.opacity(0.14), lineWidth: 1)
                 )
         }
     }
@@ -7713,7 +7763,7 @@ struct SavedTurnImages: View {
                                     .foregroundStyle(Tokens.text1)
                                     .padding(.horizontal, 8)
                                     .frame(height: 22)
-                                    .background(Capsule().fill(Color.black.opacity(0.66)))
+                                    .background(Capsule(style: .continuous).fill(Color.black.opacity(0.66)))
                                     .padding(6)
                                     .allowsHitTesting(false)
                             }
@@ -8068,7 +8118,7 @@ struct ThinkingFoldRow: View {
                     .padding(.leading, 9)
                     .overlay(alignment: .leading) {
                         RoundedRectangle(cornerRadius: 0.75)
-                            .fill(.white.opacity(0.08))
+                            .fill(Tokens.ink.opacity(0.08))
                             .frame(width: 1.5)
                     }
                     .transition(.opacity)
@@ -8146,10 +8196,10 @@ private struct AgentTrailPlanRow: View {
         .padding(.horizontal, 10)
         .background(
             RoundedRectangle.inset
-                .fill(.white.opacity(0.03))
+                .fill(Tokens.ink.opacity(0.03))
                 .overlay(
                     RoundedRectangle.inset
-                        .strokeBorder(.white.opacity(0.06), lineWidth: 0.5)
+                        .strokeBorder(Tokens.ink.opacity(0.06), lineWidth: 0.5)
                 )
         )
     }
@@ -8267,7 +8317,7 @@ private struct AgentTrailGroupRow: View {
                 .padding(.leading, 9)
                 .overlay(alignment: .leading) {
                     RoundedRectangle(cornerRadius: 0.75)
-                        .fill(.white.opacity(0.08))
+                        .fill(Tokens.ink.opacity(0.08))
                         .frame(width: 1.5)
                 }
             }
@@ -8353,10 +8403,10 @@ private struct AgentTrailToolRow: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(
                     RoundedRectangle.inset
-                        .fill(.white.opacity(0.03))
+                        .fill(Tokens.ink.opacity(0.03))
                         .overlay(
                             RoundedRectangle.inset
-                                .strokeBorder(.white.opacity(0.06), lineWidth: 0.5)
+                                .strokeBorder(Tokens.ink.opacity(0.06), lineWidth: 0.5)
                         )
                 )
             }
@@ -8612,7 +8662,7 @@ struct PromptShortcutCardSurface<S: InsettableShape>: View {
     private var staticGlassPane: some View {
         ZStack {
             // Thin enough that the panel's own blur still carries through it.
-            shape.fill(.black.opacity(0.38))
+            shape.fill(Self.smoke(dark: 0.38))
 
             // The body: bright where the light enters at the top, clearing
             // through the middle, picking up again off the bottom face.
@@ -8644,6 +8694,13 @@ struct PromptShortcutCardSurface<S: InsettableShape>: View {
         }
     }
 
+    /// The smoke under the pigment: black on dark glass, a white frost in a
+    /// light window.
+    static func smoke(dark: CGFloat) -> Color {
+        Tokens.adaptive(dark: .black.withAlphaComponent(dark),
+                        light: .white.withAlphaComponent(0.6))
+    }
+
     var body: some View {
         ZStack {
             // Smoke first, pigment on top of it. The colour is laid at a strength
@@ -8652,7 +8709,7 @@ struct PromptShortcutCardSurface<S: InsettableShape>: View {
             if liveGlass {
                 shape.fill(.clear)
                     .nativeGlass(in: shape, tintOpacity: 0.16)
-                    .overlay(shape.fill(.black.opacity(0.36)))
+                    .overlay(shape.fill(Self.smoke(dark: 0.36)))
             } else {
                 staticGlassPane
             }
@@ -8815,7 +8872,7 @@ struct MenuCardRow: View {
                 }
                 if notchiMark {
                     Spacer(minLength: 0)
-                    NotchiMarkEyes(pose: NotchiMarkPose(), eyeHeight: accessoryFontSize * 0.7, dim: 0.55)
+                    NotchiMarkEyes(pose: NotchiMarkPose(), eyeHeight: accessoryFontSize * 0.7, dim: 0.55, outline: 1)
                 } else if let tag, !lowBalance {
                     Spacer(minLength: 0)
                     InlineSettingsView.NewBadge(text: tag, tint: tagTint)
@@ -8845,7 +8902,7 @@ struct MenuCardRow: View {
                         .labelsHidden()
                         .toggleStyle(.switch)
                         .controlSize(.mini)
-                        .tint(Tokens.text2)
+                        .tint(Tokens.switchTint)
                         .allowsHitTesting(false)
                 }
                 if let hoverSymbol {
@@ -8874,9 +8931,9 @@ struct MenuCardRow: View {
                                               hovering: hovering,
                                               shape: shape)
                 } else if wash, selected {
-                    shape.fill(Color.white.opacity(0.14))
+                    shape.fill(Tokens.ink.opacity(0.14))
                 } else if hovering, !selected, !dimmed {
-                    shape.fill(Color.white.opacity(0.06))
+                    shape.fill(Tokens.ink.opacity(0.06))
                 }
             }
             .contentShape(Rectangle())
@@ -8928,7 +8985,7 @@ extension View {
     func manageMenuCardBackground() -> some View {
         let shape = RoundedRectangle(cornerRadius: ManageMenuMetrics.radius,
                                      style: .continuous)
-        return background {
+        return environment(\.colorScheme, .dark).background {
             shape.fill(.clear).nativeGlass(in: shape)
                 .overlay(shape.fill(Color.black.opacity(0.38)))
         }
@@ -8957,7 +9014,8 @@ extension View {
     /// two shadows that lift it off whatever it hangs over.
     func menuCardBackground() -> some View {
         let shape = RoundedRectangle(cornerRadius: MenuCard.radius, style: .continuous)
-        return background { MenuCardSlab() }
+        return environment(\.colorScheme, .dark)
+            .background { MenuCardSlab() }
             .clipShape(shape)
             .shadow(color: .black.opacity(0.30), radius: 3, y: 1)
             .shadow(color: .black.opacity(0.35), radius: 16, y: 8)
@@ -8969,9 +9027,11 @@ extension View {
     func menuCardPresentationBackground() -> some View {
         Group {
             if #available(macOS 13.3, *) {
-                presentationBackground { MenuCardSlab() }
+                environment(\.colorScheme, .dark)
+                    .presentationBackground { MenuCardSlab() }
             } else {
-                background { MenuCardSlab() }
+                environment(\.colorScheme, .dark)
+                    .background { MenuCardSlab() }
             }
         }
     }

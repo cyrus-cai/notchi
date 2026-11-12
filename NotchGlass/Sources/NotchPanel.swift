@@ -1,4 +1,5 @@
 import AppKit
+import Carbon
 
 /// A borderless, transparent, always-on-top panel that hosts the notch UI.
 ///
@@ -170,7 +171,13 @@ final class NotchPanel: NSPanel {
                                       execute: work)
     }
 
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if SelectableTextCopy.copyIfNeeded(event, in: self) { return true }
+        return super.performKeyEquivalent(with: event)
+    }
+
     override func sendEvent(_ event: NSEvent) {
+        SelectableTextCopy.note(event, in: self)
         // Before `onClickInside`, so the handler still sees the state recorded
         // at the first click of the pair.
         if event.type == .leftMouseDown, event.clickCount == 2,
@@ -209,6 +216,38 @@ final class NotchPanel: NSPanel {
 }
 
 // MARK: - Selectable text
+
+/// ⌘C for SwiftUI's `.textSelection(.enabled)` text.
+///
+/// The Edit menu sends `copy:` to the first responder. After a drag-select in
+/// an answer, focus can move back to the prompt field (the panel refocuses it),
+/// so `copy:` reaches an empty field while the answer still shows its
+/// selection, and nothing is copied. Each window records the selectable text
+/// view the last press landed in, and ⌘C copies from that view unless an
+/// editable field has a selection of its own.
+enum SelectableTextCopy {
+    private static weak var lastPressed: NSView?
+
+    /// Call from `sendEvent` for every event.
+    static func note(_ event: NSEvent, in window: NSWindow) {
+        guard event.type == .leftMouseDown else { return }
+        lastPressed = window.selectableTextView(at: event.locationInWindow)
+    }
+
+    /// Call from `performKeyEquivalent`. True when it copied.
+    static func copyIfNeeded(_ event: NSEvent, in window: NSWindow) -> Bool {
+        guard event.type == .keyDown,
+              event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
+              event.keyCode == UInt16(kVK_ANSI_C)
+                || event.charactersIgnoringModifiers?.lowercased() == "c" else { return false }
+        if let field = window.firstResponder as? NSTextView,
+           field.selectedRange().length > 0 { return false }
+        guard let view = lastPressed, view.window === window else { return false }
+        let before = NSPasteboard.general.changeCount
+        NSApp.sendAction(#selector(NSText.copy(_:)), to: view, from: nil)
+        return NSPasteboard.general.changeCount != before
+    }
+}
 
 extension NSWindow {
     /// The view SwiftUI puts behind `.textSelection(.enabled)` text at this

@@ -537,6 +537,8 @@ final class NotchiDirector {
     /// The latest time asked for. Callers on different clocks (a TimelineView,
     /// a Timer) ask a few ms apart; time never runs backwards inside one play.
     private var latest: Double = -.infinity
+    /// How many forms have started. Lets text elsewhere change with the form.
+    private(set) var formsStarted = 0
 
     init() {
         rng = SystemRandomNumberGenerator()
@@ -587,6 +589,7 @@ final class NotchiDirector {
     private func begin(_ form: NotchiForm, at time: Double) {
         previous = current.map { Play(form: $0.form, start: $0.start, seed: $0.seed) }
         current = Play(form: form, start: time, seed: random())
+        formsStarted += 1
         recent.append(form)
         if recent.count > 8 { recent.removeFirst() }
     }
@@ -632,6 +635,8 @@ struct NotchiMarkEyes: View {
     var blink: CGFloat = 1
     var eyeHeight: CGFloat
     var dim: Double = 1
+    /// Stroke width for an outline-only mark; nil fills the eyes.
+    var outline: CGFloat? = nil
 
     var body: some View {
         let h = eyeHeight
@@ -650,10 +655,19 @@ struct NotchiMarkEyes: View {
         .opacity(dim)
     }
 
+    @ViewBuilder
+    private func eyeShape() -> some View {
+        let ink = LinearGradient(colors: [NotchiMarkPose.ink, NotchiMarkPose.inkLow],
+                                 startPoint: .top, endPoint: .bottom)
+        if let outline {
+            NotchiEyeShape().stroke(ink, lineWidth: outline).padding(outline / 2)
+        } else {
+            NotchiEyeShape().fill(ink)
+        }
+    }
+
     private func eye(lid: CGFloat, hop: CGFloat, h: CGFloat, w: CGFloat) -> some View {
-        NotchiEyeShape()
-            .fill(LinearGradient(colors: [NotchiMarkPose.ink, NotchiMarkPose.inkLow],
-                                 startPoint: .top, endPoint: .bottom))
+        eyeShape()
             .frame(width: w, height: h)
             .scaleEffect(x: 1, y: max(0.06, lid * blink), anchor: .center)
             .offset(y: hop * h)

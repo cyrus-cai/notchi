@@ -250,9 +250,9 @@ struct UpdatePromptCard: View {
             .padding(.horizontal, 20)
             .frame(minWidth: 112)
             .frame(height: 32)
-            .background(Capsule().fill(Color.white.opacity(restartHovered && !restarting ? 0.9 : 1)))
+            .background(Capsule(style: .continuous).fill(Color.white.opacity(restartHovered && !restarting ? 0.9 : 1)))
             .shadow(color: .white.opacity(0.14), radius: 5, y: 1)
-            .contentShape(Capsule())
+            .contentShape(Capsule(style: .continuous))
         }
         .buttonStyle(GlassPressStyle())
         .allowsHitTesting(!restarting)

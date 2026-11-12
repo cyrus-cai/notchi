@@ -150,6 +150,24 @@ final class NoNoAccount: ObservableObject {
 
         var survey: Survey?
 
+        /// The Notchi license (`NotchiLicense`). Missing from a gateway older
+        /// than the license.
+        struct License: Decodable, Equatable {
+            /// The gateway's switch. False hides every license surface.
+            var live: Bool
+            var priceUSD: Double
+            /// ISO 8601. Accounts registered before it need no purchase.
+            var freeBefore: String?
+            /// `active`, `included` or `none`.
+            var status: String
+            var source: String?
+            var key: String?
+            /// Milliseconds since the epoch: when it was bought or given.
+            var issuedAt: Double?
+        }
+
+        var license: License?
+
         struct Limits: Decodable, Equatable {
             /// The ceiling actually in force today, not the configured floor —
             /// the gateway resolves that before sending it.
@@ -473,6 +491,42 @@ final class NoNoAccount: ObservableObject {
         snapshot = try? await get("/me")
     }
 
+    // MARK: - License
+
+    private struct LicenseCheckout: Decodable { let url: String }
+
+    /// The Stripe checkout page for the license (`POST /v1/billing/license`).
+    func openLicenseCheckout() async throws -> URL {
+        if !hasToken { await register() }
+        let redirect: LicenseCheckout = try await post("/billing/license", body: [:], authorized: true)
+        guard let url = URL(string: redirect.url) else { throw Failed.api(status: 502, code: "", message: L("nono.error.badRedirect")) }
+        return url
+    }
+
+    /// Hold a license key on this account (`POST /v1/license/activate`).
+    func activateLicense(_ key: String) async throws {
+        if !hasToken { await register() }
+        struct Activated: Decodable {}
+        let _: Activated = try await post("/license/activate", body: ["key": key], authorized: true)
+    }
+
+    /// Re-read `/v1/me` without touching `phase`.
+    func reloadQuietly() async {
+        guard hasToken, let fresh: Snapshot = try? await get("/me") else { return }
+        if fresh != snapshot { snapshot = fresh }
+    }
+
+    /// The gateway's own words for a failed call, or the unreachable line.
+    func describe(_ error: Error) -> String {
+        message(for: error)
+    }
+
+    /// The gateway's error code for a failed call, or nil for a transport failure.
+    func errorCode(_ error: Error) -> String? {
+        guard case Failed.api(_, let code, _)? = error as? Failed, !code.isEmpty else { return nil }
+        return code
+    }
+
     /// What the wallet holds right now, gifts included.
     var remainingUSD: Double { snapshot?.credit.remainingUSD ?? 0 }
 
@@ -649,6 +703,35 @@ final class NoNoAccount: ObservableObject {
                                              authorized: true) else { return nil }
         request.timeoutInterval = 4
         return try? await jev("followup") { try await send(request) as FollowUpVerdict }
+    }
+
+    // MARK: - Proactive check
+
+    /// Jev's verdict on a message the app is about to write on its own
+    /// (`POST /v1/proactive`). `probability` is how likely the message is
+    /// worth interrupting the user for; `ProactiveLevel.floor` reads it.
+    struct ProactiveVerdict: Decodable, Equatable {
+        var verdict: String
+        var probability: Double
+    }
+
+    /// Ask whether `message` is worth sending now. `kind` is `reminder`,
+    /// `event` or `followup`; `localTime` is the user's time now ("Thursday
+    /// 14:05"); `sentToday` is how many proactive messages the last 24 hours
+    /// already had. Nil on any failure; the caller then sends. The caller
+    /// must have run `ClipPrivacy` first.
+    func checkProactive(kind: String, message: String, localTime: String,
+                        sentToday: Int) async -> ProactiveVerdict? {
+        if DecisionModel.usesOwn {
+            return await OwnDecisionModel.checkProactive(kind: kind, message: message,
+                                                         localTime: localTime, sentToday: sentToday)
+        }
+        guard hasToken else { return nil }
+        let body: [String: Any] = ["kind": kind, "message": message,
+                                   "local_time": localTime, "sent_today": sentToday]
+        guard var request = try? jsonRequest("/proactive", body: body, authorized: true) else { return nil }
+        request.timeoutInterval = 4
+        return try? await jev("proactive") { try await send(request) as ProactiveVerdict }
     }
 
     // MARK: - Web search

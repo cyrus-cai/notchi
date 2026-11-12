@@ -277,6 +277,11 @@ final class NotchModel: ObservableObject {
         /// threads guide), not one the user sent or a model answered. Drawn like
         /// any other turn, never sent to the model. Persisted.
         var isLocal: Bool = false
+        /// True on an *assistant* turn Notchi wrote on its own (`ProactiveEngine`):
+        /// a due reminder, a starting event, a follow-up. Unlike a local turn
+        /// it reaches the model, as a note on the user's next message
+        /// (`wireContext`), so a reply to it is understood. Persisted.
+        var proactive: Bool = false
         /// Notes, reminders and events this *assistant* answer filed through
         /// `create_note` / `create_reminder` / `create_event`, in call order. Drawn as a line
         /// above the answer, like "Searched the web", that opens the item in
@@ -344,7 +349,7 @@ final class NotchModel: ObservableObject {
         // its whole thread down with it. `decodeIfPresent` + defaults is what keeps old saved conversations
         // loadable. `role`/`text` are required — every saved turn has them.
         // `toolActivity` is deliberately absent: it's runtime-only UI state.
-        enum CodingKeys: String, CodingKey { case id, role, text, streaming, hidesUserBubble, usedClipboard, sources, isError, regenModel, answerModel, imageFiles, isAgent, agentLog, reasoning, loopRound, reaction, fromTelegram, sharedLinks, isLocal, captures, sentAt, interrupted, example, toolTrail, folders }
+        enum CodingKeys: String, CodingKey { case id, role, text, streaming, hidesUserBubble, usedClipboard, sources, isError, regenModel, answerModel, imageFiles, isAgent, agentLog, reasoning, loopRound, reaction, fromTelegram, sharedLinks, isLocal, captures, sentAt, interrupted, example, toolTrail, folders, proactive }
 
         init(from decoder: Decoder) throws {
             let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -375,6 +380,7 @@ final class NotchModel: ObservableObject {
             example      = try? c.decodeIfPresent(WelcomeExample.self, forKey: .example)
             toolTrail    = try c.decodeIfPresent([String].self, forKey: .toolTrail) ?? []
             folders      = (try? c.decodeIfPresent([String].self, forKey: .folders)) ?? []
+            proactive    = try c.decodeIfPresent(Bool.self, forKey: .proactive) ?? false
         }
     }
 
@@ -507,6 +513,10 @@ final class NotchModel: ObservableObject {
         /// names that cause instead of the generic failed badge. Persisted.
         var outOfCredit: Bool = false
 
+        /// A failed row refused because this account holds no Notchi license
+        /// (`NotchiLicense`). Its own badge, like `outOfCredit`. Persisted.
+        var licenseRequired: Bool = false
+
         /// Unified threads (Settings → Chat): this row is the main thread — the
         /// chat that questions from the panel's own prompt continue while the
         /// lab is on. The newest such row is the one continued, and the idle
@@ -550,7 +560,7 @@ final class NotchModel: ObservableObject {
         // item has always had them.
         enum CodingKeys: String, CodingKey {
             case id, q, a, t, turns, title, source, origin, link, agentOutcome, agentResume,
-                 agentInterrupted, agentSeen, failed, outOfCredit, mainThread
+                 agentInterrupted, agentSeen, failed, outOfCredit, licenseRequired, mainThread
         }
 
         init(from decoder: Decoder) throws {
@@ -577,6 +587,7 @@ final class NotchModel: ObservableObject {
             // rows that succeeded.
             failed = try c.decodeIfPresent(Bool.self, forKey: .failed) ?? false
             outOfCredit = try c.decodeIfPresent(Bool.self, forKey: .outOfCredit) ?? false
+            licenseRequired = try c.decodeIfPresent(Bool.self, forKey: .licenseRequired) ?? false
             mainThread = try c.decodeIfPresent(Bool.self, forKey: .mainThread) ?? false
         }
 
@@ -4474,7 +4485,7 @@ final class NotchModel: ObservableObject {
 
         case "summon_shortcut":
             guard let shortcut = Self.parseShortcut(value) else {
-                throw invalidValue(setting, "disabled, default, double_option, double_command, double_control, double_shift, or a chord like command+shift+k")
+                throw invalidValue(setting, "disabled, default, double_option, double_command, double_control, double_shift, double_left_command, double_right_command, or a chord like command+shift+k")
             }
             return made(setting, L("general.shortcut"),
                         shortcut.enabled ? shortcut.displayString : L("general.shortcut.off"),
@@ -5223,6 +5234,14 @@ final class NotchModel: ObservableObject {
         if let modifier = doubles[token] {
             return SummonHotKey(keyCode: 0, modifiers: 0,
                                 doubleTapModifier: modifier, enabled: true)
+        }
+        let sided: [String: ModifierSide] = [
+            "double_left_command": .left, "double_left_cmd": .left,
+            "double_right_command": .right, "double_right_cmd": .right,
+        ]
+        if let side = sided[token] {
+            return SummonHotKey(keyCode: 0, modifiers: 0, doubleTapModifier: UInt32(cmdKey),
+                                doubleTapSide: side, enabled: true)
         }
 
         guard let chord = parseChord(raw) else { return nil }
@@ -6157,6 +6176,7 @@ final class NotchModel: ObservableObject {
         RestingResult.shared.model = self
         loadHistoryAsync()
         startClipboardSense()
+        ProactiveEngine.shared.start(model: self)
         refreshAgentSkills()
         bindChatLoops()
         AnswerLinks.report = { [weak self] in self?.flashSavedCue($0) }
@@ -7085,6 +7105,8 @@ final class NotchModel: ObservableObject {
               autoRetire == nil else { return }
         let announcements = Announcements.shared
         if !announcements.forced {
+            // An hour from a message Notchi sent on its own.
+            guard !ProactiveEngine.shared.sentRecently(within: 3600) else { return }
             guard open, mode == .idle, turns.isEmpty, !promptHasDraft,
                   !showSettings, !showWhatsNew, !showHistory,
                   agentDetailTaskID == nil, !agentComposeActive,
@@ -7131,6 +7153,76 @@ final class NotchModel: ObservableObject {
         mode = .result
     }
 
+    // MARK: - Proactive message
+
+    /// The thread proactive messages go into when unified threads is off, so
+    /// they do not each start a thread in Recent. Like `copyThreadID`.
+    private static let proactiveThreadKey = "proactiveThreadID"
+    private var proactiveThreadID: UUID? {
+        get { UserDefaults.standard.string(forKey: Self.proactiveThreadKey).flatMap(UUID.init(uuidString:)) }
+        set { UserDefaults.standard.set(newValue?.uuidString, forKey: Self.proactiveThreadKey) }
+    }
+
+    /// Write a message Notchi sends on its own (`ProactiveEngine`) at the end
+    /// of the main thread, and show `glance` on the resting notch for a few
+    /// seconds. The user answers it in the thread like any other message.
+    /// False when a round is being written into that thread: the engine tries
+    /// again a minute later.
+    /// The row proactive messages are written into: the main thread, or
+    /// their own thread when unified threads is off. Nil before the first one.
+    private var proactiveTargetIndex: Int? {
+        if unifiedThreadsEnabled {
+            return history.firstIndex(where: { $0.mainThread && $0.source == .ask })
+        }
+        return proactiveThreadID.flatMap { id in history.firstIndex(where: { $0.id == id }) }
+    }
+
+    /// False while a round is being written into that thread.
+    var canPostProactiveMessage: Bool {
+        guard let target = proactiveTargetIndex else { return true }
+        let row = history[target]
+        return !row.pending && !inFlightRounds.contains(where: { $0.threadID == row.id })
+    }
+
+    @discardableResult
+    func postProactiveMessage(_ text: String, glance: String) -> Bool {
+        guard canPostProactiveMessage else { return false }
+        var line = Turn(role: "assistant", text: text)
+        line.proactive = true
+        line.sentAt = Date()
+
+        let target = proactiveTargetIndex
+        var item: HistoryItem
+        if let target {
+            item = history.remove(at: target)
+            item.turns = item.conversation + [line]
+            item.a = text
+            item.t = Date()
+        } else {
+            item = HistoryItem(q: "", a: text, t: Date(), turns: [line])
+            item.source = .ask
+            item.title = L("proactive.thread.title")
+            if unifiedThreadsEnabled {
+                item.mainThread = true
+            } else {
+                proactiveThreadID = item.id
+            }
+        }
+        history.insert(item, at: 0)
+        saveHistory()
+        // The thread on screen, kept in step while its page is up.
+        if mode == .result, threadHistoryID == item.id { turns.append(line) }
+        mainThreadPeekRevision += 1
+
+        // The panel is open: the thread, or the idle prompt's peek, shows it.
+        guard !open else { return true }
+        if !RestingResult.shared.show(glance, failed: false, kind: .message) {
+            NotificationService.shared.postAnswerReady(
+                threadID: item.id, title: glance, question: glance, answer: text)
+        }
+        return true
+    }
+
     // MARK: - Feature nudge
 
     /// An invitation to turn on a feature that is off, chosen by
@@ -7169,6 +7261,7 @@ final class NotchModel: ObservableObject {
               autoRetire == nil else { return }
         let nudges = FeatureNudges.shared
         if !nudges.forced {
+            guard !ProactiveEngine.shared.sentRecently(within: 3600) else { return }
             guard open, mode == .idle, turns.isEmpty, !promptHasDraft,
                   !showSettings, !showWhatsNew, !showHistory,
                   agentDetailTaskID == nil, !agentComposeActive,
@@ -8351,6 +8444,7 @@ final class NotchModel: ObservableObject {
     /// what was saved or set. It is a thread of its own in Recent, kept apart
     /// from the main thread, under a fixed title.
     private static let copyThreadKey = "copyThreadID"
+    private var copyMarksCache: (key: CopyMarksKey, marks: [UUID: CopyMark])?
     var copyThreadID: UUID? {
         get { UserDefaults.standard.string(forKey: Self.copyThreadKey).flatMap(UUID.init(uuidString:)) }
         set { UserDefaults.standard.set(newValue?.uuidString, forKey: Self.copyThreadKey) }
@@ -8403,6 +8497,40 @@ final class NotchModel: ObservableObject {
     func copyThreadMarks(for drawn: [Turn], in threadID: UUID?) -> [UUID: CopyMark] {
         guard let threadID, isMainThread(threadID), copyThreadIndex != nil,
               let lastID = drawn.last?.id else { return [:] }
+        // The thread redraws on every scroll step and every model change, and
+        // the marks below walk all of its turns for each copy. Worked out again
+        // only when the turns or the copy thread changed.
+        let copies = copyThreadConversation
+        var signature = Hasher()
+        for turn in copies {
+            signature.combine(turn.id)
+            signature.combine(turn.role)
+            signature.combine(turn.isError)
+            signature.combine(turn.streaming)
+            signature.combine(turn.sentAt)
+            signature.combine(turn.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            for capture in turn.captures { signature.combine(capture.kind.rawValue) }
+        }
+        let key = CopyMarksKey(threadID: threadID, count: drawn.count, firstID: drawn.first?.id,
+                               lastID: lastID, copies: signature.finalize(),
+                               join: L("copyMark.join"))
+        if let cached = copyMarksCache, cached.key == key { return cached.marks }
+        let marks = computeCopyThreadMarks(for: drawn, lastID: lastID, copies: copies)
+        copyMarksCache = (key, marks)
+        return marks
+    }
+
+    private struct CopyMarksKey: Equatable {
+        var threadID: UUID
+        var count: Int
+        var firstID: UUID?
+        var lastID: UUID
+        var copies: Int
+        var join: String
+    }
+
+    private func computeCopyThreadMarks(for drawn: [Turn], lastID: UUID,
+                                        copies: [Turn]) -> [UUID: CopyMark] {
         // Each main turn with the time its round was asked.
         var anchors: [(id: UUID, at: Date)] = []
         var roundAt: Date?
@@ -8413,7 +8541,7 @@ final class NotchModel: ObservableObject {
         // Each copy with what its reply did.
         struct Exchange { var id: UUID; var copy: String; var at: Date?; var counts: [String: Int] = [:] }
         var exchanges: [Exchange] = []
-        for turn in copyThreadConversation {
+        for turn in copies {
             if turn.role == "user" {
                 exchanges.append(Exchange(id: turn.id, copy: turn.text, at: turn.sentAt))
             } else if !exchanges.isEmpty, !turn.isError {
@@ -9192,10 +9320,23 @@ final class NotchModel: ObservableObject {
                           after: Self.typingGrace - sinceEdit)
             return
         }
+        // The menu bar chat waits a moment first: its bubbles end short of the
+        // column's edges, and a pointer on its way to a message to select or
+        // copy crosses outside them. Back inside by then, the chat stays
+        // (`recheckLeaveWatch`).
+        if let shown = display ?? activeDisplay, isCornerDisplay(shown) {
+            armLeaveWatch(LeaveWatch(display: display, sequenced: sequenced,
+                                     armedMouse: mouse, movedOut: true),
+                          after: Self.cardLeaveGrace)
+            return
+        }
         // Route through the two-beat dissolve so the content fades before the
         // shell retracts, matching Esc.
         beginClose(sequenced: sequenced)
     }
+
+    /// How long the menu bar chat stays up after the pointer leaves it.
+    static let cardLeaveGrace: TimeInterval = 0.6
 
     /// One poll tick of the armed leave watch. Ends in exactly one of: fold
     /// (pointer verifiably off the island, displaced or genuinely crossed out,
@@ -11153,7 +11294,11 @@ final class NotchModel: ObservableObject {
         // assistant turn first — which Anthropic rejects (the conversation must
         // open with a user turn). Drop any leading assistant turns so the trimmed
         // window still starts on a user message.
-        while kept.first?.role == "assistant" { kept.removeFirst() }
+        // A message Notchi sent on its own stays: it is not wired as an
+        // assistant turn but as a note on the user's next message (below).
+        let firstUser = kept.firstIndex(where: { $0.role == "user" }) ?? kept.endIndex
+        kept = kept[..<firstUser].filter(\.proactive) + kept[firstUser...]
+        if !kept.contains(where: { $0.role == "user" }) { kept = [] }
 
         // Each user message carries its send time (`sentTimeStance` tells the
         // model how to read it). The stamp is absolute, so an old turn's wire
@@ -11166,8 +11311,18 @@ final class NotchModel: ObservableObject {
         // user message, not inside the assistant's text — placed there, the model
         // copied the trail lines into its new answers.
         var pendingTrail: [String] = []
+        // Messages Notchi sent on its own since the last user message. They go
+        // on the next user message too: as assistant turns they would merge
+        // into the answer before them, or be dropped at the head of the thread.
+        var pendingProactive: [String] = []
         for turn in kept {
             var text = turn.text
+            if turn.role == "assistant", turn.proactive {
+                let when = turn.sentAt.map { " at " + sentStampFormatter.string(from: $0) } ?? ""
+                pendingProactive.append("[Harness note, not from the user: you wrote to the user on your own\(when), "
+                    + "unprompted: \"\(turn.text)\" The message below may be their reply to it.]")
+                continue
+            }
             if turn.role == "assistant" {
                 pendingTrail = turn.toolTrail
             }
@@ -11184,6 +11339,10 @@ final class NotchModel: ObservableObject {
                         + "Do not repeat these lines in your reply.]\n"
                         + pendingTrail.joined(separator: "\n") + "\n\n" + text
                     pendingTrail = []
+                }
+                if !pendingProactive.isEmpty {
+                    text = pendingProactive.joined(separator: "\n") + "\n\n" + text
+                    pendingProactive = []
                 }
             }
             if let last = messages.last, last.role == turn.role {
@@ -12248,6 +12407,14 @@ final class NotchModel: ObservableObject {
                    !acc.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     self.predictNextQuestion(for: thread, answerID: answerID, answeredBy: askService)
                 }
+                if loopRound == nil, threadID != self.copyThreadID,
+                   let asked = thread.last(where: { $0.role == "user" && !$0.isLocal }),
+                   !asked.hidesUserBubble {
+                    ProactiveEngine.shared.considerFollowUp(
+                        question: asked.text, answer: acc,
+                        filedSomething: thread.first(where: { $0.id == answerID })?.captures.isEmpty == false,
+                        service: self.backgroundService(askService))
+                }
                 // A loop round's banner is the loop's own (`ChatLoopManager`).
                 let fromCard = self.takeCardSend(threadID)
                 if walkedAway, loopRound == nil {
@@ -12357,11 +12524,16 @@ final class NotchModel: ObservableObject {
                         thread[i].isError = true
                         thread[i].streaming = false
                     }
+                    if (error as? OpenAICompatAIService.ServiceError)?.isLicenseRequired == true {
+                        NotchiLicense.shared.noteRefusal()
+                    }
                     let walkedAway = !self.isPresented(answerID: answerID)
                     thread = self.rebased(thread, answerID: answerID, threadID: threadID)
                     self.persistThread(thread, threadID: threadID, answer: "", answerID: answerID,
                                        outOfCredit: (error as? OpenAICompatAIService.ServiceError)?
-                                           .isOutOfCredit == true)
+                                           .isOutOfCredit == true,
+                                       licenseRequired: (error as? OpenAICompatAIService.ServiceError)?
+                                           .isLicenseRequired == true)
                     ChatLoopManager.shared.roundFinished(threadID: threadID,
                                                          loopRound: loopRound, failed: true,
                                                          answer: error.localizedDescription)
@@ -13501,7 +13673,8 @@ final class NotchModel: ObservableObject {
     /// it. `nil` means the selected default.
     private func persistThread(_ thread: [Turn], threadID: UUID, answer ans: String,
                                answerID: UUID? = nil,
-                               outOfCredit: Bool = false, service: AIService? = nil) {
+                               outOfCredit: Bool = false, licenseRequired: Bool = false,
+                               service: AIService? = nil) {
         var thread = thread
         // Another round's turn still marked streaming with no round behind it
         // must not be saved as live. This round's own turn is settled below.
@@ -13556,6 +13729,7 @@ final class NotchModel: ObservableObject {
         item.title = existingTitle
         item.failed = failed
         item.outOfCredit = failed && outOfCredit
+        item.licenseRequired = failed && licenseRequired
         // A chat follow-up on a reopened agent thread updates the SAME row — it
         // must keep the row's agent identity (source, folder link, outcome,
         // resume handle) rather than silently demoting it to a plain `.ask`.

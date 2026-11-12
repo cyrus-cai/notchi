@@ -316,8 +316,8 @@ private struct RankedBarsView: View {
                             .frame(maxWidth: 120, alignment: .leading)
                         GeometryReader { geo in
                             ZStack(alignment: .leading) {
-                                Capsule().fill(Color.white.opacity(0.06))
-                                Capsule()
+                                Capsule(style: .continuous).fill(Color.white.opacity(0.06))
+                                Capsule(style: .continuous)
                                     .fill(other ? Color.white.opacity(0.24) : Tokens.accent)
                                     .frame(width: max(4, geo.size.width * item.value / maxValue))
                             }

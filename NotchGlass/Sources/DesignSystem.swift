@@ -9,7 +9,16 @@ enum Tokens {
     /// live in the *upper, dark* part of the panel, so the scale is kept bright:
     /// opacity-on-dark below ~0.7 turns to muddy gray. Every level derives from this one ink so the text reads as one
     /// family, but no level drops so far that it greys out against the glass.
-    static let ink = Color.white
+    static let ink = adaptive(dark: .white, light: .black)
+
+    /// A color that resolves against the view's appearance. Every notch panel
+    /// is pinned to dark Aqua, so there it is always the `dark` value; only the
+    /// standalone windows (Settings, History) follow the system into light.
+    static func adaptive(dark: NSColor, light: NSColor) -> Color {
+        Color(nsColor: NSColor(name: nil) { appearance in
+            appearance.bestMatch(from: [.darkAqua, .aqua]) == .aqua ? light : dark
+        })
+    }
 
     // Label scale — one ink, four levels (label / secondary / tertiary /
     // quaternary). Tuned brighter than stock macOS because our surface goes from
@@ -19,7 +28,11 @@ enum Tokens {
     static let text2 = ink.opacity(0.74)   // secondary (question echo)
     static let text3 = ink.opacity(0.55)   // labels (RECENT / Recent)
     static let text4 = ink.opacity(0.40)   // meta (timestamps)
-    static let hairline = Color.white.opacity(0.12)
+    static let hairline = ink.opacity(0.12)
+    /// The tint of an on switch: light ink on dark glass; the system accent in
+    /// a light window, where a dark ink switch reads as a black slab.
+    static let switchTint = adaptive(dark: .white.withAlphaComponent(0.74),
+                                     light: .controlAccentColor)
 
     // MARK: Recessed surface
     //
@@ -32,18 +45,18 @@ enum Tokens {
     // Two states, one recipe: a faint white floor with a hairline rim at rest,
     // both lifting together when the control is hovered/focused. Route new
     // recessed controls through `recessedSurface` rather than hand-picking a pair.
-    static let recessFill    = Color.white.opacity(0.06)
-    static let recessFillLit = Color.white.opacity(0.10)
-    static let recessRim     = Color.white.opacity(0.12)
-    static let recessRimLit  = Color.white.opacity(0.22)
+    static let recessFill    = ink.opacity(0.06)
+    static let recessFillLit = ink.opacity(0.10)
+    static let recessRim     = ink.opacity(0.12)
+    static let recessRimLit  = ink.opacity(0.22)
 
     /// The same surface one step louder, for the *primary* action of a screen —
     /// the onboarding's Next/Ask, Settings' "Connect OpenRouter". One rung above
     /// the recessed rest so the eye lands on it first; it still answers a hover.
-    static let prominentFill    = Color.white.opacity(0.12)
-    static let prominentFillLit = Color.white.opacity(0.18)
-    static let prominentRim     = Color.white.opacity(0.22)
-    static let prominentRimLit  = Color.white.opacity(0.32)
+    static let prominentFill    = ink.opacity(0.12)
+    static let prominentFillLit = ink.opacity(0.18)
+    static let prominentRim     = ink.opacity(0.22)
+    static let prominentRimLit  = ink.opacity(0.32)
 
     /// The one duration every *chip's* hover brighten runs at — buttons, pills,
     /// glass capsules, the ⓘ marks. Long enough to read as a fade rather than a
@@ -327,8 +340,8 @@ struct AddCreditButtonFace: View {
         .fixedSize()
         .padding(.horizontal, compact ? 12 : 14)
         .frame(height: height ?? (compact ? 26 : 30))
-        .prominentSurface(in: Capsule(), lit: lit)
-        .contentShape(Capsule())
+        .prominentSurface(in: Capsule(style: .continuous), lit: lit)
+        .contentShape(Capsule(style: .continuous))
     }
 }
 
@@ -452,6 +465,7 @@ extension View {
 struct BrandAura<S: InsettableShape>: View {
     var shape: S
     var lineWidth: CGFloat = 1
+    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         let sweep = AngularGradient(colors: Tokens.prismHues,
@@ -474,8 +488,9 @@ struct BrandAura<S: InsettableShape>: View {
         .clipShape(shape)
         .blendMode(.plusLighter)
         // Spread wide and kept faint, so the silver reads as light in the
-        // glass rather than as a second border.
-        .opacity(0.6)
+        // glass rather than as a second border. Off in a light window: the
+        // silver drawn on a light surface shows as gray smudges.
+        .opacity(colorScheme == .light ? 0 : 0.6)
         .allowsHitTesting(false)
     }
 }
@@ -1670,6 +1685,8 @@ private struct TooltipLabel: View {
                 }
             )
             .shadow(color: .black.opacity(0.35), radius: 8, y: 3)
+            // Dark glass in a light window too, so the text keeps the dark ink.
+            .environment(\.colorScheme, .dark)
     }
 }
 
