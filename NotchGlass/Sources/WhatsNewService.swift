@@ -107,6 +107,13 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.9.32",
+            date: "2026-11-12",
+            fixes: [
+                "Fixed scheduled tasks taking actions beyond what you asked for.",
+            ]
+        ),
+        Entry(
             version: "0.9.31",
             date: "2026-11-12",
             features: [
