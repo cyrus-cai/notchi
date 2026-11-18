@@ -163,10 +163,19 @@ struct GlassMaterial: View {
     var floating: Bool = false
     /// The floating card's tint at its bottom edge.
     static let floatingBottomTint: Double = 0.45
+    /// The floating card's white tint in light mode, top and bottom: a slight
+    /// lift at the top over an otherwise even tint.
+    static let lightTopTint: Double = 0.46
+    static let lightBottomTint: Double = 0.4
 
     /// Drives the one-shot light sweep that plays as the panel expands. Flipped
     /// by `.onChange(of: expanded)` so the shimmer travels exactly once per open.
     @State private var sweep = false
+
+    /// The floating card follows the system's appearance (`SystemAppearance`):
+    /// in light mode its glass is white and its ink dark. The island stays dark.
+    @Environment(\.colorScheme) private var colorScheme
+    private var light: Bool { floating && colorScheme == .light }
 
     /// The base darkening baked into the native glass material as a tint (see
     /// `nativeGlass(in:)`) — chosen to match the panel's *lightest* veil value
@@ -208,7 +217,8 @@ struct GlassMaterial: View {
         // One shape mask does both the hard cut and the open bottom fade; a
         // separate `.clipShape` on top of it would be a second offscreen pass.
         ZStack {
-            shape.fill(.clear).nativeGlass(in: shape)
+            shape.fill(.clear).nativeGlass(in: shape, tint: light ? .white : .black,
+                                           frosted: light)
             darkVeil
             // The raking diagonal gloss over the lower body — faded in when
             // open. Both decorations stay MOUNTED at rest (opacity 0) instead
@@ -235,7 +245,9 @@ struct GlassMaterial: View {
         .mask {
             GeometryReader { geo in
                 ZStack {
-                    shape.fill(.black).opacity(expanded ? 0 : 1)
+                    // Light mode keeps the whole material: the bottom fade
+                    // read as a strong change in transparency on white glass.
+                    shape.fill(.black).opacity(expanded && !light ? 0 : 1)
                     // A rectangle of the gradient, cut to the shape. Filled
                     // into the shape's path it was a CoreGraphics shading the
                     // size of the panel, redrawn on the CPU on every frame of
@@ -430,7 +442,14 @@ struct GlassMaterial: View {
             let glassBody = 0.82
 
             ZStack {
-                if expanded, floating {
+                if expanded, light {
+                    // Light mode: white glass, denser at the top.
+                    LinearGradient(
+                        colors: [.white.opacity(veilAlpha(GlassMaterial.lightTopTint)),
+                                 .white.opacity(veilAlpha(GlassMaterial.lightBottomTint))],
+                        startPoint: .top, endPoint: .bottom
+                    )
+                } else if expanded, floating {
                     // No camera zone to hold black: the body tint eases from
                     // the top toward a lighter bottom.
                     LinearGradient(
@@ -488,8 +507,36 @@ struct GlassMaterial: View {
 /// traces the edge crisply instead of being masked away with the fill.
 struct IslandRim: View {
     var shape: NotchShape
+    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
+        if colorScheme == .light {
+            lightRim
+        } else {
+            darkRim
+        }
+    }
+
+    /// Light mode (the floating card only; the island is pinned dark): a
+    /// thin white line, plus a soft white glow inside the top edge.
+    private var lightRim: some View {
+        ZStack {
+            shape
+                .inset(by: 1)
+                .stroke(
+                    LinearGradient(colors: [.white.opacity(0.7), .white.opacity(0)],
+                                   startPoint: .top, endPoint: .center),
+                    lineWidth: 1.5
+                )
+                .blur(radius: 1.5)
+            shape
+                .strokeBorder(Color.white.opacity(0.95), lineWidth: 0.75)
+        }
+        .drawingGroup()
+        .allowsHitTesting(false)
+    }
+
+    private var darkRim: some View {
         ZStack {
             // Soft inner glow — a blurred stroke set in from the edge, giving the
             // bevel its luminous thickness so the light eases into the glass.
@@ -544,7 +591,8 @@ extension View {
     /// smoked tint and keeps text legible. Reused by the quick-tools popover so it
     /// shares the panel's glass instead of an opaque slab.
     @ViewBuilder
-    func nativeGlass<S: Shape>(in shape: S, tintOpacity: Double = GlassMaterial.bakedTint) -> some View {
+    func nativeGlass<S: Shape>(in shape: S, tintOpacity: Double = GlassMaterial.bakedTint,
+                               tint: Color = .black, frosted: Bool = false) -> some View {
         if #available(macOS 26.0, *) {
             // The tint bakes the panel's BASE darkening into the glass material
             // itself instead of leaving it all to the SwiftUI veil above. The
@@ -556,9 +604,12 @@ extension View {
             // an escaped sliver now reads as the same smoked glass as the panel
             // body instead of a bright unveiled band. `darkVeil` subtracts this
             // tint from its own stops so the settled look is unchanged.
-            self.glassEffect(.clear.tint(.black.opacity(tintOpacity)), in: shape)
+            // `frosted`: the blurred `.regular` glass, for the light card,
+            // where the `.clear` glass's refraction showed through the text.
+            self.glassEffect((frosted ? Glass.regular : Glass.clear)
+                                .tint(tint.opacity(tintOpacity)), in: shape)
         } else {
-            self.background(LegacyGlassBackdrop().clipShape(shape))
+            self.background(LegacyGlassBackdrop(light: tint == .white).clipShape(shape))
         }
     }
 }
@@ -566,15 +617,18 @@ extension View {
 /// Pre-macOS 26 fallback: an `NSVisualEffectView` dark blur (best we can do
 /// without the native Liquid Glass material).
 struct LegacyGlassBackdrop: NSViewRepresentable {
+    var light = false
     func makeNSView(context: Context) -> NSVisualEffectView {
         let v = NSVisualEffectView()
         v.material = .hudWindow
         v.blendingMode = .behindWindow
         v.state = .active
-        v.appearance = NSAppearance(named: .vibrantDark)
+        v.appearance = NSAppearance(named: light ? .vibrantLight : .vibrantDark)
         return v
     }
-    func updateNSView(_ nsView: NSVisualEffectView, context: Context) {}
+    func updateNSView(_ nsView: NSVisualEffectView, context: Context) {
+        nsView.appearance = NSAppearance(named: light ? .vibrantLight : .vibrantDark)
+    }
 }
 
 /// One message of the menu bar chat (`MenuBarChat`), which has no panel
@@ -585,10 +639,13 @@ struct LegacyGlassBackdrop: NSViewRepresentable {
 struct SmokedGlassSurface: ViewModifier {
     var radius: CGFloat
     var tint: Color? = nil
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.chatGlassCulled) private var culled
 
     func body(content: Content) -> some View {
         let shape = NotchShape(bottomRadius: radius, topCornerRadius: radius)
         content.background {
+            if !culled {
             ZStack {
                 GlassMaterial(bottomRadius: radius,
                               topCornerRadius: radius,
@@ -596,11 +653,33 @@ struct SmokedGlassSurface: ViewModifier {
                               cameraZone: 0,
                               sweepsOnOpen: false,
                               floating: true)
-                if let tint { shape.fill(tint.opacity(0.25)) }
+                // Lighter on white glass, where 0.25 read as a deep blue.
+                if let tint { shape.fill(tint.opacity(colorScheme == .light ? 0.14 : 0.25)) }
             }
             .clipShape(shape)
             .overlay(IslandRim(shape: shape))
+            .background(LightGlassShadow(shape: shape))
             .allowsHitTesting(false)
+            }
+        }
+    }
+}
+
+/// A faint drop shadow under the floating card's glass in light mode, so a
+/// white bubble sits above the wallpaper. Nothing in dark mode.
+struct LightGlassShadow<S: Shape>: View {
+    let shape: S
+    @Environment(\.colorScheme) private var colorScheme
+
+    var body: some View {
+        if colorScheme == .light {
+            shape
+                .fill(Color.black.opacity(0.10))
+                // Within the chat's 6 pt gutter: the scroll view clips
+                // anything wider, which showed as a cut-off grey band.
+                .blur(radius: 2.5)
+                .offset(y: 1)
+                .allowsHitTesting(false)
         }
     }
 }
@@ -610,3 +689,29 @@ extension View {
         modifier(SmokedGlassSurface(radius: radius, tint: tint))
     }
 }
+
+/// The system's light or dark appearance. The notch windows are pinned to dark
+/// Aqua, so their own `colorScheme` never changes; the floating card reads this
+/// instead and follows the system.
+final class SystemAppearance: ObservableObject {
+    static let shared = SystemAppearance()
+    @Published private(set) var isDark: Bool
+    private var observation: NSKeyValueObservation?
+
+    private init() {
+        isDark = Self.read()
+        observation = NSApp.observe(\.effectiveAppearance) { [weak self] _, _ in
+            DispatchQueue.main.async {
+                let dark = Self.read()
+                if self?.isDark != dark { self?.isDark = dark }
+            }
+        }
+    }
+
+    private static func read() -> Bool {
+        NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+    }
+
+    var colorScheme: ColorScheme { isDark ? .dark : .light }
+}
+

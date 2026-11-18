@@ -12,9 +12,8 @@ import SceneKit
 /// shrinking and rising as it turns — and tucks into the notch. The panel opens on
 /// the chat prompt the instant it lands.
 ///
-/// The mark is only the glyph — the flag and its dot, the shapes from the middle
-/// of the app icon, lifted out and given depth. No plate, no rounded square: what
-/// flies is the mark itself.
+/// The mark is the two eyes of the app icon (`NotchiEyeShape`), lifted out and
+/// given depth. No plate, no rounded square: what flies is the mark itself.
 ///
 /// Built in SceneKit because the "3D" has to be real: extruded geometry with
 /// chamfered edges, plus a fragment shader that refracts an environment through
@@ -61,8 +60,13 @@ final class IntroAnimation {
     /// How deep the glass runs. Chunky on purpose — a thin one would read as a
     /// decal, and the depth is what the refraction has to work with.
     private static let glyphDepth: CGFloat = 30
-    /// The mark's width/height in those units (the flag plus its dot).
+    /// The mark's height in those units: one eye's height.
     private static let markSize: CGFloat = 44.4
+    /// One eye, 56 × 72 in the icon's master, scaled to `markSize`; the eyes
+    /// sit 16 apart (`NotchiEyeShape`).
+    private static let eyeHeight: CGFloat = markSize
+    private static let eyeWidth: CGFloat = eyeHeight * NotchiEyeShape.aspect
+    private static let eyeGap: CGFloat = eyeHeight * NotchiEyeShape.gap
 
     /// How much of the screen's height the mark occupies while it's on stage.
     private static let stageFraction: CGFloat = 0.29
@@ -206,10 +210,12 @@ final class IntroAnimation {
         scene.background.contents = NSColor.clear
 
         // --- the mark ---------------------------------------------------------
-        // Just the glyph: the flag as an extruded slab, the dot as a marble.
+        // The two eyes, each an extruded slab of glass.
         let spin = SCNNode()
-        spin.addChildNode(Self.glassNode(path: Self.flagPath()))
-        spin.addChildNode(Self.dotNode())
+        let pitch = (Self.eyeWidth + Self.eyeGap) / 2
+        for x in [-pitch, pitch] {
+            spin.addChildNode(Self.glassNode(path: Self.eyePath(centerX: x)))
+        }
 
         let fly = SCNNode()
         fly.addChildNode(spin)
@@ -509,7 +515,7 @@ final class IntroAnimation {
         return node
     }
 
-    /// The flag: extruded and chamfered. The chamfer is generous on purpose — the
+    /// An eye: extruded and chamfered. The chamfer is generous on purpose — the
     /// bevel is where a real glass solid does its lensing, and a hairline one gives
     /// the refraction nothing to bend around.
     private static func glassNode(path: NSBezierPath) -> SCNNode {
@@ -520,20 +526,6 @@ final class IntroAnimation {
             shape.chamferMode = .both
             return shape
         }
-    }
-
-    /// The dot, as a marble. A sphere is the one shape whose whole surface is
-    /// curved, so the refraction sweeps across it continuously as the mark turns —
-    /// the extruded disc it replaced was a puck with two flat faces, and read as a
-    /// short cylinder rather than a lens.
-    private static func dotNode() -> SCNNode {
-        let node = glassPasses {
-            let sphere = SCNSphere(radius: dotRadius)
-            sphere.segmentCount = 72
-            return sphere
-        }
-        node.position = SCNVector3(dotCenter.x, dotCenter.y, 0)
-        return node
     }
 
     /// The fragment stage of the glass: it discards SceneKit's shading entirely and
@@ -665,24 +657,23 @@ final class IntroAnimation {
         return m
     }
 
-    /// The flag: the big square with the bite out of its bottom-right — traced off
-    /// the shipped icon (1024px artwork, ÷10, origin re-centered).
-    private static func flagPath() -> NSBezierPath {
+    /// One eye centred on `centerX`, after `NotchiEyeShape`: a 28/72 radius
+    /// on the top-left and both bottom corners, 10/72 on the top-right.
+    private static func eyePath(centerX: CGFloat) -> NSBezierPath {
+        let w = eyeWidth, h = eyeHeight
+        let minX = centerX - w / 2, maxX = centerX + w / 2
+        let minY = -h / 2, maxY = h / 2
+        let big = min(w / 2, h * 28 / 72)
+        let small = h * 10 / 72
         let path = NSBezierPath()
-        path.move(to: NSPoint(x: -22.2, y: 22.2))
-        path.line(to: NSPoint(x: 7.3, y: 22.2))
-        path.line(to: NSPoint(x: 7.3, y: -7.3))
-        path.line(to: NSPoint(x: -7.5, y: -7.3))
-        path.line(to: NSPoint(x: -7.5, y: -22.1))
-        path.line(to: NSPoint(x: -22.2, y: -22.1))
+        path.move(to: NSPoint(x: centerX, y: minY))
+        path.appendArc(from: NSPoint(x: maxX, y: minY), to: NSPoint(x: maxX, y: maxY), radius: big)
+        path.appendArc(from: NSPoint(x: maxX, y: maxY), to: NSPoint(x: minX, y: maxY), radius: small)
+        path.appendArc(from: NSPoint(x: minX, y: maxY), to: NSPoint(x: minX, y: minY), radius: big)
+        path.appendArc(from: NSPoint(x: minX, y: minY), to: NSPoint(x: centerX, y: minY), radius: big)
         path.close()
         return path
     }
-
-    /// The dot that sits in the bite — centre and radius traced off the same
-    /// artwork as the flag, so the marble lands exactly where the drawn dot is.
-    private static let dotCenter = CGPoint(x: 14.8, y: -14.8)
-    private static let dotRadius: CGFloat = 7.3
 
     // MARK: - Framing
 

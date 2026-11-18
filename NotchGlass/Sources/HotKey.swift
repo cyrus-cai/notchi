@@ -2029,7 +2029,6 @@ enum ReservedAppShortcut {
 /// ⌘V to paste stay fixed: changing those would make the prompt stop behaving
 /// like a Mac text field.
 enum AppShortcutAction: String, CaseIterable, Identifiable, Hashable {
-    case regenerate
     case pin
     case newChat
     case filter
@@ -2050,7 +2049,6 @@ enum AppShortcutAction: String, CaseIterable, Identifiable, Hashable {
 
     var label: String {
         switch self {
-        case .regenerate:  return L("shortcuts.regenerate")
         case .pin:         return L("shortcuts.pin")
         case .newChat:     return L("shortcuts.newChat")
         case .filter:      return L("shortcuts.filter")
@@ -2061,11 +2059,10 @@ enum AppShortcutAction: String, CaseIterable, Identifiable, Hashable {
     }
 
     /// The stable snake_case id the settings tool speaks — chat can say
-    /// "regenerate" in any interface language and land on the same action the
+    /// "pin" in any interface language and land on the same action the
     /// Shortcuts pane edits. Never localized, never renamed.
     var token: String {
         switch self {
-        case .regenerate: return "regenerate"
         case .pin:        return "pin"
         case .newChat:    return "new_chat"
         case .filter:     return "filter"
@@ -2082,7 +2079,6 @@ enum AppShortcutAction: String, CaseIterable, Identifiable, Hashable {
             .replacingOccurrences(of: "-", with: "_")
             .replacingOccurrences(of: " ", with: "_")
         switch token {
-        case "regenerate", "retry": return .regenerate
         case "pin": return .pin
         case "new_chat", "newchat", "new": return .newChat
         case "filter", "search": return .filter
@@ -2096,7 +2092,6 @@ enum AppShortcutAction: String, CaseIterable, Identifiable, Hashable {
 
     var defaultChord: ShortcutChord {
         switch self {
-        case .regenerate:  return ShortcutChord(keyCode: UInt32(kVK_ANSI_R), modifiers: UInt32(cmdKey))
         case .pin:         return ShortcutChord(keyCode: UInt32(kVK_ANSI_P), modifiers: UInt32(cmdKey))
         case .newChat:     return ShortcutChord(keyCode: UInt32(kVK_ANSI_N), modifiers: UInt32(cmdKey))
         case .filter:      return ShortcutChord(keyCode: UInt32(kVK_ANSI_F), modifiers: UInt32(cmdKey))
@@ -2293,13 +2288,11 @@ struct AppShortcutReference {
                   note: summonHotKey.enabled ? nil : L("general.shortcut.off"),
                   editable: .summon),
         ]
-        if DebugFeatureFlags.menuBarCard {
-            summonEntries.append(
-                Entry(L("shortcuts.card"),
-                      SummonHotKey.card.enabled ? [SummonHotKey.card.displayString] : [],
-                      note: SummonHotKey.card.enabled ? nil : L("general.shortcut.off"),
-                      editable: .card))
-        }
+        summonEntries.append(
+            Entry(L("shortcuts.card"),
+                  SummonHotKey.card.enabled ? [SummonHotKey.card.displayString] : [],
+                  note: SummonHotKey.card.enabled ? nil : L("general.shortcut.off"),
+                  editable: .card))
         return [
             Group(title: L("shortcuts.group.summon"), entries: summonEntries),
             Group(title: L("shortcuts.group.prompt"), entries: [
@@ -2312,7 +2305,6 @@ struct AppShortcutReference {
                 Entry(L("shortcuts.pasteImage"), ["⌘V"]),
             ]),
             Group(title: L("shortcuts.group.answer"), entries: [
-                editable(.regenerate),
                 editable(.pin),
                 Entry(L("shortcuts.pinGesture"), [L("result.pinGesture")]),
                 editable(.newChat),

@@ -131,6 +131,13 @@ final class NotchPanel: NSPanel {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
 
+    // AppKit draws Liquid Glass and vibrancy in the inactive (flat grey) state
+    // when the window loses key or Notchi goes to the background. The panel
+    // keeps the active look at all times. Private NSWindow selectors.
+    @objc func _hasActiveAppearance() -> Bool { true }
+    @objc func _hasActiveAppearanceIgnoringKeyFocus() -> Bool { true }
+    @objc func _hasKeyAppearance() -> Bool { true }
+
     /// A field editor took the caret. The LEVEL deliberately doesn't move here —
     /// editing alone doesn't summon a candidate window, and dropping below the menu
     /// bar for a whole typing session is what tore the notch's top open (see

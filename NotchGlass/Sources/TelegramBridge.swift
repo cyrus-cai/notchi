@@ -492,6 +492,17 @@ final class TelegramBridge: ObservableObject {
             return
         }
         let isCommand = text?.hasPrefix("/") == true
+        // Trial ended: no round can run, so say so now instead of waiting out
+        // the burst window and a round that fails.
+        if LicenseLock.isLocked, !isCommand {
+            let messageID = (message["message_id"] as? NSNumber)?.intValue ?? 0
+            Task { [weak self] in
+                await self?.call("sendMessage", ["chat_id": chatID,
+                                                 "text": L("service.error.licenseRequired"),
+                                                 "reply_to_message_id": messageID])
+            }
+            return
+        }
         if isCommand { flushAlbum(chatID: chatID) }
         if !isCommand {
             albums[chatID, default: []].append(message)
@@ -649,7 +660,7 @@ final class TelegramBridge: ObservableObject {
 
         await call("sendChatAction", ["chat_id": chatID, "action": "typing"])
         guard let landed = model.runTelegramRound(threadID: threadID, question: question, images: images) else {
-            await call("sendMessage", ["chat_id": chatID, "text": L("telegram.failed"),
+            await call("sendMessage", ["chat_id": chatID, "text": L(LicenseLock.isLocked ? "service.error.licenseRequired" : "telegram.failed"),
                                        "reply_to_message_id": messageID])
             return
         }
@@ -764,7 +775,11 @@ final class TelegramBridge: ObservableObject {
             ticks += 1
             guard let live = model.liveThread(thread) else {
                 // Not started yet: a round registers on its task's first tick.
-                if !sawLive && ticks < 15 { continue }
+                // A round that already ended (one that failed at once, such as
+                // a locked license) has its answer in history: stop waiting.
+                let landed = model.history.first(where: { $0.id == thread })?.conversation
+                    .contains(where: { $0.role == "assistant" && !seedIDs.contains($0.id) }) ?? false
+                if !sawLive && !landed && ticks < 15 { continue }
                 break
             }
             sawLive = true
@@ -813,9 +828,9 @@ final class TelegramBridge: ObservableObject {
         guard !body.isEmpty || !pictures.isEmpty else {
             if wasStopped { return }
             if let sentID {
-                await call("editMessageText", ["chat_id": chatID, "message_id": sentID, "text": L("telegram.failed")])
+                await call("editMessageText", ["chat_id": chatID, "message_id": sentID, "text": L(LicenseLock.isLocked ? "service.error.licenseRequired" : "telegram.failed")])
             } else {
-                await call("sendMessage", ["chat_id": chatID, "text": L("telegram.failed"), "reply_to_message_id": replyTo])
+                await call("sendMessage", ["chat_id": chatID, "text": L(LicenseLock.isLocked ? "service.error.licenseRequired" : "telegram.failed"), "reply_to_message_id": replyTo])
             }
             return
         }

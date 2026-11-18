@@ -1588,19 +1588,8 @@ final class DetachedSessionWindowController: NSObject, NSWindowDelegate {
                 self.model?.submitDetachedFollowUp(threadID: id, question: line,
                                                    images: images)
             },
-            onRegenerate: { [weak self] in
-                guard let self, let id = self.threadStore?.threadID else { return }
-                self.model?.regenerateDetachedAnswer(threadID: id)
-            },
-            onRegenerateWith: { [weak self] pick in
-                guard let self, let id = self.threadStore?.threadID else { return }
-                self.model?.regenerateDetachedAnswer(threadID: id, model: pick)
-            },
             onChooseOption: { [weak self] questionID, option in
                 self?.model?.chooseUserOption(option, questionID: questionID)
-            },
-            regenerateOptions: { [weak self] in
-                self?.model?.regenerateModelOptions ?? []
             },
             // Enter in the composer: the round runs headless through the panel
             // pipeline and this window becomes the thread it started.
@@ -2096,20 +2085,6 @@ final class DetachedSessionWindowController: NSObject, NSWindowDelegate {
             togglePin()
             return true
         }
-        // ⌘R mirrors the answer footer's regenerate. Guarded on the follow-up
-        // field the way the panel guards its composer: with the caret in text,
-        // ⌘R stays out of the way.
-        if window.firstResponder is NSText { return false }
-        guard let store = threadStore,
-              !store.turns.contains(where: { $0.streaming }) else { return false }
-        if AppShortcutStore.matches(.regenerate, event: event) {
-            // The footer's own gate: only the last settled turn, and never an
-            // agent report (it has no round to re-run).
-            guard let last = store.turns.last, last.role == "assistant",
-                  !last.isAgent else { return false }
-            model?.regenerateDetachedAnswer(threadID: store.threadID)
-            return true
-        }
         return false
     }
 
@@ -2462,10 +2437,7 @@ struct DetachedSessionRootView: View {
     var onInAppCopy: () -> Void = {}
     var onReplaceOriginal: ((String) -> Bool)? = nil
     var onFollowUp: (String, [NSImage]) -> Void = { _, _ in }
-    var onRegenerate: () -> Void = {}
-    var onRegenerateWith: (String) -> Void = { _ in }
     var onChooseOption: (UUID, String) -> Void = { _, _ in }
-    var regenerateOptions: () -> [(model: String, label: String, isCurrent: Bool)] = { [] }
     /// Enter in the composer face: the line and where it reads as going.
     var onCompose: (String, NotchModel.Panel) -> Void = { _, _ in }
     /// The composer's wanted height as its draft wraps — the window follows it.
@@ -2923,10 +2895,7 @@ struct DetachedSessionRootView: View {
                                onInAppCopy: onInAppCopy,
                                onReplaceOriginal: onReplaceOriginal,
                                onFollowUp: onFollowUp,
-                               onRegenerate: onRegenerate,
-                               onRegenerateWith: onRegenerateWith,
                                onChooseOption: onChooseOption,
-                               regenerateOptions: regenerateOptions,
                                compactShortcut: compactShortcut,
                                onDesiredHeight: liveHeight(from: state.session))
         }
@@ -4218,10 +4187,7 @@ struct DetachedThreadView: View {
     var onInAppCopy: () -> Void
     var onReplaceOriginal: ((String) -> Bool)?
     var onFollowUp: (String, [NSImage]) -> Void
-    var onRegenerate: () -> Void
-    var onRegenerateWith: (String) -> Void
     var onChooseOption: (UUID, String) -> Void
-    var regenerateOptions: () -> [(model: String, label: String, isCurrent: Bool)]
     var compactShortcut = false
     var onDesiredHeight: (CGFloat) -> Void = { _ in }
 
@@ -4267,7 +4233,8 @@ struct DetachedThreadView: View {
         let id = store.threadID
         if let loop = agentManager.tasks.first(where: { $0.id == id })?.loop {
             return LoopMenuInfo(intervalMinutes: loop.intervalMinutes, rounds: loop.rounds,
-                                nextRoundAt: loop.nextRoundAt, active: loop.active)
+                                nextRoundAt: loop.nextRoundAt, active: loop.active,
+                                endReason: loop.active ? nil : loop.endReason)
         }
         if let info = model?.dismissedAgentLoopInfo(id) { return info }
         return chatLoops.menuInfo(for: id, turns: chatLoopTurns)
@@ -4963,12 +4930,9 @@ struct DetachedThreadView: View {
     }
 
     /// The panel's full answer view — wait line and the same right-click
-    /// actions the panel offers (copy · plain copy · regenerate · model ⓘ).
-    /// Regenerate belongs only to the last answer and stays disabled while
-    /// that answer is still streaming.
+    /// actions the panel offers (copy, copy as Markdown, model ⓘ).
     private func assistantTurn(_ turn: NotchModel.Turn) -> some View {
         let isLastTurn = store.turns.last?.id == turn.id
-        let canRegenerate = isLastTurn && !turn.isAgent
         return AssistantTurnView(
             text: turn.text,
             streaming: turn.streaming,
@@ -4981,9 +4945,6 @@ struct DetachedThreadView: View {
             completedAt: (turn.isAgent && isLastTurn) ? store.completedAt : nil,
             showsFooterMetadata: !turn.isAgent,
             onInAppCopy: onInAppCopy,
-            onRegenerate: canRegenerate ? onRegenerate : nil,
-            regenerateModels: canRegenerate ? regenerateOptions() : [],
-            onRegenerateWith: canRegenerate ? onRegenerateWith : nil,
             onReply: replyAction(for: turn),
             onDelete: deleteAction(for: turn),
             regenModel: turn.regenModel,

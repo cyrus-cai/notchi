@@ -662,13 +662,13 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
             return
         }
         let window = HistoryArchiveNSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 900, height: 760),
+            contentRect: NSRect(x: 0, y: 0, width: SettingsMetrics.windowWidth, height: 760),
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
         window.title = L("settings.title")
-        StandaloneWindowStyle.apply(to: window, toolbar: "NotchSettingsToolbar")
+        StandaloneWindowStyle.apply(to: window, toolbar: nil)
         window.isReleasedWhenClosed = false
         window.minSize = NSSize(width: 700, height: 480)
         window.onEscape = { [weak window, weak model] in
@@ -688,7 +688,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
             .notchTooltipClipBox())
         window.delegate = self
         window.center()
-        window.setFrameAutosaveName("NotchSettingsWindow.v2")
+        window.setFrameAutosaveName("NotchSettingsWindow.v3")
         self.window = window
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
@@ -707,7 +707,10 @@ private struct SettingsWindowRoot: View {
     var body: some View {
         GeometryReader { proxy in
             let pad = NotchBody.panelPadding
-            let pane = max(200, proxy.size.height - InlineSettingsView.windowChrome - pad)
+            // A pushed page carries the back row under the titlebar, so its pane
+            // gives that height back.
+            let chrome = InlineSettingsView.windowChrome(sectionRaw: model.settingsSection)
+            let pane = max(200, proxy.size.height - chrome - pad)
             InlineSettingsView(model: model)
                 .environment(\.settingsWindowPaneHeight, pane)
                 .padding(.horizontal, pad)
@@ -739,15 +742,17 @@ enum StandaloneWindowStyle {
     /// empty band above the first row.
     static let titleLift: CGFloat = 32
 
-    static func apply(to window: NSWindow, toolbar id: String) {
+    static func apply(to window: NSWindow, toolbar id: String?) {
         window.titlebarAppearsTransparent = true
         window.titleVisibility = .hidden
         // An empty unified toolbar gives the taller titlebar row, so the
         // traffic lights sit level with a header drawn beside them.
-        let toolbar = NSToolbar(identifier: id)
-        toolbar.showsBaselineSeparator = false
-        window.toolbar = toolbar
-        window.toolbarStyle = .unified
+        if let id {
+            let toolbar = NSToolbar(identifier: id)
+            toolbar.showsBaselineSeparator = false
+            window.toolbar = toolbar
+            window.toolbarStyle = .unified
+        }
         // No pinned appearance: the window follows the system's light or dark.
         window.appearance = nil
     }

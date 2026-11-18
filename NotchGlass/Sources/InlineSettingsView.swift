@@ -183,6 +183,7 @@ private struct ConnectorTableRow: View {
     let connector: MCPConnector
     @ObservedObject var auth: MCPConnectorAuth
     @ObservedObject var hub: MCPHub
+    @Environment(\.settingsMetrics) private var metrics
     @State private var hovering = false
 
     var body: some View {
@@ -250,7 +251,7 @@ private struct ConnectorTableRow: View {
         Text(text)
             .font(.sf(Tokens.TypeSize.meta))
             .foregroundStyle(color)
-            .lineLimit(2)
+            .lineLimit(metrics.noteLines(2))
             .textSelection(.enabled)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.leading, 34)
@@ -281,6 +282,8 @@ struct InlineSettingsView: View {
     /// (`SettingsWindowController`); nil inside the panel.
     @Environment(\.settingsWindowPaneHeight) private var windowPaneHeight
     private var inWindow: Bool { windowPaneHeight != nil }
+    /// Spacing, widths and line limits for the frame Settings is drawn in.
+    private var metrics: SettingsMetrics { inWindow ? .window : .panel }
     /// Self-update state (shared app-wide — the gear badge reads the same object).
     /// Drives the Version row: a quiet number normally, an Update action when a
     /// newer release is known.
@@ -581,6 +584,13 @@ struct InlineSettingsView: View {
         case whatsNew = "WhatsNew" // the release notes — reached from About
         var id: String { rawValue }
 
+        /// Panes whose content is a table or a browser: in the window they take
+        /// the pane's full width instead of `SettingsMetrics.contentMaxWidth`.
+        var fillsWindowWidth: Bool {
+            self == .stats || self == .usage || self == .pricing || self == .balances
+                || self == .memory
+        }
+
         /// A sub-page rather than a category: reached from a parent pane, drawn
         /// across the whole panel, and left through the header's back pill or Esc.
         var isDetail: Bool {
@@ -802,6 +812,7 @@ struct InlineSettingsView: View {
     @State private var proxyStatus: String = ""
     /// `WeatherCity`'s storage; the row edits it in place.
     @AppStorage("weather.city") private var weatherCity: String = ""
+    @AppStorage(NotchModel.jevAutoPinKey) private var jevAutoPinEnabled = true
 
     /// Live macOS authorization state for each protected capability the app
     /// uses. Missing entries read as `.checking`. Re-read while the permissions
@@ -827,11 +838,12 @@ struct InlineSettingsView: View {
         VStack(alignment: .leading, spacing: 0) {
             header
 
-            if section.isDetail {
+            if section.isDetail && !inWindow {
                 // A pushed sub-page (the Shortcuts reference under About): the
                 // category column steps aside and the page takes the whole panel,
                 // so it reads as one level deeper rather than another tab. The
-                // header's back pill — now carrying this page's name — walks out.
+                // way back walks out of it: the panel's back pill, or the
+                // window's own circle under the traffic lights (`windowBackRow`).
                 // No `.fixedSize(vertical:)` needed here: alone in the column, the
                 // pane's own exact height (content, capped at Recent's) is the
                 // whole page height.
@@ -840,11 +852,13 @@ struct InlineSettingsView: View {
                         .padding(.horizontal, 8)
                         .padding(.top, 8)
                 }
+                windowBackRow()
                 paneContent
                     // The header's own 8pt side inset, so the page starts
                     // under the back pill's left edge and ends under the pin.
                     .padding(.horizontal, 8)
-                    .padding(.top, 12)
+                    // The window's back row carries its own air below it.
+                    .padding(.top, showsWindowBackRow ? 0 : 12)
             } else {
                 HStack(alignment: .top, spacing: 0) {
                     // The sidebar drops by the pane's runway too, so the first
@@ -854,11 +868,16 @@ struct InlineSettingsView: View {
                     // the visible one is an overlay so it spans the full column
                     // height.
                     sidebar(measuring: true)
-                        .padding(.top, Self.paneTopRunway)
+                        .padding(.top, metrics.paneTopRunway)
                         .hidden()
                         .accessibilityHidden(true)
 
-                    paneContent
+                    VStack(alignment: .leading, spacing: 0) {
+                        // The window keeps its sidebar on a sub-page, so the
+                        // title and back circle sit at the top of the pane.
+                        windowBackRow(leading: 18)
+                        paneContent
+                    }
                         .padding(.leading, 14)
                         .background {
                             // Settings window only: the right pane is a darker
@@ -886,7 +905,7 @@ struct InlineSettingsView: View {
                 }
                 .overlay(alignment: .topLeading) {
                     sidebar()
-                        .padding(.top, Self.paneTopRunway)
+                        .padding(.top, metrics.paneTopRunway)
                 }
                 // Take the columns' own height, nothing more: the pane already
                 // carries an exact height (content, capped at Recent's), so this
@@ -906,7 +925,30 @@ struct InlineSettingsView: View {
         // Only soften the Settings content behind the template picker. A small
         // radius breaks the legibility of the old cards without erasing their
         // shapes or colours, and the modal overlay mounted below stays crisp.
-        .blur(radius: promptTemplatePickerOpen ? 2.5 : 0)
+        .blur(radius: license.locked ? 14 : (promptTemplatePickerOpen ? 2.5 : 0))
+        .allowsHitTesting(!license.locked)
+        // Trial ended: Settings is one page over the blurred panes, with Buy
+        // License and Export your memories. It has no way to close; the back
+        // pill stays, over the blur where the header draws it.
+        .overlay {
+            if license.locked { lockedPage }
+        }
+        // Its own overlay, on the header's frame and insets (`header`), so it
+        // covers the blurred pill exactly.
+        .overlay(alignment: .topLeading) {
+            if license.locked, !inWindow {
+                PanelBackPill(title: L("settings.title"), help: L("settings.back")) {
+                    withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
+                        model.closeSettings()
+                    }
+                }
+                .frame(height: Tokens.Control.header)
+                .padding(.leading, 8)
+                .padding(.top, 12)
+                .transition(.opacity)
+            }
+        }
+        .animation(.easeOut(duration: 0.2), value: license.locked)
         .overlay {
             if promptTemplatePickerOpen {
                 ConfirmationDialogOverlay(
@@ -938,7 +980,7 @@ struct InlineSettingsView: View {
             } else if licenseOfferOpen {
                 // The card itself is in its own window (`LicenseOfferWindow`)
                 // so it can run past the island; here only the dim behind it.
-                Color.black.opacity(0.45)
+                Color.black.opacity(metrics.scrimOpacity)
                     .contentShape(Rectangle())
                     .onTapGesture { closeLicenseOffer() }
                 .padding(.horizontal, -NotchBody.panelPadding)
@@ -1146,6 +1188,24 @@ struct InlineSettingsView: View {
     /// 12pt gap the panel uses.
     static let windowChrome: CGFloat = windowHeaderTop + Tokens.Control.header + 4 + 12
 
+    /// The window's back circle — visibly bigger than the panel's 26pt pill so
+    /// it reads as a button standing on its own line.
+    static let windowBackCircle: CGFloat = 36
+    static let windowBackRowTop: CGFloat = -18
+    static let windowBackRowBottom: CGFloat = 8
+    /// What the back row adds above the pane on a pushed page, over the 12pt gap
+    /// `windowChrome` already counts, so the window shrinks the pane by exactly
+    /// this much and nothing spills past the bottom.
+    static let windowBackRowChrome: CGFloat =
+        windowBackRowTop + windowBackCircle + windowBackRowBottom
+
+    /// `windowChrome` for the section about to be drawn.
+    static func windowChrome(sectionRaw: String) -> CGFloat {
+        let page = Section(rawValue: sectionRaw == "Gifts"
+                           ? Section.balances.rawValue : sectionRaw) ?? .model
+        return windowChrome + (page.parent == nil ? 0 : windowBackRowChrome)
+    }
+
     /// Carries the open pane's measured content height out of the scroll view.
     private struct PaneContentHeightKey: PreferenceKey {
         static let defaultValue: CGFloat = 0
@@ -1181,14 +1241,13 @@ struct InlineSettingsView: View {
     /// bottom's 32pt so both edges of the pane dissolve at the same rate. It only
     /// ever draws while the pane is scrolled (`paneScrolledOffTop`), so at rest
     /// the first row is still fully solid.
-    private static let paneTopRunway: CGFloat = 14
-    private static let paneTopFade: CGFloat = 34
+    // Values: `SettingsMetrics.paneTopRunway` and `.paneTopFade`.
 
     /// The room a group heading takes above itself, on top of the pane's 18pt
     /// row rhythm. A heading opens a group, so its gap above must be visibly
     /// wider than the gap between two rows; without it the next group reads as
     /// more rows of the one before and the whole pane runs together.
-    private static let groupHeadingGap: CGFloat = 24
+    // Value: `SettingsMetrics.groupHeadingGap`.
 
     /// Whether the open pane is scrolled off its top — all the top taper needs to
     /// know. A Bool, not the live offset: driving the gradient's LENGTH from the
@@ -1250,7 +1309,7 @@ struct InlineSettingsView: View {
             // left for a frame.
             ZStack(alignment: .topLeading) {
             ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
+                VStack(alignment: .leading, spacing: metrics.rowSpacing) {
                     // The window names the open category at the top of its
                     // pane; the panel's back pill already says where you are.
                     if inWindow && !section.isDetail {
@@ -1270,7 +1329,7 @@ struct InlineSettingsView: View {
                 // group as the alternative to the wallet above.
                 Text(L("model.byok"))
                     .settingsHeading()
-                    .padding(.top, Self.groupHeadingGap)
+                    .padding(.top, metrics.groupHeadingGap)
                 providerRow
                 // A model list for a provider that cannot answer yet is a choice
                 // with nothing behind it; it appears once the key or sign-in lands.
@@ -1282,7 +1341,7 @@ struct InlineSettingsView: View {
                 // "which model, whose key" choices.
                 Text(L("decision.title"))
                     .settingsHeading()
-                    .padding(.top, Self.groupHeadingGap)
+                    .padding(.top, metrics.groupHeadingGap)
                 decisionModelRow
                 switch decisionModel {
                 case .jev:    EmptyView()
@@ -1297,7 +1356,7 @@ struct InlineSettingsView: View {
                 // group rather than its own category.
                 Text(L("sidebar.search"))
                     .settingsHeading()
-                    .padding(.top, Self.groupHeadingGap)
+                    .padding(.top, metrics.groupHeadingGap)
                 searchBackendRow
                     // No stored pick yet → commit the shown default so the
                     // UI and what actually runs never disagree.
@@ -1333,7 +1392,7 @@ struct InlineSettingsView: View {
                 // mcpSection
                 Text(L("capture.sources"))
                     .settingsHeading()
-                    .padding(.top, Self.groupHeadingGap)
+                    .padding(.top, metrics.groupHeadingGap)
                 copySenseRow
             case .memories:
                 memoryEnableRow
@@ -1349,15 +1408,16 @@ struct InlineSettingsView: View {
                 launchAtLoginRow
                 Text(L("general.appPresence"))
                     .settingsHeading()
-                    .padding(.top, Self.groupHeadingGap)
+                    .padding(.top, metrics.groupHeadingGap)
                 if AppIconStyleFeature.isEnabled {
                     appIconStyleRow
                 }
                 dockIconRow
                 menuBarIconStyleRow
+                jevAutoPinRow
                 Text(L("capture.destination"))
                     .settingsHeading()
-                    .padding(.top, Self.groupHeadingGap)
+                    .padding(.top, metrics.groupHeadingGap)
                 noteDestinationRow
                 permissionsSection
                 advancedSection
@@ -1378,12 +1438,12 @@ struct InlineSettingsView: View {
                 liveActivityRow
                 Text(L("appearance.displays"))
                     .settingsHeading()
-                    .padding(.top, Self.groupHeadingGap)
+                    .padding(.top, metrics.groupHeadingGap)
                 placementRow
                 fullscreenAutoHideRow
                 Text(L("chat.group.effects"))
                     .settingsHeading()
-                    .padding(.top, Self.groupHeadingGap)
+                    .padding(.top, metrics.groupHeadingGap)
                 messageSoundsRow
             case .channels:
                 telegramSection
@@ -1420,7 +1480,13 @@ struct InlineSettingsView: View {
                 EmptyView()
             }
             }
-            .frame(maxWidth: .infinity, alignment: .topLeading)
+            // The window caps how wide rows grow (see `SettingsMetrics`); tables
+            // and the memory browser keep the full width.
+            .frame(maxWidth: section.fillsWindowWidth ? nil : metrics.contentMaxWidth,
+                   alignment: .topLeading)
+            // A window dragged wider than `SettingsMetrics.windowWidth` keeps the
+            // column centred instead of leaving the extra width on one side.
+            .frame(maxWidth: .infinity, alignment: inWindow ? .top : .topLeading)
             // The open pane follows the live measurement; a leaving pane keeps
             // the column it was last measured with (see `LabelColumnFloor`).
             .environment(\.settingsLabelColumn,
@@ -1441,11 +1507,11 @@ struct InlineSettingsView: View {
             // on a stray trackpad nudge instead of the pane's top looking
             // covered. The bottom keeps its own runway — that edge tapers at all
             // times.
-            .padding(.top, Self.paneTopRunway)
+            .padding(.top, metrics.paneTopRunway)
             .padding(.bottom, 20)
             // The window has the room, so its pane keeps more air on both
             // sides than the panel's 14pt gutter can afford.
-            .padding(.horizontal, inWindow ? 18 : 0)
+            .padding(.horizontal, metrics.paneSideInset)
             // Zero-size probe on the scroll CONTENT: it reads the real clip view's
             // offset. Only the crossing matters, so state changes at most once per
             // scroll gesture rather than on every tick.
@@ -1458,7 +1524,7 @@ struct InlineSettingsView: View {
                 // The runway is empty by definition, so the rows only overflow
                 // once they outgrow what is left under it.
                 guard pane == section else { return }
-                let over = height > settingsPaneHeight - Self.paneTopRunway + 0.5
+                let over = height > settingsPaneHeight - metrics.paneTopRunway + 0.5
                 if over != paneOverflows { paneOverflows = over }
             }
             .onPreferenceChange(LabelColumnWidthKey.self) { width in
@@ -1508,7 +1574,7 @@ struct InlineSettingsView: View {
             // `scrollEdgeFade` documents — otherwise it washes out the last 32pt
             // of panes that fit (About's colophon, Stats' bottom card).
             .scrollEdgeFade(top: paneScrolledOffTop, bottom: paneOverflows,
-                            topFade: Self.paneTopFade, bottomFade: 32)
+                            topFade: metrics.paneTopFade, bottomFade: 32)
             // Memory's instruction box and Forget all stay pinned under the
             // pane while the files scroll.
             .overlay(alignment: .bottom) {
@@ -1538,7 +1604,7 @@ struct InlineSettingsView: View {
     /// Width of the category column. The panel's 104pt is what fits beside its
     /// 266pt pane; the window has the room, so its column gets the extra width
     /// and the categories stop crowding the traffic lights side of the header.
-    private var sidebarWidth: CGFloat { inWindow ? 124 : 104 }
+    private var sidebarWidth: CGFloat { metrics.sidebarWidth }
 
     /// `measuring` is the hidden copy that only holds the column's size; it
     /// draws no selection capsule, so the sliding capsule has one source.
@@ -1564,9 +1630,9 @@ struct InlineSettingsView: View {
                 .scrollIndicators(.never)
                 // The pane's tapers: the top one only once the list is scrolled.
                 .scrollEdgeFade(top: sidebarScrolledOffTop, bottom: true,
-                                topFade: Self.paneTopFade, bottomFade: 32)
+                                topFade: metrics.paneTopFade, bottomFade: 32)
             }
-            if license.status != .hidden {
+            if license.showsSettingsEntry {
                 sidebarLicenseItem(measuring: measuring)
                     .padding(.top, 6)
             }
@@ -1612,7 +1678,7 @@ struct InlineSettingsView: View {
     private func sidebarItem(_ s: Section, measuring: Bool) -> some View {
         SidebarItem(
             title: s.title,
-            selected: section == s,
+            selected: section == s || section.parent == s,
             selection: measuring ? nil : sidebarSelection,
             // The gear's update dot continues here: it leads to settings,
             // then the About entry carries it the rest of the way to the
@@ -1636,13 +1702,15 @@ struct InlineSettingsView: View {
     /// one, "License" once it holds one or is included.
     private func sidebarLicenseItem(measuring: Bool) -> some View {
         SidebarItem(
-            title: license.status == .needed ? L("license.sidebar.buy") : L("license.label"),
+            title: license.needsPurchase ? L("license.sidebar.buy") : L("license.label"),
             selected: licenseOfferOpen,
             selection: measuring ? nil : sidebarSelection,
             badged: false,
             isNew: false,
             claim: nil,
-            claimAction: {}
+            claimAction: {},
+            buy: license.needsPurchase,
+            stamp: license.freeForGood || license.key != nil ? L("license.state.activated") : nil
         ) {
             openLicenseOffer()
         }
@@ -1722,6 +1790,10 @@ struct InlineSettingsView: View {
         /// A tag at the row's trailing edge with its own destination.
         var claim: String? = nil
         var claimAction: () -> Void = {}
+        /// The Buy License row, in `LicenseChipSurface`.
+        var buy = false
+        /// The License row once a license is held: a small Activated stamp.
+        var stamp: String? = nil
         var action: () -> Void
 
         @State private var hovering = false
@@ -1740,6 +1812,10 @@ struct InlineSettingsView: View {
                 content
                     .foregroundStyle(ink)
                     .background {
+                        if buy {
+                            Color.clear.licenseChipSurface(Capsule(style: .continuous),
+                                                           hovered: hovering)
+                        }
                         // The hover fill stays on its own row; the selected
                         // fill is one capsule that slides to the new row.
                         Capsule(style: .continuous)
@@ -1771,6 +1847,7 @@ struct InlineSettingsView: View {
                 Text(title)
                     .modifier(SettingsTypeFont(size: SettingsType.label))
                     .lineLimit(1)
+                    .layoutPriority(1)
                 if badged {
                     Circle()
                         .fill(Tokens.text2)
@@ -1783,6 +1860,16 @@ struct InlineSettingsView: View {
             }
             .padding(.horizontal, 10)
             .frame(height: 28)
+            // The stamp takes no width and sits faintly over the row's trailing
+            // side, so the title shows in full under it.
+            .overlay(alignment: .trailing) {
+                if let stamp {
+                    PassportStamp(text: stamp, compact: true)
+                        .opacity(0.6)
+                        .padding(.trailing, 8)
+                        .allowsHitTesting(false)
+                }
+            }
         }
     }
 
@@ -1792,28 +1879,28 @@ struct InlineSettingsView: View {
     /// that's "Settings" → leave settings; on a pushed sub-page it takes the
     /// page's own name and steps back one level to the section that owns it,
     /// so the pill never skips a floor.
+    ///
+    /// The panel's alone. The window keeps its titlebar row for the traffic
+    /// lights and draws its way out of a page under them — see
+    /// `windowBackRow`.
     private var header: some View {
         HStack(spacing: 10) {
-            // In the window, What's New is named under the traffic lights
-            // (see `body`), so the pill names where it goes back to.
-            if inWindow && section == .whatsNew, let parent = section.parent {
-                PanelBackPill(title: parent.title, help: L("navigation.backTo", parent.title)) {
-                    withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) { section = parent }
-                }
-            } else if !inWindow || section.parent != nil {
-            PanelBackPill(
-                title: section.isDetail ? section.title : L("settings.title"),
-                help: section.parent.map { L("navigation.backTo", $0.title) }
-                    ?? L("settings.back")
-            ) {
-                if let parent = section.parent {
-                    withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) { section = parent }
-                } else {
-                    withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
-                        model.closeSettings()
+            if !inWindow {
+                PanelBackPill(
+                    title: section.isDetail ? section.title : L("settings.title"),
+                    help: section.parent.map { L("navigation.backTo", $0.title) }
+                        ?? L("settings.back")
+                ) {
+                    if let parent = section.parent {
+                        withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
+                            section = parent
+                        }
+                    } else {
+                        withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
+                            model.closeSettings()
+                        }
                     }
                 }
-            }
             }
 
             Spacer()
@@ -1826,16 +1913,8 @@ struct InlineSettingsView: View {
 
             // Zero spacing here: the unpinned cluster draws nothing but still
             // takes a slot, and the header's 10pt spacing before it would pull
-            // Receipts in from the table's right edge.
+            // the trailing chrome in from the pane's right edge.
             HStack(spacing: 0) {
-                // Billing history's Receipts link. Receipts need a purchase
-                // behind them; a gift has none.
-                if section == .balances,
-                   balanceLines.contains(where: { $0.kind != .gift }) || license.purchasedAt != nil {
-                    BalancesReceiptsLink { Task { await nono.manageBilling() } }
-                        .padding(.trailing, model.isAnswerPinned ? 10 : 0)
-                }
-
                 // The pin, on the idle prompt's terms — the same `IdleTrailingCluster`
                 // chip, in the same glass: no button at rest (⌘P is the way in), and
                 // the tack appears only once the panel IS pinned, showing the hold and
@@ -1865,6 +1944,58 @@ struct InlineSettingsView: View {
         .padding(.bottom, 4)
         .animation(.easeOut(duration: Tokens.rowFade), value: statsHover)
         .animation(.spring(response: 0.34, dampingFraction: 0.82), value: model.isAnswerPinned)
+    }
+
+    /// Whether this page is a pushed sub-page in the window — the one case with
+    /// somewhere to go back to.
+    private var showsWindowBackRow: Bool { inWindow && section.parent != nil }
+
+    /// System Settings' back / forward capsule: back is live, forward is
+    /// dimmed because a pushed page has nothing ahead of it.
+    private func windowNavPill(parent: Section) -> some View {
+        HStack(spacing: 0) {
+            Button {
+                withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) { section = parent }
+            } label: {
+                Image(systemName: "chevron.left")
+                    .sfFont(Tokens.TypeSize.form, weight: .semibold)
+                    .foregroundStyle(Tokens.text1)
+                    .frame(width: 36, height: Self.windowBackCircle)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(Text(L("navigation.backTo", parent.title)))
+            Rectangle()
+                .fill(Tokens.hairline)
+                .frame(width: 1, height: 18)
+            Image(systemName: "chevron.right")
+                .sfFont(Tokens.TypeSize.form, weight: .semibold)
+                .foregroundStyle(Tokens.text2.opacity(0.4))
+                .frame(width: 36, height: Self.windowBackCircle)
+        }
+        .glassCapsule(in: Capsule(style: .continuous), brighter: false)
+    }
+
+    /// The window's way out of a pushed page, on a line of its own: one plain
+    /// circle under the traffic lights. The pill that used to sit beside them
+    /// crowded the lights, and the titlebar row is the window's chrome, not the
+    /// page's — so the button drops below it and carries the chevron alone.
+    @ViewBuilder
+    private func windowBackRow(leading: CGFloat = 18 + 8) -> some View {
+        if inWindow, let parent = section.parent {
+            HStack(spacing: 0) {
+                windowNavPill(parent: parent)
+                StandaloneWindowTitle(text: section.title)
+                    .padding(.leading, 14)
+                Spacer(minLength: 0)
+            }
+            // The pane's own gutter — 18 inside the window plus the page's 8 —
+            // so the circle sits on the first row's leading edge rather than
+            // the header's inset.
+            .padding(.leading, leading)
+            .padding(.top, Self.windowBackRowTop)
+            .padding(.bottom, Self.windowBackRowBottom)
+        }
     }
 
     /// "Aug 5 · 21 chats · 2 agent runs" — the date, and what actually went
@@ -2151,7 +2282,7 @@ struct InlineSettingsView: View {
             Text(label)
                 .font(.sf(Tokens.TypeSize.form, weight: .regular))
                 .foregroundStyle(Tokens.text2)
-                .frame(width: 64, alignment: .leading)
+                .frame(width: SettingsMetrics.fieldLabelWidth, alignment: .leading)
             // One structure for every state, so the text field keeps its
             // identity and focus while the suffix appears and disappears.
             // A hidden copy of the typed text sizes the field when there is a
@@ -2332,7 +2463,7 @@ struct InlineSettingsView: View {
                 Text(L("model.apiKey"))
                     .font(.sf(Tokens.TypeSize.form, weight: .regular))
                     .foregroundStyle(Tokens.text2)
-                    .frame(width: 64, alignment: .leading)
+                    .frame(width: SettingsMetrics.fieldLabelWidth, alignment: .leading)
 
                 ZStack(alignment: .leading) {
                     if editingKey {
@@ -2412,7 +2543,7 @@ struct InlineSettingsView: View {
                 testVerdict(result)
                     // Indent under the control column so the verdict hangs off the
                     // field it judges, not the label gutter.
-                    .padding(.leading, 76)
+                    .padding(.leading, SettingsMetrics.fieldIndent)
                     .transition(.opacity.combined(with: .move(edge: .top)))
             }
         }
@@ -2465,7 +2596,7 @@ struct InlineSettingsView: View {
                     .font(.sf(Tokens.TypeSize.form, weight: .regular))
                     .foregroundStyle(Tokens.text1)
                     .lineLimit(1)
-                    .frame(width: 100, alignment: .leading)
+                    .frame(width: SettingsMetrics.searchKeyLabelWidth, alignment: .leading)
 
                 ZStack(alignment: .leading) {
                     if editingKeenableKey {
@@ -2523,7 +2654,7 @@ struct InlineSettingsView: View {
                     .font(.sf(Tokens.TypeSize.meta))
                     .foregroundStyle(Tokens.text4)
                     .fixedSize(horizontal: false, vertical: true)
-                    .padding(.leading, 88)
+                    .padding(.leading, SettingsMetrics.searchKeyIndent)
             }
         }
     }
@@ -2549,7 +2680,7 @@ struct InlineSettingsView: View {
                     .font(.sf(Tokens.TypeSize.form, weight: .regular))
                     .foregroundStyle(Tokens.text1)
                     .lineLimit(1)
-                    .frame(width: 100, alignment: .leading)
+                    .frame(width: SettingsMetrics.searchKeyLabelWidth, alignment: .leading)
 
                 ZStack(alignment: .leading) {
                     if editingExaKey {
@@ -2608,7 +2739,7 @@ struct InlineSettingsView: View {
                     .font(.sf(Tokens.TypeSize.meta))
                     .foregroundStyle(Tokens.text4)
                     .fixedSize(horizontal: false, vertical: true)
-                    .padding(.leading, 88)
+                    .padding(.leading, SettingsMetrics.searchKeyIndent)
             }
         }
     }
@@ -2634,7 +2765,7 @@ struct InlineSettingsView: View {
                     .font(.sf(Tokens.TypeSize.form, weight: .regular))
                     .foregroundStyle(Tokens.text1)
                     .lineLimit(1)
-                    .frame(width: 100, alignment: .leading)
+                    .frame(width: SettingsMetrics.searchKeyLabelWidth, alignment: .leading)
 
                 ZStack(alignment: .leading) {
                     if editingAnySearchKey {
@@ -2692,7 +2823,7 @@ struct InlineSettingsView: View {
                     .font(.sf(Tokens.TypeSize.meta))
                     .foregroundStyle(Tokens.text4)
                     .fixedSize(horizontal: false, vertical: true)
-                    .padding(.leading, 88)
+                    .padding(.leading, SettingsMetrics.searchKeyIndent)
             }
         }
     }
@@ -2706,7 +2837,7 @@ struct InlineSettingsView: View {
                     .font(.sf(Tokens.TypeSize.form, weight: .regular))
                     .foregroundStyle(Tokens.text1)
                     .lineLimit(1)
-                    .frame(width: 100, alignment: .leading)
+                    .frame(width: SettingsMetrics.searchKeyLabelWidth, alignment: .leading)
 
                 ZStack(alignment: .leading) {
                     if editingDeepSeekSearchKey {
@@ -2767,7 +2898,7 @@ struct InlineSettingsView: View {
                     .font(.sf(Tokens.TypeSize.meta))
                     .foregroundStyle(Tokens.text4)
                     .fixedSize(horizontal: false, vertical: true)
-                    .padding(.leading, 88)
+                    .padding(.leading, SettingsMetrics.searchKeyIndent)
             }
         }
     }
@@ -2882,6 +3013,46 @@ struct InlineSettingsView: View {
         .task { await nono.load() }
     }
 
+    /// The locked Settings page (`NotchiLicense.locked`): the main action is
+    /// Buy License; the two export links open the memory and chat history folders in Finder.
+    private var lockedPage: some View {
+        ZStack {
+            Color.black.opacity(0.35)
+                .contentShape(Rectangle())
+            VStack(spacing: 18) {
+                Text(L("license.locked.title"))
+                    .font(.sf(Tokens.TypeSize.reading, weight: .medium))
+                    .foregroundStyle(Tokens.text1)
+                    .multilineTextAlignment(.center)
+                VStack(spacing: 14) {
+                    BuyButtonFace(title: L("license.sidebar.buy"), busy: false,
+                                  fullWidth: true, gradient: true) {
+                        openLicenseOffer()
+                    }
+                    HStack(spacing: 16) {
+                        UnderlineLink(title: L("license.locked.export"), external: true) {
+                            NSWorkspace.shared.open(UserMemory.folder)
+                        }
+                        .fixedSize()
+                        // history.json and HistoryImages live in this folder.
+                        UnderlineLink(title: L("license.locked.exportHistory"), external: true) {
+                            let folder = FileManager.default.urls(for: .applicationSupportDirectory,
+                                                                  in: .userDomainMask)[0]
+                                .appendingPathComponent("Notch", isDirectory: true)
+                            NSWorkspace.shared.open(folder)
+                        }
+                        .fixedSize()
+                    }
+                }
+            }
+            .frame(width: 260)
+        }
+        .padding(.horizontal, -NotchBody.panelPadding)
+        .padding(.top, -NotchBody.panelPadding)
+        .padding(.bottom, -NotchBody.panelPadding)
+        .transition(.opacity)
+    }
+
     private func openLicenseOffer(keyField: Bool = false) {
         guard let host = settingsHostWindow.window else { return }
         licenseOfferOpen = true
@@ -2900,7 +3071,7 @@ struct InlineSettingsView: View {
     /// the key (a click copies it) and the stamp: Activated, or Founding
     /// Activated for an account registered before the cutoff.
     private var licensePane: some View {
-        let needed = license.status == .needed
+        let needed = license.needsPurchase
         let stamp: String? = license.freeForGood ? L("license.stamp.founding")
             : (license.key != nil ? L("license.state.activated") : nil)
         return VStack(spacing: 16) {
@@ -2922,7 +3093,7 @@ struct InlineSettingsView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .task { await nono.load() }
         .onChange(of: license.status) { old, new in
-            if old == .needed, case .active = new {
+            if case .active = new, old != new {
                 enteringLicenseKey = false
                 licenseKeyDraft = ""
             }
@@ -2987,7 +3158,7 @@ struct InlineSettingsView: View {
                         if license.phase == .buying {
                             ProgressView().controlSize(.small)
                         } else {
-                            ChipLink(title: L("license.buyShort")) { licenseAction() }
+                            ChipLink(title: L("license.buyShort"), license: true) { licenseAction() }
                                 .padding(.leading, 4)
                         }
                     }
@@ -3001,7 +3172,8 @@ struct InlineSettingsView: View {
                     Text(L("license.offer.body"))
                         .font(.sf(Tokens.TypeSize.meta))
                         .foregroundStyle(Tokens.text3)
-                        .lineLimit(1)
+                        .lineLimit(metrics.noteLines(1))
+                        .fixedSize(horizontal: false, vertical: true)
                         .truncationMode(.tail)
                     Spacer(minLength: 10)
                     UnderlineLink(title: L("license.enterKey")) {
@@ -3016,7 +3188,7 @@ struct InlineSettingsView: View {
             if case .failed(let why) = license.phase {
                 statusPill(ok: false, message: why)
                     .padding(.top, 6)
-            } else if license.awaitingPayment, license.status == .needed {
+            } else if license.awaitingPayment, license.needsPurchase {
                 statusPill(ok: true, message: L("connector.waiting"))
                     .padding(.top, 6)
             }
@@ -3086,7 +3258,7 @@ struct InlineSettingsView: View {
     private func takeKeyEntryRequest() {
         guard license.wantsKeyEntry else { return }
         license.wantsKeyEntry = false
-        if license.status == .needed {
+        if license.needsPurchase {
             openLicenseOffer(keyField: true)
             return
         }
@@ -3159,7 +3331,8 @@ struct InlineSettingsView: View {
     }
 
     /// The head of the Balances page: the balance with Add credit, then the
-    /// ways out (Pricing, Usage, Privacy).
+    /// ways out (Pricing, Usage, Privacy), and on the Balances page itself the
+    /// way to the receipts.
     @ViewBuilder
     private var nonoBalanceDetail: some View {
         if let snapshot = nono.snapshot, !nonoRegistering {
@@ -3182,6 +3355,15 @@ struct InlineSettingsView: View {
                     UnderlineLink(title: L("nono.privacy.link"), external: true) {
                         LinkGate.shared.open(URL(string: "https://www.notch.website/privacy")!)
                     }
+                    // Also outbound, to Stripe's portal. It sits with the other
+                    // ways out rather than alone in the window's titlebar, where
+                    // it was the only thing on the row.
+                    if section == .balances,
+                       balanceLines.contains(where: { $0.kind != .gift }) || license.purchasedAt != nil {
+                        UnderlineLink(title: L("nono.receipts"), external: true) {
+                            Task { await nono.manageBilling() }
+                        }
+                    }
                 }
                 .padding(.top, 10)
                 // The one state the figures cannot explain on their own: there
@@ -3200,9 +3382,6 @@ struct InlineSettingsView: View {
     private func nonoCreditRow(_ snapshot: NoNoAccount.Snapshot) -> some View {
         HStack(alignment: .center, spacing: 8) {
             nonoFigure(snapshot, prominent: true)
-            if snapshot.isEmpty {
-                LowBalanceTag()
-            }
             if !showingAmount {
                 ChipLink(title: L("nono.add")) { showingAmount = true }
                     .padding(.leading, 4)
@@ -3571,7 +3750,7 @@ struct InlineSettingsView: View {
                 Text(L("model.account"))
                     .font(.sf(Tokens.TypeSize.form, weight: .regular))
                     .foregroundStyle(Tokens.text2)
-                    .frame(width: 64, alignment: .leading)
+                    .frame(width: SettingsMetrics.fieldLabelWidth, alignment: .leading)
 
                 if openRouterConnected {
                     // Same masked, read-only summary as the saved key row.
@@ -3621,11 +3800,11 @@ struct InlineSettingsView: View {
 
             if case .failed(let why) = orAuth.phase {
                 statusPill(ok: false, message: why)
-                    .padding(.leading, 76)
+                    .padding(.leading, SettingsMetrics.fieldIndent)
                     .transition(.opacity.combined(with: .move(edge: .top)))
             } else if openRouterConnected, let result = testResult {
                 testVerdict(result)
-                    .padding(.leading, 76)
+                    .padding(.leading, SettingsMetrics.fieldIndent)
                     .transition(.opacity.combined(with: .move(edge: .top)))
             }
         }
@@ -3646,7 +3825,7 @@ struct InlineSettingsView: View {
                 Text(L("model.account"))
                     .font(.sf(Tokens.TypeSize.form, weight: .regular))
                     .foregroundStyle(Tokens.text2)
-                    .frame(width: 64, alignment: .leading)
+                    .frame(width: SettingsMetrics.fieldLabelWidth, alignment: .leading)
 
                 if !installed {
                     // No CLI yet → link to install docs (there's nothing to sign into).
@@ -3671,7 +3850,7 @@ struct InlineSettingsView: View {
                 .font(.sf(Tokens.TypeSize.label))
                 .foregroundStyle(Tokens.text3)
                 .fixedSize(horizontal: false, vertical: true)
-                .padding(.leading, 76)
+                .padding(.leading, SettingsMetrics.fieldIndent)
         }
     }
 
@@ -3691,7 +3870,7 @@ struct InlineSettingsView: View {
                 Text(L("model.account"))
                     .font(.sf(Tokens.TypeSize.form, weight: .regular))
                     .foregroundStyle(Tokens.text2)
-                    .frame(width: 64, alignment: .leading)
+                    .frame(width: SettingsMetrics.fieldLabelWidth, alignment: .leading)
 
                 if !installed {
                     // No CLI yet → link to the install docs.
@@ -3711,7 +3890,7 @@ struct InlineSettingsView: View {
                 .font(.sf(Tokens.TypeSize.label))
                 .foregroundStyle(Tokens.text3)
                 .fixedSize(horizontal: false, vertical: true)
-                .padding(.leading, 76)
+                .padding(.leading, SettingsMetrics.fieldIndent)
         }
     }
 
@@ -3730,7 +3909,7 @@ struct InlineSettingsView: View {
                 Text(L("model.account"))
                     .font(.sf(Tokens.TypeSize.form, weight: .regular))
                     .foregroundStyle(Tokens.text2)
-                    .frame(width: 64, alignment: .leading)
+                    .frame(width: SettingsMetrics.fieldLabelWidth, alignment: .leading)
 
                 if !installed {
                     // No CLI yet → link to install docs (there's nothing to sign into).
@@ -3754,7 +3933,7 @@ struct InlineSettingsView: View {
                 .font(.sf(Tokens.TypeSize.label))
                 .foregroundStyle(Tokens.text3)
                 .fixedSize(horizontal: false, vertical: true)
-                .padding(.leading, 76)
+                .padding(.leading, SettingsMetrics.fieldIndent)
         }
     }
 
@@ -3773,7 +3952,7 @@ struct InlineSettingsView: View {
                 Text(L("model.account"))
                     .font(.sf(Tokens.TypeSize.form, weight: .regular))
                     .foregroundStyle(Tokens.text2)
-                    .frame(width: 64, alignment: .leading)
+                    .frame(width: SettingsMetrics.fieldLabelWidth, alignment: .leading)
 
                 if !installed && !signedIn {
                     // No CLI yet → link to the install docs.
@@ -3822,14 +4001,14 @@ struct InlineSettingsView: View {
                 .font(.sf(Tokens.TypeSize.label))
                 .foregroundStyle(Tokens.text3)
                 .fixedSize(horizontal: false, vertical: true)
-                .padding(.leading, 76)
+                .padding(.leading, SettingsMetrics.fieldIndent)
             if let startupError {
                 Text(startupError)
                     .font(Self.memoryMono)
                     .foregroundStyle(Tokens.text3)
                     .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
-                    .padding(.leading, 76)
+                    .padding(.leading, SettingsMetrics.fieldIndent)
             }
 
             HStack(spacing: 12) {
@@ -3879,7 +4058,7 @@ struct InlineSettingsView: View {
                 Text(L("model.account"))
                     .font(.sf(Tokens.TypeSize.form, weight: .regular))
                     .foregroundStyle(Tokens.text2)
-                    .frame(width: 64, alignment: .leading)
+                    .frame(width: SettingsMetrics.fieldLabelWidth, alignment: .leading)
 
                 if !installed {
                     // No CLI yet → link to the project's install docs.
@@ -3899,7 +4078,7 @@ struct InlineSettingsView: View {
                 .font(.sf(Tokens.TypeSize.label))
                 .foregroundStyle(Tokens.text3)
                 .fixedSize(horizontal: false, vertical: true)
-                .padding(.leading, 76)
+                .padding(.leading, SettingsMetrics.fieldIndent)
         }
     }
 
@@ -3918,7 +4097,7 @@ struct InlineSettingsView: View {
                 Text(L("model.account"))
                     .font(.sf(Tokens.TypeSize.form, weight: .regular))
                     .foregroundStyle(Tokens.text2)
-                    .frame(width: 64, alignment: .leading)
+                    .frame(width: SettingsMetrics.fieldLabelWidth, alignment: .leading)
 
                 if !installed {
                     codexPillButton(L("dsh.status.get")) {
@@ -3943,7 +4122,7 @@ struct InlineSettingsView: View {
                 .font(.sf(Tokens.TypeSize.label))
                 .foregroundStyle(Tokens.text3)
                 .fixedSize(horizontal: false, vertical: true)
-                .padding(.leading, 76)
+                .padding(.leading, SettingsMetrics.fieldIndent)
         }
     }
 
@@ -3978,7 +4157,7 @@ struct InlineSettingsView: View {
                 Text(L("model.account"))
                     .font(.sf(Tokens.TypeSize.form, weight: .regular))
                     .foregroundStyle(Tokens.text2)
-                    .frame(width: 64, alignment: .leading)
+                    .frame(width: SettingsMetrics.fieldLabelWidth, alignment: .leading)
 
                 if !installed {
                     // No CLI yet → link to install docs (there's nothing to sign into).
@@ -4022,7 +4201,7 @@ struct InlineSettingsView: View {
                 .foregroundStyle(outdated || (failure != nil && !signedIn)
                                  ? Tokens.danger : Tokens.text3)
                 .fixedSize(horizontal: false, vertical: true)
-                .padding(.leading, 76)
+                .padding(.leading, SettingsMetrics.fieldIndent)
         }
         // The sign-in lands from a background queue minutes after the click, so the
         // row has to be told; `cliTick` is the redraw.
@@ -4635,6 +4814,21 @@ struct InlineSettingsView: View {
         }
     }
 
+    /// Whether Jev may pin an answer on the menu bar card
+    /// (`NotchModel.judgeCardPin`). On by default.
+    private var jevAutoPinRow: some View {
+        settingRow(label: L("general.jevAutoPin"), info: L("general.jevAutoPin.hint"), aligned: true) {
+            Toggle("", isOn: Binding(
+                get: { jevAutoPinEnabled },
+                set: { Haptics.levelChange(); jevAutoPinEnabled = $0 }
+            ))
+            .labelsHidden()
+            .toggleStyle(.switch)
+            .controlSize(.mini)
+            .tint(Tokens.switchTint)
+        }
+    }
+
     /// Whether the app puts its icon in the menu bar. Shown by default — it's the
     /// one handle that works when the notch is behind a full-screen app and the
     /// summon shortcut has been forgotten. The choice applies immediately
@@ -4990,6 +5184,7 @@ struct InlineSettingsView: View {
                     .font(Self.memoryMono)
                     .foregroundStyle(Tokens.text2)
                     .lineLimit(1)
+                    .truncationMode(.middle)
             }
             .foregroundStyle(Tokens.text3)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -5054,7 +5249,7 @@ struct InlineSettingsView: View {
     /// The two Memory panes' height: the page's own, less its runways, the
     /// pinned footer's room and the gap above it.
     private var memoryPanesHeight: CGFloat {
-        max(160, settingsPaneHeight - Self.paneTopRunway - 20 - 44 - 12)
+        max(160, settingsPaneHeight - metrics.paneTopRunway - 20 - 44 - 12)
     }
 
     /// Asks before forgetting the file (see `memoryForgetTarget`).
@@ -5612,7 +5807,7 @@ struct InlineSettingsView: View {
                 .foregroundStyle(Tokens.text3)
                 .lineLimit(1)
                 .truncationMode(.middle)
-                .padding(.leading, 76)
+                .padding(.leading, SettingsMetrics.fieldIndent)
         }
         decisionField(label: L("decision.key"), placeholder: L("decision.keyPlaceholder"),
                       text: $decisionKey, secure: true) { DecisionEndpoint.apiKey = $0 }
@@ -5622,7 +5817,7 @@ struct InlineSettingsView: View {
             Text(L("decision.incomplete"))
                 .font(.sf(Tokens.TypeSize.meta))
                 .foregroundStyle(Tokens.text3)
-                .padding(.leading, 76)
+                .padding(.leading, SettingsMetrics.fieldIndent)
         }
     }
 
@@ -5646,7 +5841,7 @@ struct InlineSettingsView: View {
         }
         if let result = decisionTestResult {
             statusPill(ok: result.isOK, message: result.isOK ? L("decision.test.ok") : result.message)
-                .padding(.leading, 76)
+                .padding(.leading, SettingsMetrics.fieldIndent)
                 .transition(.opacity.combined(with: .move(edge: .top)))
         }
     }
@@ -6177,7 +6372,7 @@ struct InlineSettingsView: View {
                     Text(reason)
                         .font(.sf(Tokens.TypeSize.meta))
                         .foregroundStyle(Tokens.text3)
-                        .lineLimit(2)
+                        .lineLimit(metrics.noteLines(2))
                         .textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
                     UnderlineLink(title: L("mcp.retry")) { mcp.restart(server.name) }
@@ -8853,7 +9048,7 @@ struct InlineSettingsView: View {
     /// centre itself in the area the table would occupy without pushing the
     /// pane past its height cap (which would switch on the scroll taper).
     private func usagePlaceholderHeight(hasSpent: Bool) -> CGFloat {
-        let body = settingsPaneHeight - Self.paneTopRunway - 20
+        let body = settingsPaneHeight - metrics.paneTopRunway - 20
         return max(0, body - (hasSpent ? 26 : 0))
     }
 
@@ -8896,37 +9091,6 @@ struct InlineSettingsView: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .task { await refreshBalances() }
-    }
-
-    /// Opens the Stripe portal, where each purchase's receipt is. The trailing
-    /// arrow marks it as leaving the app, as About's outbound rows do.
-    private struct BalancesReceiptsLink: View {
-        var title = L("nono.receipts")
-        /// The outbound arrow. Off for a link that stays in the app.
-        var external = true
-        let action: () -> Void
-
-        @State private var hovering = false
-
-        var body: some View {
-            Button(action: action) {
-                HStack(spacing: 6) {
-                    Text(title)
-                        .font(.sf(Tokens.TypeSize.meta, weight: .regular))
-                        .lineLimit(1)
-                    if external {
-                        Image(systemName: "arrow.up.right")
-                            .font(.sf(Tokens.TypeSize.badge, weight: .regular))
-                            .opacity(hovering ? 1 : 0.6)
-                    }
-                }
-                .foregroundStyle(hovering ? Tokens.text1 : Tokens.text3)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain).exemptsDoubleClickPin()
-            .onHover { hovering = $0 }
-            .animation(.easeOut(duration: Tokens.rowFade), value: hovering)
-        }
     }
 
     private var balancesTable: some View {
@@ -9672,7 +9836,7 @@ struct InlineSettingsView: View {
         aligned: Bool = false,
         tag: String? = nil
     ) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
+        VStack(alignment: .leading, spacing: metrics.labelNoteSpacing) {
             HStack(spacing: 3) {
                 Text(label)
                     .modifier(SettingsTypeFont(size: SettingsType.label))
@@ -10095,7 +10259,7 @@ private struct SettingsTypeFont: ViewModifier {
 
     func body(content: Content) -> some View {
         let inWindow = windowPane != nil
-        return content.font(.sf(size + (inWindow ? 1 : 0),
+        return content.font(.sf(size + (inWindow ? SettingsMetrics.window.typeBump : 0),
                                 weight: inWindow ? windowWeight : .regular))
     }
 }
@@ -10226,6 +10390,8 @@ struct UnderlineLink: View {
 /// A text action on a small chip, drawn like the compose bar's Chat word.
 private struct ChipLink: View {
     let title: String
+    /// A Buy License chip: `LicenseChipSurface` instead of the plain fill.
+    var license = false
     let action: () -> Void
 
     @State private var hovering = false
@@ -10239,7 +10405,13 @@ private struct ChipLink: View {
                 .lineLimit(1)
                 .padding(.horizontal, 7)
                 .padding(.vertical, 3.5)
-                .background(shape.fill(Tokens.ink.opacity(hovering ? 0.12 : 0.07)))
+                .background {
+                    if license {
+                        Color.clear.licenseChipSurface(shape, hovered: hovering)
+                    } else {
+                        shape.fill(Tokens.ink.opacity(hovering ? 0.12 : 0.07))
+                    }
+                }
                 .contentShape(shape)
         }
         .buttonStyle(.plain).exemptsDoubleClickPin()
@@ -10547,11 +10719,12 @@ private struct GlassMenuCard: View {
 /// around the thumbnail when it is the current choice. Every picture picker
 /// in Settings uses this.
 private struct PickerCard<Content: View>: View {
-    /// The chosen card's ring: white on dark; the app's blue on light, where
-    /// a black ring reads as a heavy outline.
+    /// The chosen card's ring: white on dark; the app's blue at half strength
+    /// on light, where a black ring reads as a heavy outline and the full
+    /// blue read too dark.
     static var selectionRing: Color {
         Tokens.adaptive(dark: .white.withAlphaComponent(0.75),
-                        light: NSColor(Tokens.accent))
+                        light: NSColor(Tokens.accent).withAlphaComponent(0.5))
     }
     let selected: Bool
     let label: String
@@ -11164,6 +11337,73 @@ extension EnvironmentValues {
     }
 }
 
+/// Layout numbers for Settings, one set per frame it is drawn in. The panel's
+/// pane is about 420pt wide and capped at 270pt tall; the window's is about
+/// 680pt wide and fills the window's height. The window keeps rows at a
+/// readable width and uses the extra height for spacing.
+struct SettingsMetrics {
+    /// Widest a pane's rows grow; nil fills the pane.
+    let contentMaxWidth: CGFloat?
+    /// Space between two rows in a pane.
+    let rowSpacing: CGFloat
+    /// Extra space above a group heading, on top of `rowSpacing`.
+    let groupHeadingGap: CGFloat
+    /// Space between a row's label and its description line.
+    let labelNoteSpacing: CGFloat
+    /// Empty inset above a pane's first row.
+    let paneTopRunway: CGFloat
+    /// Length of the top fade while a pane is scrolled.
+    let paneTopFade: CGFloat
+    /// Side inset of the pane's rows.
+    let paneSideInset: CGFloat
+    /// Width of the category column.
+    let sidebarWidth: CGFloat
+    /// Points added to every step of the settings type ladder.
+    let typeBump: CGFloat
+    /// Whether status and error notes show in full instead of their panel line limit.
+    let notesUnclamped: Bool
+    /// Opacity of the dim behind a confirmation card.
+    let scrimOpacity: Double
+
+    static let panel = SettingsMetrics(
+        contentMaxWidth: nil, rowSpacing: 18, groupHeadingGap: 24,
+        labelNoteSpacing: 2, paneTopRunway: 14, paneTopFade: 34,
+        paneSideInset: 0, sidebarWidth: 104, typeBump: 0,
+        notesUnclamped: false, scrimOpacity: 0.45)
+
+    static let window = SettingsMetrics(
+        contentMaxWidth: 560, rowSpacing: 22, groupHeadingGap: 32,
+        labelNoteSpacing: 4, paneTopRunway: 24, paneTopFade: 20,
+        paneSideInset: 18, sidebarWidth: 124, typeBump: 1,
+        notesUnclamped: true, scrimOpacity: 0.25)
+
+    /// `panel` for a note that the panel clamps to `lines`; nil in the window.
+    func noteLines(_ lines: Int) -> Int? { notesUnclamped ? nil : lines }
+
+    /// Label column of the key section's text fields, and where notes under
+    /// those fields start (the label plus the row's 12pt gap).
+    static let fieldLabelWidth: CGFloat = 64
+    static let fieldIndent: CGFloat = fieldLabelWidth + 12
+    /// Label column of the search-key rows, and the indent of their notes.
+    static let searchKeyLabelWidth: CGFloat = 100
+    static let searchKeyIndent: CGFloat = 88
+
+    /// The Settings window's opening width: exactly the sidebar and a full
+    /// `contentMaxWidth` column, so the pane has no empty strip on the right.
+    /// Window gutters 15 + 15, sidebar and its 12pt gap, the pane's 14pt
+    /// leading inset, and the pane's side insets.
+    static let windowWidth: CGFloat = 15 * 2 + window.sidebarWidth + 12 + 14
+        + window.paneSideInset * 2 + (window.contentMaxWidth ?? 560)
+}
+
+extension EnvironmentValues {
+    /// `SettingsMetrics` for the frame Settings is drawn in, read from
+    /// `settingsWindowPaneHeight`.
+    var settingsMetrics: SettingsMetrics {
+        settingsWindowPaneHeight != nil ? .window : .panel
+    }
+}
+
 private extension EnvironmentValues {
     /// The open Settings pane's shared label column width; 0 until measured.
     var settingsLabelColumn: CGFloat {
@@ -11190,6 +11430,11 @@ extension InlineSettingsView {
     @MainActor static func _debugLicenseRow(model: NotchModel, entering: Bool = false) -> some View {
         _debugEntering = entering
         return InlineSettingsView(model: model).licenseRow
+    }
+
+    @MainActor static func _debugLicensePane(model: NotchModel) -> some View {
+        _debugEntering = false
+        return InlineSettingsView(model: model).licensePane
     }
 }
 #endif

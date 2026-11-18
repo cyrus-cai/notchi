@@ -671,6 +671,8 @@ final class AgentTaskManager: ObservableObject {
         /// Set while the Routines switch has the loop off: when its next round
         /// was due, so switching it back on keeps the same schedule.
         var pausedSlot: Date? = nil
+        /// Why the loop stopped; nil while it runs.
+        var endReason: LoopEndReason? = nil
     }
 
     /// One agent task, live or finished. The manager keeps every undismissed
@@ -840,6 +842,10 @@ final class AgentTaskManager: ObservableObject {
     private static let stoppedLoopsKey = "notch_agent_stopped_loops"
     private lazy var stoppedLoopIntervals: [String: Int] =
         (UserDefaults.standard.dictionary(forKey: Self.stoppedLoopsKey) as? [String: Int]) ?? [:]
+    /// Why each stopped loop stopped, keyed like `stoppedLoopIntervals`.
+    private static let stoppedLoopReasonsKey = "notch_agent_stopped_loop_reasons"
+    private lazy var stoppedLoopReasons: [String: String] =
+        (UserDefaults.standard.dictionary(forKey: Self.stoppedLoopReasonsKey) as? [String: String]) ?? [:]
 
     private struct PersistedAgentLoop: Codable {
         let id: UUID
@@ -961,7 +967,7 @@ final class AgentTaskManager: ObservableObject {
         launch(taskID: t.id, binary: binary, engine: engine, folder: folder,
                prompt: prompt, model: model, effort: effort,
                imagesJPEG: imagesJPEG, resumeSession: nil,
-               wireSuffix: loopMinutes.map { LoopInterval.agentWireSuffix(minutes: $0) },
+               wireSuffix: loopMinutes.map { LoopInterval.wireSuffix(minutes: $0, round: 1) },
                loopRound: loopMinutes == nil ? nil : 1)
         return t.id
     }
@@ -1017,6 +1023,7 @@ final class AgentTaskManager: ObservableObject {
             pendingFollowUps[t.id] = nil
             tasks[i].loop?.active = false
             tasks[i].loop?.nextRoundAt = nil
+            tasks[i].loop?.endReason = .failed
             persistActiveLoops()
             return
         }
@@ -1046,7 +1053,7 @@ final class AgentTaskManager: ObservableObject {
                imagesJPEG: imagesJPEG, resumeSession: t.sessionID,
                promptMarkerID: markerID,
                wireSuffix: loopRound == nil ? nil
-                   : t.loop.map { LoopInterval.agentWireSuffix(minutes: $0.intervalMinutes) },
+                   : t.loop.map { LoopInterval.wireSuffix(minutes: $0.intervalMinutes, round: loopRound) },
                loopRound: loopRound)
     }
 
@@ -2018,8 +2025,15 @@ final class AgentTaskManager: ObservableObject {
         for t in tasks {
             guard let loop = t.loop else { continue }
             stoppedLoopIntervals[t.id.uuidString] = loop.active ? nil : loop.intervalMinutes
+            stoppedLoopReasons[t.id.uuidString] = loop.active ? nil : loop.endReason?.rawValue
         }
         UserDefaults.standard.set(stoppedLoopIntervals, forKey: Self.stoppedLoopsKey)
+        UserDefaults.standard.set(stoppedLoopReasons, forKey: Self.stoppedLoopReasonsKey)
+    }
+
+    /// Why a stopped loop stopped, if it was stopped since this was kept.
+    func stoppedLoopReason(taskID: UUID) -> LoopEndReason? {
+        stoppedLoopReasons[taskID.uuidString].flatMap(LoopEndReason.init(rawValue:))
     }
 
     /// The interval a stopped loop ran at, if it was stopped since this was kept.
@@ -2029,6 +2043,9 @@ final class AgentTaskManager: ObservableObject {
 
     /// The thread was deleted from Recent.
     func forgetStoppedLoop(taskID: UUID) {
+        if stoppedLoopReasons.removeValue(forKey: taskID.uuidString) != nil {
+            UserDefaults.standard.set(stoppedLoopReasons, forKey: Self.stoppedLoopReasonsKey)
+        }
         guard stoppedLoopIntervals.removeValue(forKey: taskID.uuidString) != nil else { return }
         UserDefaults.standard.set(stoppedLoopIntervals, forKey: Self.stoppedLoopsKey)
     }
@@ -2302,19 +2319,23 @@ final class AgentTaskManager: ObservableObject {
 
         // Where the loop stands after this round — decided before the record is
         // filed and the banner posted, since both say whether it goes on. A stop
-        // by hand ends it quietly; the agent's done marker ends it with a
-        // banner. A failed round does not.
-        var loopEnded = false
+        // by hand ends it quietly; the agent's done marker pauses it on its
+        // schedule with a banner that asks the user. A failed round does not.
+        var loopPaused = false
         if var loop = t.loop, loop.active {
             if t.outcome == .cancelled && run.interruptPrompt == nil {
                 loop.active = false
+                loop.endReason = .stopped
             } else if t.interrupted {
                 // The round died with the app (quit, crash, kill), not on its
                 // own merits. The loop outlives the process — it waits out the
                 // interval and runs the next round.
             } else if run.loopRound != nil && loopDone {
                 loop.active = false
-                loopEnded = true
+                loop.pausedSlot = Date().addingTimeInterval(TimeInterval(loop.intervalMinutes * 60))
+                loop.nextRoundAt = nil
+                loop.endReason = .doneSuggested
+                loopPaused = true
             }
             t.loop = loop
         }
@@ -2342,8 +2363,8 @@ final class AgentTaskManager: ObservableObject {
             var subtitle: String? = nil
             var silent = false
             if let loop = t.loop {
-                if loopEnded {
-                    subtitle = L("notify.loop.ended", loop.rounds)
+                if loopPaused {
+                    subtitle = L("notify.loop.doneSuggested")
                 } else if loop.active, let round = run.loopRound {
                     subtitle = L("notify.loop.round", round)
                     silent = true
@@ -2420,6 +2441,8 @@ final class AgentTaskManager: ObservableObject {
         guard let i = taskIndex(taskID), tasks[i].loop != nil else { return }
         tasks[i].loop?.active = false
         tasks[i].loop?.nextRoundAt = nil
+        tasks[i].loop?.pausedSlot = nil
+        tasks[i].loop?.endReason = .stopped
         persistActiveLoops()
         if tasks[i].isRunning { cancel(taskID: taskID) }
     }
@@ -2430,6 +2453,8 @@ final class AgentTaskManager: ObservableObject {
         guard let i = taskIndex(taskID), let loop = tasks[i].loop, !loop.active
         else { return }
         tasks[i].loop?.active = true
+        tasks[i].loop?.pausedSlot = nil
+        tasks[i].loop?.endReason = nil
         tasks[i].loop?.startedAt = Date()
         persistActiveLoops()
         if !tasks[i].isRunning { scheduleLoopRound(taskID, at: Date()) }
@@ -2445,6 +2470,7 @@ final class AgentTaskManager: ObservableObject {
             ?? tasks[i].startedAt.addingTimeInterval(TimeInterval(loop.intervalMinutes * 60))
         tasks[i].loop?.active = false
         tasks[i].loop?.nextRoundAt = nil
+        tasks[i].loop?.endReason = .paused
         persistActiveLoops()
     }
 
@@ -2455,6 +2481,7 @@ final class AgentTaskManager: ObservableObject {
         let next = LoopInterval.nextSlot(from: loop.pausedSlot, minutes: loop.intervalMinutes)
         tasks[i].loop?.active = true
         tasks[i].loop?.pausedSlot = nil
+        tasks[i].loop?.endReason = nil
         tasks[i].loop?.startedAt = Date()
         persistActiveLoops()
         if !tasks[i].isRunning { scheduleLoopRound(taskID, at: next) }

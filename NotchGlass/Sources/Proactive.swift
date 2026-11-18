@@ -6,25 +6,29 @@ import SwiftUI
 // MARK: - Level
 
 /// How often Notchi writes to the user without being asked (Settings → Chat).
-/// Each level adds sources to the one before it and raises the daily limit.
+/// Each level adds sources to the one before it and raises the daily limit;
+/// `frequent` has no daily limit.
 ///
 ///   - `minimal`: a reminder that is due, a calendar event about to start.
 ///   - `balanced`: also the things the user said they would do by a time
 ///     (`ProactiveEngine.considerFollowUp`).
-///   - `frequent`: the same sources, checked in on sooner and more often.
+///   - `frequent`: also anything from a conversation worth checking back on,
+///     with or without a time, shaped by how the user answered earlier ones
+///     (`ProactiveEngine.outcomes`).
 enum ProactiveLevel: String, CaseIterable, Identifiable {
     case off, minimal, balanced, frequent
 
     var id: String { rawValue }
     var label: String { L("proactive.level.\(rawValue)") }
 
-    /// Messages in any 24 hours, every source counted.
+    /// Messages in any 24 hours, every source counted. `frequent` has none:
+    /// the user's replies set its pace (`ProactiveEngine.followUpGap`).
     var dailyCap: Int {
         switch self {
         case .off: return 0
         case .minimal: return 3
         case .balanced: return 6
-        case .frequent: return 15
+        case .frequent: return .max
         }
     }
 
@@ -33,6 +37,10 @@ enum ProactiveLevel: String, CaseIterable, Identifiable {
     var followUpGap: TimeInterval {
         self == .frequent ? 15 * 60 : 60 * 60
     }
+
+    /// Follow-ups on any topic, not only things the user said they would do
+    /// by a time.
+    var followsUpAnything: Bool { self == .frequent }
 
     var followsUp: Bool { self == .balanced || self == .frequent }
 
@@ -107,6 +115,29 @@ final class ProactiveEngine: ObservableObject {
         }
     }
 
+    /// A message Notchi sent on its own and what the user did with it. The
+    /// last `outcomeLimit` go into the follow-up prompt, so what Notchi
+    /// writes next follows what the user answered and what they let pass.
+    struct Outcome: Codable, Equatable {
+        var text: String
+        var sentAt: Date
+        /// The user's next message in that thread, when they wrote one
+        /// within `replyWindow`.
+        var reply: String?
+    }
+
+    private(set) var outcomes: [Outcome] = [] {
+        didSet {
+            guard outcomes != oldValue else { return }
+            UserDefaults.standard.set(try? JSONEncoder().encode(outcomes), forKey: Self.outcomesKey)
+        }
+    }
+
+    private static let outcomesKey = "proactive.outcomes"
+    private static let outcomeLimit = 20
+    /// How long after a message the user's next one counts as the reply to it.
+    private static let replyWindow: TimeInterval = 6 * 3600
+
     private static let followUpsKey = "proactive.followUps"
     private static let sentAtKey = "proactive.sentAt"
     private static let seenKey = "proactive.seen"
@@ -131,6 +162,10 @@ final class ProactiveEngine: ObservableObject {
         if let data = UserDefaults.standard.data(forKey: Self.followUpsKey),
            let saved = try? JSONDecoder().decode([FollowUp].self, from: data) {
             followUps = saved
+        }
+        if let data = UserDefaults.standard.data(forKey: Self.outcomesKey),
+           let saved = try? JSONDecoder().decode([Outcome].self, from: data) {
+            outcomes = saved
         }
     }
 
@@ -175,7 +210,7 @@ final class ProactiveEngine: ObservableObject {
     }
 
     private func tick() {
-        guard level != .off, !ticking, model != nil else { return }
+        guard level != .off, !ticking, model != nil, !LicenseLock.isLocked else { return }
         ticking = true
         Task { [weak self] in
             guard let self else { return }
@@ -207,6 +242,8 @@ final class ProactiveEngine: ObservableObject {
                 else { return }
                 seen[candidate.key] = now
                 self.sentDates = self.sentDates + [now]
+                self.outcomes = Array((self.outcomes + [Outcome(text: candidate.text, sentAt: now)])
+                    .suffix(Self.outcomeLimit))
                 if let id = candidate.followUp { self.followUps.removeAll { $0.id == id } }
                 // One message a minute at most.
                 return
@@ -218,10 +255,47 @@ final class ProactiveEngine: ObservableObject {
         let sent = sentDates
         guard sent.count < level.dailyCap else { return false }
         if candidate.followUp != nil, let last = sent.last,
-           now.timeIntervalSince(last) < level.followUpGap {
+           now.timeIntervalSince(last) < followUpGap(now: now) {
             return false
         }
         return true
+    }
+
+    /// The level's gap, doubled for each message in a row the user let pass,
+    /// up to eight hours. One reply brings it back.
+    private func followUpGap(now: Date) -> TimeInterval {
+        var ignored = 0
+        for outcome in outcomes.reversed() {
+            if outcome.reply != nil { break }
+            if now.timeIntervalSince(outcome.sentAt) >= Self.replyWindow { ignored += 1 }
+        }
+        return min(level.followUpGap * pow(2, Double(min(ignored, 5))), 8 * 3600)
+    }
+
+    /// The user wrote `reply` right after Notchi's own message `to`: keep it as
+    /// that message's outcome. Called from `NotchModel` after the round.
+    func noteReply(to text: String, reply: String) {
+        guard let i = outcomes.lastIndex(where: { $0.text == text }), outcomes[i].reply == nil,
+              Date().timeIntervalSince(outcomes[i].sentAt) < Self.replyWindow else { return }
+        outcomes[i].reply = String(reply.trimmingCharacters(in: .whitespacesAndNewlines).prefix(300))
+    }
+
+    /// The outcomes as lines for the follow-up prompt.
+    private func outcomeLines(now: Date) -> String {
+        let stamp = DateFormatter()
+        stamp.locale = Locale(identifier: "en_US_POSIX")
+        stamp.dateFormat = "MM-dd HH:mm"
+        return outcomes.compactMap { o in
+            let result: String
+            if let reply = o.reply {
+                result = "they replied: \"\(reply)\""
+            } else if now.timeIntervalSince(o.sentAt) >= Self.replyWindow {
+                result = "no reply"
+            } else {
+                return nil
+            }
+            return "- \(stamp.string(from: o.sentAt)) you wrote: \"\(o.text)\" → \(result)"
+        }.joined(separator: "\n")
     }
 
     /// Jev's score for sending `candidate` now, or nil when there is none: no
@@ -386,16 +460,31 @@ final class ProactiveEngine: ObservableObject {
     /// something they mean to do by then, and store the line to send at that
     /// time. One request, on the model that answers background questions.
     func considerFollowUp(question: String, answer: String, filedSomething: Bool, service: AIService) {
-        guard level.followsUp, !filedSomething, !(service is StubAIService) else { return }
+        guard level.followsUp, !(service is StubAIService), !LicenseLock.isLocked else { return }
+        let anything = level.followsUpAnything
         let asked = question.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard (4...600).contains(asked.count), RemindersService.futureDate(in: asked) != nil
-        else { return }
+        guard (2...600).contains(asked.count) else { return }
+        if !anything {
+            guard !filedSomething, RemindersService.futureDate(in: asked) != nil else { return }
+        }
         let now = Date()
         let clock = DateFormatter()
         clock.locale = Locale(identifier: "en_US_POSIX")
         clock.dateFormat = "yyyy-MM-dd HH:mm EEEE"
-        let prompt = "Now: \(clock.string(from: now)) (\(TimeZone.current.identifier))\n\n"
-            + "User: \(asked)\n\nAssistant: \(String(answer.prefix(600)))"
+        var prompt = "Now: \(clock.string(from: now)) (\(TimeZone.current.identifier))\n\n"
+        if anything {
+            let history = outcomeLines(now: now)
+            if !history.isEmpty {
+                prompt += "Messages you sent on your own before, and what the user did with them:\n"
+                    + history + "\n\n"
+            }
+            let pending = followUps.map { "- \(clock.string(from: $0.fireAt)): \($0.text)" }
+            if !pending.isEmpty {
+                prompt += "Already scheduled:\n" + pending.joined(separator: "\n") + "\n\n"
+            }
+        }
+        prompt += "User: \(asked)\n\nAssistant: \(String(answer.prefix(600)))"
+        let system = anything ? openFollowUpSystemPrompt : followUpSystemPrompt
         Task { [weak self] in
             var reply = ""
             do {
@@ -403,7 +492,7 @@ final class ProactiveEngine: ObservableObject {
                     NoNoRequestContext.$current.withValue(
                         NoNoRequestContext(surface: NoNoRequestContext.suggest)
                     ) {
-                        service.stream(system: followUpSystemPrompt,
+                        service.stream(system: system,
                                        messages: [ChatMessage(role: "user", content: prompt)])
                     }
                 }
@@ -460,6 +549,34 @@ no time; 09:00 on the day of a deadline. TEXT is the one short sentence to \
 send at that time, in the language the user wrote in, naming the thing and its \
 time as it will read then ("today", not "Friday"). No greeting, and no offer \
 to set a reminder.
+"""
+
+/// The `frequent` level's prompt: any topic is fair, and the user's answers to
+/// earlier messages decide what and when.
+let openFollowUpSystemPrompt = """
+You are Notchi, a Mac assistant that also writes to the user on its own. Below \
+is one exchange with the user. Decide whether there is something in it worth \
+coming back to later, unprompted: how something they are working on, deciding, \
+waiting for, learning, fixing or worried about turned out; a next step they \
+are likely to need; a thing they said they would do. Any topic counts. It does \
+not need a time.
+
+Use what the user did with your earlier messages. Write more of the kinds they \
+replied to. Write fewer of the kinds they let pass, and none of a kind they \
+told you to stop. Space messages out more when several in a row got no reply. \
+Do not repeat or overlap anything already scheduled. Reply NONE for small \
+talk, a question already fully answered, or anything the assistant's reply \
+already set a reminder or an event for.
+
+Reply NONE, or exactly these two lines and nothing else:
+AT: yyyy-MM-dd HH:mm
+TEXT: <one or two short sentences>
+
+AT is local time, when to write: when the outcome is likely known, or when the \
+next step is due; for a stated time, that time; not between 23:00 and 08:00. \
+Resolve relative dates against Now. TEXT is what to send then, in the language \
+the user wrote in, naming the thing so it reads clearly on its own then. Ask \
+how it went or offer the next step. No greeting.
 """
 
 // MARK: - Resting ear

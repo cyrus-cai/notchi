@@ -112,6 +112,21 @@ done
 info "Installing to ${INSTALL_DIR}…"
 ditto "$src" "$dest" || die "Could not copy into ${INSTALL_DIR}."
 
+# --- LaunchServices --------------------------------------------------------
+# Every build of the app (DerivedData, build/…) registers under the same bundle
+# id. A notification tap launches whichever copy LaunchServices picks, which
+# can be one of those builds instead of the installed app. Keep only $dest.
+LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
+if [ -x "$LSREGISTER" ]; then
+  "$LSREGISTER" -dump 2>/dev/null \
+    | sed -n "s|^path: *\(.*/${APP_NAME}\) (0x[0-9a-f]*)\$|\1|p" | sort -u \
+    | while IFS= read -r p; do
+        [ "$p" = "$dest" ] && continue
+        "$LSREGISTER" -u "$p" 2>/dev/null || true
+      done
+  "$LSREGISTER" -f "$dest" 2>/dev/null || true
+fi
+
 # --- relaunch --------------------------------------------------------------
 # `open` can fail with -600 (procNotFound) right after the swap: LaunchServices
 # is sometimes still tearing down its record of the instance we just killed and

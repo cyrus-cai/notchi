@@ -125,16 +125,9 @@ final class MenuBarController: NSObject, NSMenuDelegate {
             button.imagePosition = .imageOnly
             button.toolTip = "Notchi"
             button.setAccessibilityLabel("Notchi")
-            if DebugFeatureFlags.menuBarCard {
-                button.target = self
-                button.action = #selector(statusItemClicked)
-                button.sendAction(on: [.leftMouseUp, .rightMouseUp])
-            }
-        }
-        if !DebugFeatureFlags.menuBarCard {
-            let menu = NSMenu()
-            menu.delegate = self
-            item.menu = menu
+            button.target = self
+            button.action = #selector(statusItemClicked)
+            button.sendAction(on: [.leftMouseUp, .rightMouseUp])
         }
         statusItem = item
     }
@@ -419,6 +412,17 @@ enum MenuBarIconVisibility: String, CaseIterable, Identifiable {
     }
 
     private static let key = "menuBarIconVisibility"
+    private static let menuBarModeKey = "menuBarIconVisibility.menuBarMode"
+
+    /// 0.9.40 introduces menu bar mode: an icon that was hidden is shown once,
+    /// so clicking it opens the card. Its style stays the user's, the eyes by
+    /// default. Turning it off again afterwards sticks.
+    static func showOnceForMenuBarMode() {
+        let defaults = UserDefaults.standard
+        guard !defaults.bool(forKey: menuBarModeKey) else { return }
+        defaults.set(true, forKey: menuBarModeKey)
+        if current == .hidden { current = .shown }
+    }
     static var current: MenuBarIconVisibility {
         get {
             UserDefaults.standard.string(forKey: key)
@@ -448,7 +452,7 @@ enum MenuBarIconStyle: String, CaseIterable, Identifiable {
     static var current: MenuBarIconStyle {
         get {
             UserDefaults.standard.string(forKey: key)
-                .flatMap(MenuBarIconStyle.init) ?? .mark
+                .flatMap(MenuBarIconStyle.init) ?? .face
         }
         set {
             UserDefaults.standard.set(newValue.rawValue, forKey: key)

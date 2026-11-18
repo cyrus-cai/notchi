@@ -17,6 +17,9 @@ struct NotchBody: View {
     /// The agent-Codex run (XII: agent-to-Codex) — observed so the idle
     /// view's task card tracks progress live and flips to the result on finish.
     @ObservedObject private var agentManager = AgentTaskManager.shared
+    /// Past the trial with no license the prompt takes no input and the bucket
+    /// row carries a License chip (`licenseCue`).
+    @ObservedObject private var license = NotchiLicense.shared
     @ObservedObject private var chatLoops = ChatLoopManager.shared
     /// The model catalog behind the ⌘⇧I picker — the same store Settings' chip reads,
     /// so a list fetched on one surface is already warm on the other.
@@ -128,6 +131,11 @@ struct NotchBody: View {
     @State private var updateCueIdleHovered = false
     /// Cursor over the bucket row's grant chip (see `giftCue`).
     @State private var giftCueHovered = false
+    @State private var licenseCueHovered = false
+    /// The passport (`LicenseOfferWindow`) is up over this panel.
+    @State private var licenseOfferOpen = false
+    /// The window this body is drawn in: the passport opens over it.
+    @State private var hostWindow = HostWindowBox()
     @State private var updateCueBarHovered = false
     /// A thread opened by a prompt shortcut keeps its follow-up input folded into a
     /// small floating button (see `followUpChip`) until this flips — the run is a
@@ -367,7 +375,7 @@ struct NotchBody: View {
                     .overlay {
                         if model.showRoutines {
                             GeometryReader { geo in
-                                RoutinesPanel(tab: $model.sidePageTab, onClose: {
+                                RoutinesPanel(tab: model.sidePageTab, onClose: {
                                     withAnimation(.spring(response: 0.4, dampingFraction: 0.86)) {
                                         model.showRoutines = false
                                     }
@@ -475,6 +483,21 @@ struct NotchBody: View {
     var body: some View {
         panelWithPickerState
         .environment(\.textScale, textScale)
+        .background(HostWindowProbe(box: hostWindow))
+        // The passport is in its own window; here only the dim behind it, as
+        // in Settings.
+        .overlay {
+            if licenseOfferOpen {
+                Color.black.opacity(0.45)
+                    .contentShape(Rectangle())
+                    .onTapGesture { closeLicenseOffer() }
+                    .transition(.opacity)
+            }
+        }
+        .animation(.easeOut(duration: 0.16), value: licenseOfferOpen)
+        .onChange(of: model.open) { _, isOpen in
+            if !isOpen, licenseOfferOpen { closeLicenseOffer() }
+        }
         .onChange(of: model.open) { _, isOpen in
             if isOpen {
                 refocusInput()
@@ -655,7 +678,19 @@ struct NotchBody: View {
                 // result page — see `mainThreadReveal`.
                 // The unified threads guide's invitation holds the peek's slot
                 // until Start, or until a question goes to the main thread.
-                if showsWelcomeInvite {
+                if showsLicenseThanks {
+                    // The thanks is the main thread's newest message: its peek,
+                    // so opening it into the thread changes nothing on screen.
+                    // Without unified threads there is no peek; the line alone.
+                    if let peek = model.mainThreadPeek,
+                       peek.answer.text == L("license.thread.thanks") {
+                        mainThreadReveal(peek.item, answer: peek.answer, live: peek.live)
+                            .transition(moduleTransition)
+                    } else {
+                        LicenseThanksInvite()
+                            .transition(moduleTransition)
+                    }
+                } else if showsWelcomeInvite {
                     WelcomeGuideInvite(model: model)
                         .transition(moduleTransition)
                 } else if showsUnifiedIntroInvite {
@@ -707,8 +742,8 @@ struct NotchBody: View {
                 // `ThreadRevealBottom`); at rest the box adds nothing.
                 VStack(alignment: .leading, spacing: 0) {
                     // The invitation takes the prompt's place until Start or ×.
-                    if !showsWelcomeInvite && !showsUnifiedIntroInvite && !showsAutoRetireInvite
-                        && featureNudgeInvite == nil {
+                    if !showsWelcomeInvite && !showsUnifiedIntroInvite
+                        && !showsAutoRetireInvite && featureNudgeInvite == nil {
                         idleInputRow
                     }
 
@@ -815,19 +850,28 @@ struct NotchBody: View {
     /// The unified threads guide's invitation, in the peek's slot and in place
     /// of the prompt.
     private var showsUnifiedIntroInvite: Bool {
-        guard showsMainThreadPeek, !showsWelcomeInvite, let intro = model.unifiedIntro else { return false }
+        guard showsMainThreadPeek, !showsLicenseThanks, !showsWelcomeInvite,
+              let intro = model.unifiedIntro else { return false }
         return intro.threadID == nil
     }
 
-    /// The first-run guide's invitation, in the same slot, ahead of the others.
+    /// A license that just landed: its thanks, in the same slot, ahead of
+    /// every invitation, until the panel next closes.
+    private var showsLicenseThanks: Bool {
+        showsMainThreadPeek && model.licenseThanksShowing
+    }
+
+    /// The first-run guide's invitation, in the same slot, after the license
+    /// thanks and ahead of the others.
     private var showsWelcomeInvite: Bool {
-        guard showsMainThreadPeek, let guide = model.welcomeGuide else { return false }
+        guard showsMainThreadPeek, !model.licenseThanksShowing,
+              let guide = model.welcomeGuide else { return false }
         return guide.threadID == nil
     }
 
     /// The Auto retirement guide's invitation, in the same slot.
     private var showsAutoRetireInvite: Bool {
-        guard showsMainThreadPeek, !showsWelcomeInvite, !showsUnifiedIntroInvite,
+        guard showsMainThreadPeek, !showsLicenseThanks, !showsWelcomeInvite, !showsUnifiedIntroInvite,
               let guide = model.autoRetire else { return false }
         return guide.threadID == nil
     }
@@ -835,7 +879,7 @@ struct NotchBody: View {
     /// A feature nudge's invitation, in the same slot, after the unified
     /// threads guide's.
     private var featureNudgeInvite: NotchModel.FeatureNudge? {
-        guard showsMainThreadPeek, !showsWelcomeInvite, !showsUnifiedIntroInvite,
+        guard showsMainThreadPeek, !showsLicenseThanks, !showsWelcomeInvite, !showsUnifiedIntroInvite,
               !showsAutoRetireInvite,
               let nudge = model.featureNudge, nudge.threadID == nil else { return nil }
         return nudge
@@ -1305,7 +1349,8 @@ struct NotchBody: View {
     private var droppedFilesLine: some View {
         HStack(spacing: 6) {
             ForEach(Array(model.droppedFiles.enumerated()), id: \.offset) { index, file in
-                SelectionContextChip(selection: file.text, icon: "doc.text",
+                SelectionContextChip(selection: file.text,
+                                     icon: file.isFolder ? "folder" : "doc.text",
                                      label: file.name) {
                     model.removeDroppedFile(at: index)
                 }
@@ -1358,32 +1403,40 @@ struct NotchBody: View {
             // drop out while the Recent list is expanded: the recall view shouldn't
             // also carry the compose-family chrome.
             if !recentListShown {
-                if composerOnly {
-                    // The menu bar chat has no button into Agent. While Agent
-                    // is on (Shift-Tab), the label stays so a click leaves it.
-                    if model.agentComposeActive {
-                        UnifiedComposeModeControl(model: model)
+                // Trial ended: the mode switch and the model chips hide; only
+                // the way to a license stays on this row.
+                if !license.locked {
+                    if model.agentComposeActive || model.effectiveSubmitPanel == .chat {
+                        attachChip
+                            .transition(.opacity)
                     }
-                } else if model.unifiedThreadsEnabled {
-                    UnifiedComposeModeControl(model: model)
-                } else {
-                    BucketTogglePill(model: model)
-                }
-                if model.agentComposeActive {
-                    agentComposeChips
-                        .transition(.opacity)
-                } else if model.effectiveSubmitPanel == .chat {
-                    // Notes and reminders never invoke an AI model, so their
-                    // compose row should not advertise or offer one. The chip
-                    // belongs only to Ask; switching back brings it back.
-                    askModelChip
-                        .transition(.opacity)
-                }
-                // `/loop` adds one chip after the model, on either side.
-                if model.loopIntervalMinutes != nil,
-                   model.agentComposeActive || model.effectiveSubmitPanel == .chat {
-                    loopIntervalChip
-                        .transition(.opacity)
+                    if composerOnly {
+                        // The menu bar chat has no button into Agent. While Agent
+                        // is on (Shift-Tab), the label stays so a click leaves it.
+                        if model.agentComposeActive {
+                            UnifiedComposeModeControl(model: model)
+                        }
+                    } else if model.unifiedThreadsEnabled {
+                        UnifiedComposeModeControl(model: model)
+                    } else {
+                        BucketTogglePill(model: model)
+                    }
+                    if model.agentComposeActive {
+                        agentComposeChips
+                            .transition(.opacity)
+                    } else if model.effectiveSubmitPanel == .chat {
+                        // Notes and reminders never invoke an AI model, so their
+                        // compose row should not advertise or offer one. The chip
+                        // belongs only to Ask; switching back brings it back.
+                        askModelChip
+                            .transition(.opacity)
+                    }
+                    // `/loop` adds one chip after the model, on either side.
+                    if model.loopIntervalMinutes != nil,
+                       model.agentComposeActive || model.effectiveSubmitPanel == .chat {
+                        loopIntervalChip
+                            .transition(.opacity)
+                    }
                 }
                 // The menu bar chat: a granted gift and a waiting build sit
                 // after the model, the ⋯ group on the right edge.
@@ -1399,14 +1452,19 @@ struct NotchBody: View {
                     }
                     // The island's ⋯ group: Release notes, History and
                     // Settings, each opening in its own window from the card.
-                    // The pin lives in the chat's header chips, not here. In
+                    // The pin sits here too, beside the header chips' one. In
                     // Agent, live runs show as "N running", which opens Recent.
                     let running = model.agentComposeActive ? agentManager.runningTasks.count : 0
                     Spacer(minLength: 8)
+                    if showsLicenseCue {
+                        licenseCue
+                            .transition(.scale(scale: 0.7).combined(with: .opacity))
+                    }
                     IdleTrailingCluster(
-                        pinned: false, recentOpen: false, showsRecent: recentHasContent,
+                        pinned: model.isAnswerPinned, recentOpen: false, showsRecent: recentHasContent,
                         runningCount: running,
                         flat: model.unifiedThreadsEnabled,
+                        alwaysShowsPin: true,
                         togglePin: {
                             withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
                                 model.toggleAnswerPin()
@@ -1435,8 +1493,13 @@ struct NotchBody: View {
                 // holds the edge alone until it is tapped.
                 let showsGift = !model.hasText && nono.justGrantedUSD > 0.0000005
                 let pending = model.hasText || showsGift ? nil : updateChipFace
-                if !cluster.isEmpty || showsGift || pending != nil {
+                if !cluster.isEmpty || showsGift || pending != nil || showsLicenseCue {
                     Spacer(minLength: 8)
+                    // No license yet: the way to one, where the gift chip sits.
+                    if showsLicenseCue {
+                        licenseCue
+                            .transition(.scale(scale: 0.7).combined(with: .opacity))
+                    }
                     if showsGift {
                         giftCue
                             .transition(.scale(scale: 0.7).combined(with: .opacity))
@@ -1613,7 +1676,30 @@ struct NotchBody: View {
                         ModelCatalogStore.select(provider: row.provider, model: row.id)
                     },
                     onDone: { model.showAskModelPicker = false })
-                    .preferredColorScheme(.dark)
+                    .menuCardBackground())
+            }))
+    }
+
+    /// + on the left of the bottom row: attach files or photos, or a folder
+    /// (`NotchModel.pickAttachmentFiles` / `pickAttachmentFolder`).
+    private var attachChip: some View {
+        AttachPlusChip(flat: model.unifiedThreadsEnabled) {
+            model.isAttachMenuOpen.toggle()
+        }
+        .modifier(MenuCardWindow(
+            open: model.isAttachMenuOpen && ownsSharedMenus,
+            onDismiss: { _ in model.isAttachMenuOpen = false },
+            card: {
+                AnyView(AttachMenuCard(
+                    filesTitle: L(model.agentComposeActive ? "attach.photos" : "attach.files"),
+                    onFiles: {
+                        model.isAttachMenuOpen = false
+                        model.pickAttachmentFiles()
+                    },
+                    onFolder: {
+                        model.isAttachMenuOpen = false
+                        model.pickAttachmentFolder()
+                    })
                     .menuCardBackground())
             }))
     }
@@ -1791,7 +1877,6 @@ struct NotchBody: View {
                         onSelect: { model.selectAgentFolder($0) },
                         onBrowse: { model.pickAgentFolder() },
                         onDone: { model.showAgentFolderPicker = false })
-                        .preferredColorScheme(.dark)
                         .menuCardBackground())
                 }))
 
@@ -1853,7 +1938,6 @@ struct NotchBody: View {
                                     // cached + TTL'd, so this is usually a no-op, and the labels fill
                                     // in reactively when a real probe lands.
                                     .task { catalog.resolveClaudeAliases() }
-                                    .preferredColorScheme(.dark)
                                     .menuCardBackground())
                             }))
                         // The chip's bottom-centre — where the card has always
@@ -2559,7 +2643,8 @@ struct NotchBody: View {
                                 LoopMenuInfo(intervalMinutes: $0.intervalMinutes,
                                              rounds: $0.rounds,
                                              nextRoundAt: $0.nextRoundAt,
-                                             active: $0.active)
+                                             active: $0.active,
+                                             endReason: $0.active ? nil : $0.endReason)
                             },
                             onStopLoop: {
                                 agentDetailMetadataOpen = false
@@ -3797,7 +3882,7 @@ struct NotchBody: View {
                     slotFloor: Self.splitRailChip - 12,
                     onSubmit: { submitSplitFollowUp(item) },
                     onPasteImage: { pasteSplitFollowUpImage(item) },
-                    placeholder: { Text(L("result.followUp")) },
+                    placeholder: { Text(L(license.locked ? "license.locked.title" : "result.followUp")) },
                     trailing: {
                         if !splitFollowUp.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                             || !splitFollowUpImages.isEmpty {
@@ -4753,11 +4838,7 @@ struct NotchBody: View {
     /// capsule — "Open Settings" when no key is configured (retrying can't help),
     /// "Add credit" when the Notchi balance is empty (opens Notchi's pane, where
     /// the balance and its Add button are), else "Try again", which re-runs the
-    /// same question. When the failure can be retried, the capsule's trailing
-    /// chevron opens the model list, so the retry can pick a different model — the
-    /// answer footer's regenerate control is hidden while this row is up (a failed
-    /// answer has nothing to regenerate), and its "Regenerate with…" menu lives
-    /// here instead.
+    /// same question.
     private func errorActionRow(_ askError: NotchModel.AskError) -> some View {
         let action: ErrorActionRow.Action = askError.needsSetup || askError.needsSearchSwitch
             ? .openSettings
@@ -4770,13 +4851,11 @@ struct NotchBody: View {
             if model.canRetryOnNotchi {
                 ErrorActionRow(
                     action: .retryNotchi,
-                    models: [],
                     primary: {
                         withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
                             model.retryLastAskOnNotchi()
                         }
-                    },
-                    retryWith: { _ in })
+                    })
             }
         }
     }
@@ -4785,7 +4864,6 @@ struct NotchBody: View {
                                     action: ErrorActionRow.Action) -> some View {
         ErrorActionRow(
             action: action,
-            models: action == .retry ? model.regenerateModelOptions : [],
             primary: {
                 withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
                     switch action {
@@ -4799,11 +4877,6 @@ struct NotchBody: View {
                     case .retry: model.retryLastAsk()
                     case .retryNotchi: model.retryLastAskOnNotchi()
                     }
-                }
-            },
-            retryWith: { pick in
-                withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
-                    model.retryLastAsk(model: pick)
                 }
             }
         )
@@ -4917,7 +4990,6 @@ struct NotchBody: View {
                     .modifier(ThreadSearchMark(search: model.threadSearch, turnID: turn.id))
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .modifier(ThreadScrollLagOffset())
                 .id(turn.id)
                 if let mark = copyMarks[turn.id] {
                     CopyMarkLine(mark: mark,
@@ -5366,12 +5438,19 @@ struct NotchBody: View {
 
         final class LatestNear { var value = true }
 
+        enum Zone: Equatable { case near, between, far }
+
         /// How long a turn must stay far before it is swapped for its stand-in.
         private static var farDelay: TimeInterval { 0.2 }
 
-        /// How far past the viewport's top and bottom edges a turn still counts
-        /// as near, in viewport heights.
+        /// How far past the viewport's top and bottom edges a turn is drawn,
+        /// in viewport heights.
         private var reach: CGFloat { 1.5 }
+        /// How far past them a drawn turn has to go before it is swapped for
+        /// its stand-in. Wider than `reach`, so a turn the reader scrolls past
+        /// and back to is not built again: each rebuild lays out the whole
+        /// answer in one frame, which showed as a stutter every screen.
+        private var keepReach: CGFloat { 4 }
 
         var body: some View {
             let latest = latest
@@ -5383,14 +5462,24 @@ struct NotchBody: View {
                     Color.clear.frame(height: heights[id] ?? 0)
                 }
             }
-            .onGeometryChange(for: Bool.self) { geo in
-                guard let viewport = geo.bounds(of: .scrollView) else { return true }
-                let margin = max(viewport.height, 300) * reach
-                let r = viewport.insetBy(dx: 0, dy: -margin)
-                    .intersects(CGRect(origin: .zero, size: geo.size))
-                latest.value = r
-                return r
-            } action: { isNear in
+            .onGeometryChange(for: Zone.self) { geo in
+                guard let viewport = geo.bounds(of: .scrollView) else { return .near }
+                let unit = max(viewport.height, 300)
+                let frame = CGRect(origin: .zero, size: geo.size)
+                let zone: Zone
+                if viewport.insetBy(dx: 0, dy: -unit * reach).intersects(frame) {
+                    zone = .near
+                } else if viewport.insetBy(dx: 0, dy: -unit * keepReach).intersects(frame) {
+                    zone = .between
+                } else {
+                    zone = .far
+                }
+                latest.value = zone != .far
+                return zone
+            } action: { zone in
+                // Between the two reaches a turn keeps whatever it shows.
+                if zone == .between { return }
+                let isNear = zone == .near
                 // Inserting a page of older turns moves every row by the page's
                 // height for one layout pass, before `OlderTurnsLoader` moves
                 // the scroll offset by the same amount. A turn on screen reads
@@ -5436,20 +5525,25 @@ struct NotchBody: View {
         var followUp = false
         var members: [NotchModel.Turn] = []
         var open = false
+        // A scheduled round still running gets no segment until it finishes.
+        var inFlight = false
         for (index, turn) in turns.enumerated() {
             if turn.role == "user" {
-                if open {
+                if open, !inFlight {
                     segments.append(LoopSegment(title: title, isFollowUp: followUp, turns: members))
                 }
+                inFlight = false
                 title = turn.loopRound.map { L("loop.round", $0) } ?? turn.text
                 followUp = turn.loopRound == nil
                 members = index == 0 || turn.hidesUserBubble ? [] : [turn]
                 open = true
+            } else if open, turn.isScheduledRoundInFlight {
+                inFlight = true
             } else if open, turn.isDrawn {
                 members.append(turn)
             }
         }
-        if open {
+        if open, !inFlight {
             segments.append(LoopSegment(title: title, isFollowUp: followUp, turns: members))
         }
         return segments
@@ -5501,7 +5595,8 @@ struct NotchBody: View {
         let id = model.threadHistoryID
         if let loop = agentManager.tasks.first(where: { $0.id == id })?.loop {
             return LoopMenuInfo(intervalMinutes: loop.intervalMinutes, rounds: loop.rounds,
-                                nextRoundAt: loop.nextRoundAt, active: loop.active)
+                                nextRoundAt: loop.nextRoundAt, active: loop.active,
+                                endReason: loop.active ? nil : loop.endReason)
         }
         if let info = model.dismissedAgentLoopInfo(id) { return info }
         return chatLoops.menuInfo(for: id, turns: chatLoopTurns)
@@ -5560,7 +5655,6 @@ struct NotchBody: View {
         VStack(alignment: .leading, spacing: 16) {
             conversationTurns
         }
-        .modifier(ThreadScrollLagHost())
         .environment(\.answerMediaBaseDirectory, answerMediaBase)
         .padding(.trailing, 8)
         // Always the content's own height. Offered less, the answer cards
@@ -5599,7 +5693,6 @@ struct NotchBody: View {
                     VStack(alignment: .leading, spacing: 16) {
                         conversationTurns
                     }
-                    .modifier(ThreadScrollLagHost())
                     .environment(\.answerMediaBaseDirectory, answerMediaBase)
                     // The thread's intrinsic height, read off the live scroll
                     // content — a ScrollView proposes an unbounded height to its
@@ -5649,7 +5742,6 @@ struct NotchBody: View {
                 // bottom before an upward swipe folds it into the peek.
                 .background(EnclosingScrollViewReporter {
                     model.threadScrollView = $0
-                    ThreadScrollLag.shared.attach($0)
                 })
             }
             // Taller than `answerMaxHeight` (300): absorbs the 24pt gap + 39pt
@@ -5847,7 +5939,10 @@ struct NotchBody: View {
         let thread = thread ?? model.turns
         if let example = turn.example {
             WelcomeExampleCard(example: example,
+                               showsAnswer: !model.welcomeHeldAnswers.contains(turn.id),
                                showsLink: !model.welcomeHeldLinks.contains(turn.id))
+        } else if turn.licenseCard {
+            WelcomeLicenseCard(model: model)
         } else if turn.role == "user" {
             VStack(alignment: .leading, spacing: 5) {
                 // Permanent clipboard trace: when this question's message was enriched
@@ -5889,25 +5984,11 @@ struct NotchBody: View {
             // thinking/activity overlay on top while the text is still empty; the
             // overlay never participates in the answer's layout, so it can't shift
             // it, and `textSelection` just toggles on the unchanged tree.
-            // Right-click actions that only make sense at the thread's tail:
-            // regenerate re-runs THIS question (and would orphan any later turns),
-            // so it rides only the last turn, never mid-thread ones.
             let isLastTurn = thread.last?.id == turn.id
             // The panel's wait state (timer, word, activity) is one value, reset by
             // each new question, so it belongs to the newest streaming answer only.
             // An older answer still streaming beside it shows its own values.
             let ownsPanelWait = thread.last(where: { $0.role == "assistant" && $0.streaming })?.id == turn.id
-            let canRegenerate = isLastTurn && !turn.isAgent
-                && model.visibleAskError == nil
-            // An agent run's report never offers regenerate: the chat model can't
-            // re-run the task in its folder, so "regenerating" it would only
-            // hallucinate a fresh report over the real one. (Chat follow-ups on
-            // the same reopened thread aren't agent turns, so they keep it.)
-            //
-            // A failed round drops it too: the error row under the answer already
-            // owns the re-run — its label retries, its chevron retries on another
-            // model — so a second regenerate control on the answer would be the
-            // same action twice.
             VStack(alignment: .leading, spacing: 14) {
               LiveTurnText(live: turn.streaming ? model.liveAnswer : .inert,
                            id: turn.id, fallback: turn.text) { text in
@@ -5934,10 +6015,6 @@ struct NotchBody: View {
                     // second metadata line under the report.
                     showsFooterMetadata: !turn.isAgent,
                     onInAppCopy: { model.rebaselineClipboardAfterInAppWrite() },
-                    // Regenerate lives on the last answer's right-click menu.
-                    onRegenerate: canRegenerate ? { model.regenerateLastAnswer() } : nil,
-                    regenerateModels: canRegenerate ? model.regenerateModelOptions : [],
-                    onRegenerateWith: canRegenerate ? { model.regenerateLastAnswer(model: $0) } : nil,
                     onReply: onReply,
                     onDelete: onDelete,
                     regenModel: turn.regenModel,
@@ -6051,10 +6128,6 @@ struct NotchBody: View {
                     followUpChip
                         .transition(.opacity.combined(with: .scale(scale: 0.8)))
                 }
-                CloudMachineStatusChip {
-                    model.settingsSection = InlineSettingsView.Section.chat.rawValue
-                    model.openSettings()
-                }
                 ResultTrailingCluster(
                     pinned: model.isAnswerPinned,
                     moreOpen: $model.isResultMoreMenuOpen,
@@ -6072,7 +6145,12 @@ struct NotchBody: View {
                     routinesOpen: model.showRoutines && model.sidePageTab == .routines,
                     toggleRoutines: { toggleSidePage(.routines) },
                     copiesOpen: model.showRoutines && model.sidePageTab == .copies,
-                    toggleCopies: { toggleSidePage(.copies) }
+                    toggleCopies: { toggleSidePage(.copies) },
+                    openCloud: {
+                        model.isResultMoreMenuOpen = false
+                        model.settingsSection = InlineSettingsView.Section.chat.rawValue
+                        model.openSettings()
+                    }
                 )
             }
             // These are buttons sitting on the header's tear-off grip, which pushes
@@ -6240,6 +6318,7 @@ struct NotchBody: View {
                     // defensive path if `inputRow` is ever reused with `followUp: true`,
                     // and it keeps the plain-ask behaviour for that unused case.
                     onSubmit: { followUp ? model.submit() : model.submitFromPrompt() },
+                    editable: !license.locked,
                     // Idle prompt only: ↑/↓ are shared between shell-style recall
                     // (fill the box with a past question) and the recent list, with
                     // a fixed precedence — an open, highlighted list owns the keys;
@@ -6401,7 +6480,31 @@ struct NotchBody: View {
                 // ⇧⏎/⌥⏎ line break leaves text = "\n", which trims back to empty
                 // and used to keep the ghost sitting on line 1 of a now-two-line
                 // box. Anything at all in the editor takes the placeholder away.
-                if !followUp && model.text.isEmpty && caretWidth == 0 {
+                if !followUp && license.locked {
+                    // Trial ended: the field is read-only, so the placeholder
+                    // says so and carries the way to a license.
+                    HStack(spacing: 8) {
+                        Text(L("license.locked.title"))
+                            .foregroundStyle(Tokens.placeholder)
+                            .allowsHitTesting(false)
+                        Button(action: openLicenseOffer) {
+                            HStack(spacing: 3) {
+                                Text(L("license.sidebar.buy"))
+                                    .underline()
+                                Image(systemName: "arrow.up.right")
+                                    .font(.system(size: fontSize * 0.72, weight: .semibold))
+                            }
+                            .foregroundStyle(licenseCueHovered ? Tokens.text1 : Tokens.text2)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .onHover { licenseCueHovered = $0 }
+                    }
+                    .sfFont(fontSize)
+                    .lineLimit(1)
+                    .padding(.leading, PromptField.textInset)
+                    .transition(.opacity)
+                } else if !followUp && model.text.isEmpty && caretWidth == 0 {
                     Text(placeholder)
                         .sfFont(fontSize)
                         .foregroundStyle(Tokens.placeholder)
@@ -6509,6 +6612,68 @@ struct NotchBody: View {
         .buttonStyle(GlassPressStyle())
         .onHover { giftCueHovered = $0 }
         .animation(.easeOut(duration: Tokens.hoverFade), value: giftCueHovered)
+    }
+
+    /// "Buy License" on the bucket row's trailing edge while there is no
+    /// license, on a light wash of the passport's colours. It opens the
+    /// passport, the same card as Settings' Buy License.
+    /// No license yet, the trial still running, and the first-run guide done
+    /// or dismissed: the guide's invitation comes first.
+    private var showsLicenseCue: Bool {
+        license.showsNotchChip && model.welcomeGuide == nil
+    }
+
+    private var licenseCue: some View {
+        Button(action: openLicenseOffer) {
+            // In the trial: "Free Trial" and a ring of what is left of it
+            // (days left of the trial's days); the last 12 hours also say
+            // when it ends. Otherwise the way to a license.
+            HStack(spacing: 6) {
+                if let fraction = license.trialFraction {
+                    Text(L("license.chip.trial"))
+                    TrialRing(fraction: fraction)
+                        .help(license.trialLeft ?? "")
+                    if let ends = license.trialFinalDayLeft {
+                        Text(ends)
+                    }
+                } else {
+                    Text(L("license.sidebar.buy"))
+                }
+            }
+                .sfFont(Tokens.TypeSize.meta, weight: .medium)
+                .foregroundStyle(licenseCueHovered ? Tokens.text1 : Tokens.text2)
+                .lineLimit(1)
+                .fixedSize()
+                .padding(.horizontal, 10)
+                .frame(height: model.unifiedThreadsEnabled ? Tokens.Control.inline : Tokens.Control.chip)
+                .licenseChipSurface(licenseCueShape, hovered: licenseCueHovered)
+                .contentShape(licenseCueShape)
+        }
+        .buttonStyle(.plain)
+        .onHover { licenseCueHovered = $0 }
+        .animation(.easeOut(duration: Tokens.hoverFade), value: licenseCueHovered)
+    }
+
+    /// The flat row's chips are 8pt-cornered rectangles; the glass row's are
+    /// capsules.
+    private var licenseCueShape: RoundedRectangle {
+        RoundedRectangle(cornerRadius: model.unifiedThreadsEnabled ? 8 : 100, style: .continuous)
+    }
+
+    private func openLicenseOffer() {
+        guard let host = hostWindow.window else { return }
+        licenseOfferOpen = true
+        // From the menu bar card, the card follows the system's light or dark
+        // like the card does; over the island it stays dark.
+        LicenseOfferWindow.shared.show(over: host, startWithKeyField: false,
+                                       followsSystem: metrics.floating) {
+            closeLicenseOffer()
+        }
+    }
+
+    private func closeLicenseOffer() {
+        licenseOfferOpen = false
+        LicenseOfferWindow.shared.close()
     }
 
     /// The waiting-update chip: the action promoted OUT of the ⋯
@@ -6953,6 +7118,9 @@ struct AgentRunMetadataMenu: View {
                     ResultMetadataRow(icon: LucideIcons.circleStop, title: L("loop.stop"),
                                       hint: L("loop.stop"),
                                       action: onStopLoop)
+                }
+                if !loop.active, let reason = loop.endReason {
+                    ResultMetadataRow(icon: LucideIcons.circleStop, title: reason.cardText)
                 }
                 if !loop.active, let onContinueLoop {
                     ResultMetadataRow(icon: LucideIcons.play, title: L("loop.continue"),
@@ -7405,7 +7573,7 @@ struct SelectionContextChip: View {
             Text(label ?? (isReply ? preview
                  : source.map { L("selection.context.from", $0) } ?? L("selection.context")))
                 .sfFont(Tokens.TypeSize.meta, weight: .medium)
-                .foregroundStyle(hovering ? Tokens.text2 : Tokens.text3)
+                .foregroundStyle(hovering && !isReply ? Tokens.text2 : Tokens.text3)
                 .lineLimit(1)
             Button(action: drop) {
                 Image(systemName: "xmark")
@@ -7423,11 +7591,12 @@ struct SelectionContextChip: View {
         .padding(.leading, 10)
         .padding(.trailing, 5)
         .frame(height: 24)
-        .glassCapsule(in: Capsule(style: .continuous), brighter: hovering)
+        .glassCapsule(in: Capsule(style: .continuous), brighter: hovering && !isReply)
         .contentShape(Capsule(style: .continuous))
         // The chip names the source; the tooltip shows what is actually riding
         // along, so "which selection?" is answerable without sending anything.
-        .notchTooltip(preview)
+        // The reply chip already shows the quoted line and has no hover effect.
+        .notchTooltip(preview, shows: !isReply)
         .onHover { inside in
             hovering = inside
             if !inside { hoveringDrop = false }
@@ -7449,8 +7618,9 @@ struct SelectionContextChip: View {
 
 
 /// The copies after one round of the main thread, under that round: what
-/// the copy thread did with them ("Thread updated 3 memories"). Plain grey text like the
-/// "Based on what you copied" caption; opens the Thread tab.
+/// the copy thread did with them ("Auto saved 1 memory").
+/// Plain grey text like the "Based on what you copied" caption; opens the
+/// Thread tab.
 private struct CopyMarkLine: View {
     let mark: NotchModel.CopyMark
     /// The page it opens is showing: drawn as hovered.
@@ -7460,21 +7630,10 @@ private struct CopyMarkLine: View {
 
     var body: some View {
         Button(action: open) {
-            HStack(spacing: 5) {
-                Image(systemName: "arrow.turn.down.right")
-                    .sfFont(Tokens.TypeSize.badge, weight: .semibold)
-                HStack(spacing: 10) {
-                    ForEach(mark.counts, id: \.kind) { count in
-                        HStack(spacing: 3) {
-                            Image(systemName: Self.symbol(count.kind))
-                                .sfFont(Tokens.TypeSize.badge, weight: .medium)
-                            Text("\(count.n)")
-                                .sfFont(Tokens.TypeSize.meta)
-                                .monospacedDigit()
-                        }
-                    }
-                }
-                .lineLimit(1)
+            HStack(spacing: 6) {
+                Text(mark.summary)
+                    .sfFont(Tokens.TypeSize.meta)
+                    .lineLimit(1)
                 Image(systemName: "chevron.right")
                     .sfFont(Tokens.TypeSize.badge, weight: .semibold)
                     .offset(x: hovering ? 2 : 0)
@@ -7488,20 +7647,6 @@ private struct CopyMarkLine: View {
         .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
         .animation(.easeOut(duration: Tokens.hoverFade), value: engaged)
         .accessibilityLabel(mark.summary)
-    }
-
-    /// The glyph for one kind of thing a copy's reply did.
-    private static func symbol(_ kind: String) -> String {
-        switch kind {
-        case "answer":                     return "bubble.left"
-        case "memory":                     return "brain"
-        case "note":                       return "doc.text"
-        case "reminder":                   return "checklist"
-        case "reminderUpdate":             return "checklist.checked"
-        case "event":                      return "calendar"
-        case "mailDraft":                  return "envelope"
-        default:                           return "doc.on.doc"
-        }
     }
 }
 /// The copy mark under the newest turn during a pull: its slot grows from
@@ -7689,29 +7834,15 @@ private struct ImmersiveHeaderHeightKey: PreferenceKey {
 /// hairline border — and brightens on hover / gives slightly on press so it reads
 /// as the same kind of affordance, just leading somewhere instead of accepting text.
 /// The capsule under a failed Ask: "Open Settings" when there's no key to retry
-/// with, "Add credit" when the Notchi balance is empty, else "Try again". On the
-/// retryable side it's a split control — the label re-runs the question as it
-/// was, and the trailing chevron opens the model list so the retry can run on a
-/// different model. That menu is the same "Regenerate with…" list the answer
-/// footer carries; while this row is up the footer's regenerate control is
-/// hidden, so the two never sit on screen at once.
+/// with, "Add credit" when the Notchi balance is empty, else "Try again", which
+/// re-runs the question as it was.
 struct ErrorActionRow: View {
     enum Action { case retry, openSettings, addCredit, retryNotchi }
 
     let action: Action
-    /// The models the chevron menu offers, each flagged if it's the one already in
-    /// effect (greyed — plain "Try again" is exactly that retry). Empty ⇒ no menu.
-    let models: [(model: String, label: String, isCurrent: Bool)]
     let primary: () -> Void
-    let retryWith: (String) -> Void
 
-    /// One hover flag for the whole capsule, so the seam between the label and the
-    /// chevron isn't a gap the surface drops out of.
     @State private var hovering = false
-    /// The model list under the chevron.
-    @State private var menuOpen = false
-
-    private var hasMenu: Bool { action == .retry && !models.isEmpty }
 
     /// The home row's chip type and shape (`UnifiedComposeModeControl`).
     private static let fontSize: CGFloat = Tokens.TypeSize.meta
@@ -7733,48 +7864,19 @@ struct ErrorActionRow: View {
                     Text(title)
                         .sfFont(Self.fontSize, weight: .regular)
                         .lineLimit(1)
-                    // Without a menu the row keeps its plain affordance glyph; with
-                    // one, that trailing slot IS the menu (below), so it isn't
-                    // drawn twice. Actions that lead to Settings point out of the
-                    // thread; a retry stays in it.
-                    if !hasMenu {
-                        Image(systemName: action == .retry || action == .retryNotchi ? "chevron.right" : "arrow.up.right")
-                            .sfFont(Tokens.TypeSize.badge, weight: .semibold)
-                            .foregroundStyle(Tokens.text3)
-                    }
+                    // Actions that lead to Settings point out of the thread; a
+                    // retry stays in it.
+                    Image(systemName: action == .retry || action == .retryNotchi ? "chevron.right" : "arrow.up.right")
+                        .sfFont(Tokens.TypeSize.badge, weight: .semibold)
+                        .foregroundStyle(Tokens.text3)
                 }
                 .foregroundStyle(hovering ? Tokens.text1 : Tokens.text2)
                 .padding(.leading, 7)
-                .padding(.trailing, hasMenu ? 3 : 7)
+                .padding(.trailing, 7)
                 .frame(height: Tokens.Control.inline)
                 .contentShape(Rectangle())
             }
             .buttonStyle(ErrorActionPressStyle())
-
-            if hasMenu {
-                Button { menuOpen.toggle() } label: {
-                    Image(systemName: "chevron.down")
-                        .sfFont(Tokens.TypeSize.badge, weight: .semibold)
-                        .foregroundStyle(Tokens.text3)
-                        .frame(width: 18, height: Tokens.Control.inline)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain).exemptsDoubleClickPin()
-                .fixedSize()
-                .padding(.trailing, 2)
-                .notchTooltip(L("result.regenerate.with"))
-                .glassMenuCard(
-                    open: $menuOpen,
-                    title: L("result.regenerate.with"),
-                    items: models.map { option in
-                        GlassMenuItem(
-                            title: option.isCurrent
-                                ? L("result.regenerate.current", option.label)
-                                : option.label,
-                            disabled: option.isCurrent
-                        ) { retryWith(option.model) }
-                    })
-            }
         }
         .fixedSize(horizontal: true, vertical: false)
         // The home row's chips (the mode word, the model name, ⋯): small type
@@ -7843,6 +7945,8 @@ struct IdleTrailingCluster: View {
     /// Lab unified-threads row: the chips drop their glass and draw like the
     /// Chat chip beside them — its 6pt wash at rest and on hover, its height.
     var flat: Bool = false
+    /// The pin draws unpinned too (the menu bar chat's composer).
+    var alwaysShowsPin: Bool = false
     var togglePin: () -> Void
     var toggleRecent: () -> Void
     /// When set, the Recent chevron becomes a ⋯ chip that expands on hover into
@@ -7866,6 +7970,8 @@ struct IdleTrailingCluster: View {
 
     @State private var hovered: Segment? = nil
     @State private var moreExpanded = false
+    /// The pointer is somewhere on this row (pin and ⋯ group included).
+    @State private var rowHovered = false
 
     /// Glyph point size, held at the 11.5/30 ratio the 30pt chip was drawn at, so a
     /// bigger chip doesn't end up with a proportionally smaller mark inside it.
@@ -7877,10 +7983,10 @@ struct IdleTrailingCluster: View {
             // The pin has no button at rest — ⌘P/⌘D is the way in. Once pinned it
             // surfaces here as the state's own affordance: it shows the panel is held
             // open, and clicking it lets go.
-            if pinned {
+            if pinned || alwaysShowsPin {
                 segment(.pin, action: togglePin,
-                        tooltip: pinHelp(pinned: true)) {
-                    PinStateGlyph(pinned: true, size: glyphSize, weight: .semibold)
+                        tooltip: pinHelp(pinned: pinned)) {
+                    PinStateGlyph(pinned: pinned, size: glyphSize, weight: .semibold)
                 }
                 .transition(.scale(scale: 0.6).combined(with: .opacity))
             }
@@ -7913,6 +8019,16 @@ struct IdleTrailingCluster: View {
                     .animation(.spring(response: 0.32, dampingFraction: 0.8), value: recentOpen)
                 }
                 .transition(.scale(scale: 0.7).combined(with: .opacity))
+            }
+        }
+        // The gap between the pin and the ⋯ group counts as the row.
+        .contentShape(Rectangle())
+        .onHover { inside in
+            rowHovered = inside
+            if !inside, moreExpanded {
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
+                    moreExpanded = false
+                }
             }
         }
         .animation(.spring(response: 0.34, dampingFraction: 0.82), value: showsRecent)
@@ -7959,6 +8075,9 @@ struct IdleTrailingCluster: View {
         }
         .contentShape(Rectangle())
         .onHover { inside in
+            // Leaving the group for the pin beside it keeps it open; the row's
+            // own hover folds it once the pointer leaves the whole row.
+            guard inside || !rowHovered else { return }
             withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
                 moreExpanded = inside
             }
@@ -8031,6 +8150,62 @@ struct IdleTrailingCluster: View {
         .animation(.easeOut(duration: Tokens.hoverFade), value: hovered)
         .notchTooltip(tooltip, shows: showsTooltip)
         .accessibilityLabel(tooltip)
+    }
+}
+
+/// The + chip's card: the Ask model menu's rows, width and padding.
+struct AttachMenuCard: View {
+    let filesTitle: String
+    let onFiles: () -> Void
+    let onFolder: () -> Void
+
+    @State private var hovered: Int? = nil
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: MenuCard.rowSpacing) {
+            row(0, title: filesTitle, symbol: "paperclip", action: onFiles)
+            row(1, title: L("attach.folder"), symbol: "folder", action: onFolder)
+        }
+        .padding(MenuCard.cardPad)
+        .frame(width: MenuCard.pickerCardWidth, alignment: .leading)
+    }
+
+    private func row(_ index: Int, title: String, symbol: String,
+                     action: @escaping () -> Void) -> some View {
+        MenuCardRow(title: title, symbol: symbol,
+                    fontSize: MenuCard.pickerFontSize,
+                    height: MenuCard.pickerRowHeight,
+                    horizontalPadding: MenuCard.pickerRowPad,
+                    selected: hovered == index,
+                    onHoverIn: { hovered = index },
+                    action: action)
+    }
+}
+
+/// The prompt's + chip: the pin and ⋯ chips' face, on the bottom row's left.
+struct AttachPlusChip: View {
+    var flat: Bool
+    var action: () -> Void
+    var chipSize: CGFloat = Tokens.Control.chip
+
+    @State private var hovering = false
+
+    private var size: CGFloat { flat ? Tokens.Control.inline : chipSize }
+    private var glyphSize: CGFloat { flat ? 10 : chipSize * (11.5 / 30) }
+
+    var body: some View {
+        Button(action: action) {
+            LucideIcon(mark: LucideIcons.plus, size: glyphSize + 2)
+                .foregroundStyle(hovering ? Tokens.text1 : Tokens.text3)
+                .frame(width: size, height: size)
+                .modifier(ClusterChipSurface(flat: flat, hovering: hovering, shape: Circle()))
+        }
+        // No press scale: the menu card hangs off this chip's frame.
+        .buttonStyle(.plain).exemptsDoubleClickPin()
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
+        .notchTooltip(L("attach.add"), shows: true)
+        .accessibilityLabel(L("attach.add"))
     }
 }
 
@@ -8144,6 +8319,13 @@ struct ResultTrailingCluster: View {
     /// The side page on its From copies tab, a row in the ⋯ menu under Routines.
     var copiesOpen = false
     var toggleCopies: (() -> Void)? = nil
+    /// The cloud machine's row in the ⋯ menu (`CloudMachineStatusMenuRow`).
+    /// With no detach, a ⋯ of its own follows the side-page mark while the
+    /// machine is on, as on the top-right card.
+    var openCloud: (() -> Void)? = nil
+    @ObservedObject private var cloudAccount = InstaBoxAccount.shared
+
+    private var showsCloud: Bool { openCloud != nil && CloudMachineStatusMenuRow.isShown }
 
     var body: some View {
         GlassSegmentCluster(segments: {
@@ -8153,33 +8335,65 @@ struct ResultTrailingCluster: View {
                               action: togglePin) {
                 PinStateGlyph(pinned: pinned, size: 12, weight: .light)
             })
-            if detach != nil || toggleRoutines != nil {
+            if detach != nil {
                 var more = GlassSegmentCluster.Segment(id: "more",
-                                  engaged: moreOpen || (detach == nil && copiesOpen),
-                                  tooltip: detach == nil ? L("copyThread.tab") : L("recent.manage"),
-                                  action: {
-                                      if detach == nil { toggleCopies?() } else { moreOpen.toggle() }
-                                  }) {
-                    if detach == nil {
-                        // The pin's stroke weight, so the two marks match.
-                        Image(systemName: "sidebar.right")
-                            .sfFont(13, weight: .light)
-                    } else {
-                        Image(systemName: "ellipsis")
-                            .sfFont(15, weight: .bold)
-                    }
+                                  engaged: moreOpen,
+                                  tooltip: L("recent.manage"),
+                                  action: { moreOpen.toggle() }) {
+                    Image(systemName: "ellipsis")
+                        .sfFont(15, weight: .bold)
                 }
                 more.showsTooltip = false
                 segs.append(more)
             }
+            if detach == nil && (showsCloud || toggleRoutines != nil || toggleCopies != nil) {
+                var cloudMore = GlassSegmentCluster.Segment(id: "cloudMore",
+                                  engaged: moreOpen,
+                                  tooltip: L("nono.more"),
+                                  action: { moreOpen.toggle() }) {
+                    Image(systemName: "ellipsis")
+                        .sfFont(15, weight: .bold)
+                }
+                cloudMore.showsTooltip = false
+                segs.append(cloudMore)
+            }
             return segs
-        }(), showsTooltips: !moreOpen && !(detach == nil && copiesOpen))
+        }(), showsTooltips: !moreOpen)
         .modifier(MenuCardWindow(
             open: moreOpen,
             lowerTrailing: true,
             onDismiss: { _ in moreOpen = false },
-            card: { AnyView(moreMenu) }
+            card: { AnyView(detach == nil ? AnyView(cloudMenu) : AnyView(moreMenu)) }
         ))
+    }
+
+    /// The ⋯ menu with no detach to offer: Routines, Sub-thread and the cloud
+    /// machine, as on the top-right card.
+    private var cloudMenu: some View {
+        let routines = L("routines.title")
+        let copies = L("copyThread.tab")
+        return VStack(alignment: .leading, spacing: MenuCard.rowSpacing) {
+            if toggleRoutines != nil {
+                MenuCardRow(title: routines, selected: routinesOpen) {
+                    moreOpen = false
+                    toggleRoutines?()
+                }
+            }
+            if let toggleCopies {
+                MenuCardRow(title: copies, selected: copiesOpen) {
+                    moreOpen = false
+                    toggleCopies()
+                }
+            }
+            if showsCloud {
+                CloudMachineStatusMenuRow(compact: false)
+            }
+        }
+        .padding(MenuCard.cardPad)
+        .frame(width: max(MenuCard.pickerCardWidth,
+                          MenuCard.width(titles: [(routines, ""), (copies, "")])),
+               alignment: .leading)
+        .manageMenuCardBackground()
     }
 
     private var moreMenu: some View {
@@ -8204,6 +8418,9 @@ struct ResultTrailingCluster: View {
                     toggleCopies()
                 }
             }
+            if showsCloud {
+                CloudMachineStatusMenuRow(compact: false)
+            }
         }
         .padding(MenuCard.cardPad)
         .frame(width: MenuCard.width(titles: [(title, chord), (routines, ""), (copies, "")]))
@@ -8227,10 +8444,17 @@ struct ResultTrailingCluster: View {
 /// real glass circle (native `.glassEffect` on macOS 26+, blurred fallback below)
 /// with the signature specular rim, brightening under the cursor like every other
 /// chip in the header, so it reads as the same material as the cluster opposite it.
-private struct GlassBackButton: View {
+///
+/// The Settings window borrows it at a larger size, for the back button it draws
+/// on a line of its own under the traffic lights.
+struct GlassBackButton: View {
     /// 26 in the headers; the follow-up rail passes its chip size so the circle
-    /// matches the box beside it.
+    /// matches the box beside it, and the Settings window a larger one for the
+    /// back button it draws on a line of its own.
     var size: CGFloat = Tokens.Control.header
+    /// "Back to Model" — the circle carries no words, so this is the whole of
+    /// its accessibility name where the caller has one to give.
+    var label: String? = nil
     let action: () -> Void
     @State private var hovering = false
 
@@ -8246,6 +8470,7 @@ private struct GlassBackButton: View {
         .buttonStyle(GlassPressStyle())
         .onHover { hovering = $0 }
         .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
+        .accessibilityLabel(Text(label ?? L("settings.back")))
     }
 }
 
@@ -8770,13 +8995,29 @@ struct MenuCardWindow: ViewModifier {
     /// false) or anywhere in ours but the card and the anchor.
     let onDismiss: (_ insideApp: Bool) -> Void
     @ViewBuilder var card: () -> AnyView
+    /// Opened from the menu bar card in light mode (`menuCardLight`).
+    @Environment(\.menuCardLight) private var light
 
     func body(content: Content) -> some View {
         content.background(
             MenuCardHost(open: open, centered: centered, upperLeading: upperLeading,
-                         lowerTrailing: lowerTrailing, trailing: trailing,
+                         lowerTrailing: lowerTrailing, trailing: trailing, light: light,
                          onDismiss: onDismiss, card: card())
         )
+    }
+}
+
+/// A menu card opened from the menu bar card while the system is in light
+/// mode: its window takes the light appearance and its slab turns white.
+/// Everywhere else the cards stay dark, like the island.
+private struct MenuCardLightKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
+extension EnvironmentValues {
+    var menuCardLight: Bool {
+        get { self[MenuCardLightKey.self] }
+        set { self[MenuCardLightKey.self] = newValue }
     }
 }
 
@@ -8786,6 +9027,7 @@ private struct MenuCardHost: NSViewRepresentable {
     let upperLeading: Bool
     let lowerTrailing: Bool
     let trailing: Bool
+    let light: Bool
     let onDismiss: (Bool) -> Void
     let card: AnyView
 
@@ -8797,6 +9039,7 @@ private struct MenuCardHost: NSViewRepresentable {
                                              upperLeading: upperLeading,
                                              lowerTrailing: lowerTrailing,
                                              trailing: trailing,
+                                             light: light,
                                              onDismiss: onDismiss)
     }
 
@@ -8829,6 +9072,11 @@ private final class MenuCardAnchorView: NSView {
     private var upperLeading = false
     private var lowerTrailing = false
     private var trailing = false
+    private var light = false
+
+    private static func appearance(light: Bool) -> NSAppearance? {
+        NSAppearance(named: light ? .aqua : .darkAqua)
+    }
     /// Set by `dismissOpen` so a stale `apply(open: true)` — the binding has not
     /// come down yet — cannot rebuild the window we just ordered out.
     private var dismissed = false
@@ -8846,9 +9094,10 @@ private final class MenuCardAnchorView: NSView {
     private var frameObservers: [NSObjectProtocol] = []
 
     func apply(card: AnyView, open: Bool, centered: Bool, upperLeading: Bool,
-               lowerTrailing: Bool = false, trailing: Bool = false,
+               lowerTrailing: Bool = false, trailing: Bool = false, light: Bool = false,
                onDismiss: @escaping (Bool) -> Void) {
         self.onDismiss = onDismiss
+        self.light = light
         self.centered = centered
         self.upperLeading = upperLeading
         self.lowerTrailing = lowerTrailing
@@ -8861,8 +9110,11 @@ private final class MenuCardAnchorView: NSView {
         // A forced dismiss already ordered the window out; do not rebuild it
         // from a layout pass that still sees `open == true`.
         guard !dismissed else { return }
-        let padded = AnyView(card.padding(Self.shadowMargin))
+        // The card's own window does not inherit the anchor's environment.
+        let padded = AnyView(card.environment(\.menuCardLight, light)
+            .padding(Self.shadowMargin))
         if let hosting {
+            panel?.appearance = Self.appearance(light: light)
             hosting.rootView = padded
         } else {
             openMenu(with: padded)
@@ -8911,8 +9163,9 @@ private final class MenuCardAnchorView: NSView {
             Self.log.fault("two top-level menu cards open at once")
         }
         if !nested { panel.ignoresMouseEvents = false }
-        // Dark like the island, and along for the ride across Spaces / full-screen.
-        panel.appearance = NSAppearance(named: .darkAqua)
+        // Dark like the island (light from the menu bar card in light mode),
+        // and along for the ride across Spaces / full-screen.
+        panel.appearance = Self.appearance(light: light)
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary,
                                     .stationary, .ignoresCycle]
         panel.contentView = hosting
@@ -9145,6 +9398,11 @@ struct SlashCommandMenu: View {
         }
     }
 
+    private static func symbol(for match: NotchModel.SlashMatch) -> String? {
+        if case .mention(let command) = match { return command.symbol }
+        return nil
+    }
+
     private static func title(for match: NotchModel.SlashMatch) -> String {
         switch match {
         case .mode(let command): return command.title
@@ -9160,6 +9418,7 @@ struct SlashCommandMenu: View {
     private var cardWidth: CGFloat {
         if model.text.hasPrefix("@") {
             return MenuCard.width(titles: NotchModel.MentionCommand.allCases.map { ($0.title, nil) }, max: 260)
+                + MenuCard.symbolWidth + 6
         }
         let modes = NotchModel.SlashCommand.allCases.map { command -> (String, String?) in
             (command.title, command == .loop ? LoopInterval.short(LoopInterval.lastMinutes) : nil)
@@ -9184,6 +9443,7 @@ struct SlashCommandMenu: View {
                 ForEach(Array(model.slashMatches.enumerated()), id: \.element.id) { index, match in
                     MenuCardRow(
                         title: Self.title(for: match),
+                        symbol: Self.symbol(for: match),
                         accessory: Self.chord(for: match),
                         selected: index == model.slashHighlight,
                         onHoverIn: { model.slashHighlight = index },
@@ -9229,8 +9489,8 @@ private struct UnifiedComposeModeControl: View {
     }
 
     /// The destination colour (Ask blue, Agent purple, Capture amber), lifted
-    /// for text on the dark glass. No chip behind it at rest; a neutral wash on
-    /// hover.
+    /// for text on the dark glass. The + chip's wash behind it at rest, brighter
+    /// on hover.
     private var ink: Color {
         if model.agentComposeActive { return Tokens.agentInk }
         return (model.manualPanelOverride ?? .chat).intentInk
@@ -9251,7 +9511,7 @@ private struct UnifiedComposeModeControl: View {
                 .lineLimit(1)
                 .padding(.horizontal, 7)
                 .padding(.vertical, 3.5)
-                .background(shape.fill(Color.white.opacity(hovering ? 0.10 : 0)))
+                .background(shape.fill(Color.white.opacity(hovering ? 0.12 : 0.07)))
                 .contentShape(shape)
         }
         .buttonStyle(.plain).exemptsDoubleClickPin()
@@ -9959,6 +10219,57 @@ private struct UnifiedIntroInvite: View {
 
 /// The first-run guide's invitation (`NotchModel.welcomeGuide`), drawn like
 /// `UnifiedIntroInvite`: a message from Notchi, Start, and × to dismiss it.
+/// What is left of the free trial as a pie: the days not used yet are a
+/// solid wedge from 12 o'clock round the left, the days used are the hollow
+/// rest inside the rim. In the chip's text colour.
+private struct TrialRing: View {
+    let fraction: Double
+    private static let size: CGFloat = 10
+    private static let rim: CGFloat = 1.2
+
+    var body: some View {
+        ZStack {
+            Circle()
+                .stroke(Tokens.text1, lineWidth: Self.rim)
+            TrialWedge(fraction: fraction)
+                .fill(Tokens.text1)
+        }
+        .frame(width: Self.size, height: Self.size)
+    }
+}
+
+/// The wedge: from 12 o'clock, counterclockwise, `fraction` of the circle.
+private struct TrialWedge: Shape {
+    let fraction: Double
+
+    func path(in rect: CGRect) -> Path {
+        let center = CGPoint(x: rect.midX, y: rect.midY)
+        let radius = min(rect.width, rect.height) / 2
+        var path = Path()
+        guard fraction > 0 else { return path }
+        path.move(to: center)
+        // Screen coordinates: y grows down, so "clockwise: true" turns
+        // counterclockwise on screen.
+        path.addArc(center: center, radius: radius,
+                    startAngle: .degrees(-90),
+                    endAngle: .degrees(-90 - 360 * fraction),
+                    clockwise: true)
+        path.closeSubpath()
+        return path
+    }
+}
+
+/// The license thanks in the invitation slot: Notchi's line alone. The
+/// prompt stays under it; the slot goes back to the guide that was waiting
+/// once the panel closes (`NotchModel.licenseThanksShowing`).
+private struct LicenseThanksInvite: View {
+    var body: some View {
+        AssistantTurnView(text: L("license.thread.thanks"), showsFooterMetadata: false)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.bottom, 12)
+    }
+}
+
 private struct WelcomeGuideInvite: View {
     @ObservedObject var model: NotchModel
 
@@ -9987,14 +10298,68 @@ private struct WelcomeGuideInvite: View {
     }
 }
 
+/// The first-run guide's purchase card, drawn like a link card
+/// (`LinkCardView`): a rounded card on the license surface, title over the
+/// price. A click opens Settings on the license row, where Buy is.
+struct WelcomeLicenseCard: View {
+    @ObservedObject var model: NotchModel
+    @ObservedObject private var license = NotchiLicense.shared
+    @Environment(\.cardWidthFraction) private var cardWidthFraction
+    @State private var hovering = false
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: ChatBubbleChrome.cardRadius, style: .continuous)
+        FractionWidthLayout(fraction: cardWidthFraction, hugs: true) {
+            Button {
+                model.settingsSection = InlineSettingsView.Section.model.rawValue
+                model.openSettings()
+            } label: {
+                HStack(spacing: 12) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(L(license.needsPurchase ? "license.offer.title" : "license.activated"))
+                            .sfFont(Tokens.TypeSize.form, weight: .medium)
+                            .foregroundStyle(Tokens.text1)
+                            .lineLimit(1)
+                        if license.needsPurchase {
+                            HStack(spacing: 6) {
+                                Text(license.priceText)
+                                    .monospacedDigit()
+                                Text(L("license.oneTime"))
+                            }
+                            .sfFont(Tokens.TypeSize.meta)
+                            .foregroundStyle(Tokens.text3)
+                            .lineLimit(1)
+                        }
+                    }
+                    Spacer(minLength: 0)
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(Tokens.text3)
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 11)
+                .frame(minWidth: 220, alignment: .leading)
+                .licenseChipSurface(shape, hovered: hovering)
+                .clipShape(shape)
+                .contentShape(shape)
+            }
+            .buttonStyle(PlatePressStyle())
+            .onHover { hovering = $0 }
+        }
+    }
+}
+
 /// One of the first-run guide's examples (`NotchModel.WelcomeExample`): a
 /// question and the answer it would get, drawn with the thread's own bubble
 /// and answer views so the answer carries its real marks ("Searched the web",
 /// "Updated memory"). No frame of its own: a quiet "Example" above it, in the
 /// "Based on what you copied" style, is what sets it apart. Inert: it is a
 /// picture of an answer, not one the user had.
-private struct WelcomeExampleCard: View {
+struct WelcomeExampleCard: View {
     let example: NotchModel.WelcomeExample
+    /// The answer lands a beat after the question; until then Notchi's
+    /// waiting eyes stand in its place, as in a real round.
+    var showsAnswer = true
     /// The search example's link card lands a beat after its answer.
     var showsLink = true
 
@@ -10011,11 +10376,20 @@ private struct WelcomeExampleCard: View {
                 .foregroundStyle(Tokens.text4)
                 .padding(.leading, 12)   // matches the bubble's horizontal inset
             UserQuestionBubble(text: example.question)
-            AssistantTurnView(text: answer,
-                              sources: example.sources,
-                              showsFooterMetadata: false,
-                              captures: example.captures)
-                .padding(.top, 9)
+            Group {
+                if showsAnswer {
+                    AssistantTurnView(text: answer,
+                                      sources: example.sources,
+                                      showsFooterMetadata: false,
+                                      captures: example.captures)
+                        .transition(.opacity.combined(with: .offset(y: 6)))
+                } else {
+                    ThinkingDots()
+                        .padding(.leading, 2)
+                        .transition(.opacity)
+                }
+            }
+            .padding(.top, 9)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .allowsHitTesting(false)
@@ -10384,11 +10758,17 @@ struct RoutinesPanel: View {
     @ObservedObject private var chatLoops = ChatLoopManager.shared
     @ObservedObject private var agentManager = AgentTaskManager.shared
 
-    @Binding var tab: NotchModel.SidePageTab
+    /// Which page this is: Routines or Sub-thread. Each ⋯ row opens its own.
+    var tab: NotchModel.SidePageTab
     var onClose: () -> Void
-    /// The From copies tab's content, drawn by `NotchBody` (it reads the
+    /// The copy thread's content, drawn by `NotchBody` (it reads the
     /// thread the way the result page does).
     var copies: () -> AnyView
+    /// Drawn on the menu bar chat's card, which has its own glass and
+    /// follows the system appearance (`SidePageChrome.onCard`).
+    var onCard = false
+    /// On the card: the bubbles' share of the column (`cardWidthFraction`).
+    @Environment(\.cardWidthFraction) private var cardFraction
 
     private struct Item: Identifiable {
         let id: UUID
@@ -10422,51 +10802,113 @@ struct RoutinesPanel: View {
         return (agentLoops + askLoops).sorted { $0.startedAt > $1.startedAt }
     }
 
+    /// The tallest the Routines list grows before it scrolls: three rows.
+    private static let routinesCap: CGFloat = 3 * 64
+
+    /// One page per ⋯ row: the routines, or the copy thread. The × closes it.
     var body: some View {
-        VStack(spacing: 14) {
-            SidePageHeader(tabs: [(.copies, L("copyThread.tab")), (.routines, L("routines.title"))],
-                           selected: $tab, onClose: onClose)
-            Group {
-                if tab == .routines { routines } else { copies() }
+        VStack(alignment: .leading, spacing: 10) {
+            switch tab {
+            case .routines:
+                sectionHead(L("routines.title"), closes: true)
+                let rows = items
+                if rows.isEmpty {
+                    Text(L("routines.empty"))
+                        .sfFont(Tokens.TypeSize.label)
+                        .foregroundStyle(Tokens.text4)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    routines(rows, fills: true)
+                    Spacer(minLength: 0)
+                }
+            case .copies:
+                sectionHead(L("copyThread.tab"), closes: true)
+                copies()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-            .transition(.opacity)
-            .id(tab)
         }
-        .modifier(SidePageChrome())
-        .animation(.easeOut(duration: 0.18), value: tab)
+        .modifier(SidePageChrome(onCard: onCard))
     }
 
-    @ViewBuilder
-    private var routines: some View {
-            let rows = items
-            if rows.isEmpty {
-                Text(L("routines.empty"))
-                    .sfFont(Tokens.TypeSize.label)
-                    .foregroundStyle(Tokens.text4)
-                    .multilineTextAlignment(.center)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+    /// A section's caption, the panel's group-heading style, and on the
+    /// first one the ×.
+    private func sectionHead(_ title: String, closes: Bool) -> some View {
+        let head = HStack(spacing: 0) {
+            Text(title).captionLabel()
+            Spacer(minLength: 0)
+            if closes { SidePageCloseButton(action: onClose) }
+        }
+        .frame(height: closes ? 24 : nil)
+        return Group {
+            if onCard {
+                // The card's bubble glass, as a pill.
+                head
+                    .padding(.leading, ChatBubbleChrome.glassHorizontalPad)
+                    .padding(.trailing, 8)
+                    .padding(.vertical, 6)
+                    .smokedGlass(radius: 18)
+                    .frame(width: NotchMetrics.chatWidth * cardFraction)
             } else {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 0) {
-                        ForEach(Array(rows.enumerated()), id: \.element.id) { index, item in
-                            if index > 0 {
-                                Rectangle().fill(Tokens.hairline).frame(height: 0.5)
-                                    .padding(.horizontal, 12)
-                            }
-                            row(item)
-                        }
-                    }
-                    .background(
-                        RoundedRectangle(cornerRadius: Tokens.Radius.menu, style: .continuous)
-                            .fill(Tokens.recessFill)
-                            .overlay(
-                                RoundedRectangle(cornerRadius: Tokens.Radius.menu, style: .continuous)
-                                    .strokeBorder(Tokens.recessRim, lineWidth: 0.5)))
-                    .padding(.bottom, NotchBody.panelPadding)
-                }
-                .scrollIndicators(.never)
+                head
             }
+        }
+    }
+
+    /// `fills`: the page holds nothing else, so the list scrolls in the
+    /// page's height instead of stopping at three rows.
+    private func routines(_ rows: [Item], fills: Bool = false) -> some View {
+        Group {
+            if onCard { cardRoutines(rows) } else { panelRoutines(rows, fills: fills) }
+        }
+    }
+
+    /// On the card: each routine is its own glass bubble, like a message.
+    private func cardRoutines(_ rows: [Item]) -> some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 8) {
+                ForEach(rows) { item in
+                    row(item)
+                        .padding(.horizontal, ChatBubbleChrome.glassHorizontalPad - 12)
+                        .padding(.vertical, ChatBubbleChrome.glassVerticalPad - 10)
+                        .smokedGlass(radius: ChatBubbleChrome.glassCardRadius)
+                }
+            }
+        }
+        .scrollIndicators(.never)
+        .fixedSize(horizontal: false, vertical: true)
+        .frame(width: NotchMetrics.chatWidth * cardFraction)
+    }
+
+    private func panelRoutines(_ rows: [Item], fills: Bool) -> some View {
+        let list = VStack(alignment: .leading, spacing: 0) {
+            ForEach(Array(rows.enumerated()), id: \.element.id) { index, item in
+                if index > 0 {
+                    Rectangle().fill(Tokens.hairline).frame(height: 0.5)
+                        .padding(.horizontal, 12)
+                }
+                row(item)
+            }
+        }
+        return Group {
+            if fills {
+                ScrollView { list }
+                    .scrollIndicators(.never)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else if rows.count > 3 {
+                ScrollView { list }
+                    .scrollIndicators(.never)
+                    .frame(height: Self.routinesCap)
+            } else {
+                list
+            }
+        }
+        .background(
+            RoundedRectangle(cornerRadius: Tokens.Radius.menu, style: .continuous)
+                .fill(Tokens.recessFill)
+                .overlay(
+                    RoundedRectangle(cornerRadius: Tokens.Radius.menu, style: .continuous)
+                        .strokeBorder(Tokens.recessRim, lineWidth: 0.5)))
+        .clipShape(RoundedRectangle(cornerRadius: Tokens.Radius.menu, style: .continuous))
     }
 
     private func row(_ item: Item) -> some View {
@@ -10541,28 +10983,24 @@ struct RoutinesPanel: View {
     }
 }
 
-/// A side page's top row, the header's height: its tabs, and × where ⋯ was.
-/// The tabs are `TabChip`s — the same strip Settings uses.
-struct SidePageHeader: View {
-    var tabs: [(NotchModel.SidePageTab, String)]
-    @Binding var selected: NotchModel.SidePageTab
-    var onClose: () -> Void
+/// The side page's ×: a bare glyph, a faint circle under the cursor.
+struct SidePageCloseButton: View {
+    var action: () -> Void
+    @State private var hovering = false
 
     var body: some View {
-        HStack(spacing: TabChip.gap) {
-            ForEach(tabs, id: \.0) { tab, title in
-                TabChip(title: title, active: selected == tab) {
-                    withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) { selected = tab }
-                }
-            }
-            Spacer(minLength: 0)
-            GlassSegmentCluster(segments: [
-                .init(id: "close", tooltip: L("detached.close"), action: onClose) {
-                    Image(systemName: "xmark")
-                        .sfFont(Tokens.TypeSize.meta, weight: .semibold)
-                },
-            ], showsTooltips: false)
+        Button(action: action) {
+            Image(systemName: "xmark")
+                .sfFont(Tokens.TypeSize.meta, weight: .semibold)
+                .foregroundStyle(hovering ? Tokens.text1 : Tokens.text3)
+                .frame(width: 24, height: 24)
+                .background(Circle().fill(Tokens.text1.opacity(hovering ? 0.1 : 0)))
+                .contentShape(Circle())
         }
+        .buttonStyle(.plain)
+        .help(L("detached.close"))
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: 0.15), value: hovering)
     }
 }
 
@@ -10574,8 +11012,26 @@ struct SidePageChrome: ViewModifier {
     static let edgeFade: CGFloat = 40
     /// How far down from the page's top its background fades in.
     static let topFade: CGFloat = 12
+    /// On the menu bar chat's card: the card's own glass, the same as its
+    /// composer and bubbles (`GlassMaterial` with `floating`), light or dark
+    /// with the system. The panel's dark veil and faded left edge belong to
+    /// the panel, where the page covers a thread; on the light card the veil
+    /// read as a grey slab under dark text.
+    var onCard = false
 
+    @ViewBuilder
     func body(content: Content) -> some View {
+        if onCard {
+            // No panel of its own: the page's header and rows are glass
+            // bubbles on the desktop, like the card's messages.
+            content
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        } else {
+            panelChrome(content)
+        }
+    }
+
+    private func panelChrome(_ content: Content) -> some View {
         content
             .padding(.top, NotchBody.panelPadding)
             .padding(.leading, NotchBody.panelPadding)
@@ -10613,143 +11069,3 @@ struct SidePageChrome: ViewModifier {
     }
 }
 
-// MARK: - Scroll follow
-
-/// The thread's bubbles trail a user scroll and spring back, the way iMessage's
-/// do. A turn far from the pointer trails more than one under it. Only scrolls
-/// driven by a scroll-wheel event count, so auto-follow while streaming and
-/// `scrollTo` stay still. Off under Reduce Motion.
-final class ThreadScrollLag: ObservableObject {
-    static let shared = ThreadScrollLag()
-
-    /// The coordinate space `ThreadScrollLagHost` moves with the lag.
-    static let space = "threadScrollLag"
-
-    /// Current displacement in points, positive = down.
-    @Published private(set) var lag: CGFloat = 0 {
-        didSet { state.withLock { $0.lag = lag } }
-    }
-    /// The pointer's y in window (SwiftUI global) coordinates.
-    private(set) var anchorY: CGFloat = 0 {
-        didSet { state.withLock { $0.anchorY = anchorY } }
-    }
-    /// `lag` and `anchorY` for the turns' effects, which may run off the main
-    /// thread.
-    private let state = OSAllocatedUnfairLock(initialState: (lag: CGFloat(0), anchorY: CGFloat(0)))
-    var current: (lag: CGFloat, anchorY: CGFloat) { state.withLock { $0 } }
-
-    static let maxLag: CGFloat = 22
-    /// Share of each scroll step a far bubble falls behind by.
-    private static let pull: CGFloat = 0.35
-    private static let stiffness: CGFloat = 260
-    private static let damping: CGFloat = 24
-    private static let step: TimeInterval = 1.0 / 120
-
-    private struct Entry {
-        weak var clip: NSClipView?
-        var token: NSObjectProtocol
-        var lastY: CGFloat
-    }
-    private var entries: [ObjectIdentifier: Entry] = [:]
-    private var position: CGFloat = 0
-    private var velocity: CGFloat = 0
-    private var timer: Timer?
-
-    func attach(_ scroll: NSScrollView) {
-        let clip = scroll.contentView
-        let id = ObjectIdentifier(clip)
-        if let entry = entries[id], entry.clip === clip { return }
-        if let old = entries[id] { NotificationCenter.default.removeObserver(old.token) }
-        entries = entries.filter { $0.value.clip != nil }
-        clip.postsBoundsChangedNotifications = true
-        let token = NotificationCenter.default.addObserver(
-            forName: NSView.boundsDidChangeNotification, object: clip, queue: .main
-        ) { [weak self, weak clip] _ in
-            guard let self, let clip else { return }
-            self.clipMoved(clip)
-        }
-        entries[id] = Entry(clip: clip, token: token, lastY: clip.bounds.origin.y)
-    }
-
-    private func clipMoved(_ clip: NSClipView) {
-        let id = ObjectIdentifier(clip)
-        guard var entry = entries[id] else { return }
-        let y = clip.bounds.origin.y
-        let delta = y - entry.lastY
-        entry.lastY = y
-        entries[id] = entry
-        guard delta != 0, NSApp.currentEvent?.type == .scrollWheel,
-              !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else { return }
-        if let window = clip.window, let content = window.contentView {
-            anchorY = content.bounds.height - window.mouseLocationOutsideOfEventStream.y
-        }
-        position = max(-Self.maxLag, min(Self.maxLag, position + delta * Self.pull))
-        lag = position
-        startTimer()
-    }
-
-    private func startTimer() {
-        guard timer == nil else { return }
-        let t = Timer(timeInterval: Self.step, repeats: true) { [weak self] _ in self?.tick() }
-        RunLoop.main.add(t, forMode: .common)
-        timer = t
-    }
-
-    private func tick() {
-        let dt = CGFloat(Self.step)
-        let accel = -Self.stiffness * position - Self.damping * velocity
-        velocity += accel * dt
-        position += velocity * dt
-        if abs(position) < 0.05, abs(velocity) < 0.5 {
-            position = 0
-            velocity = 0
-            timer?.invalidate()
-            timer = nil
-        }
-        lag = position
-    }
-}
-
-/// Applies `ThreadScrollLag` to one turn, weighted by its distance from the
-/// pointer. Reads its frame in `visualEffect`, so it costs no layout pass.
-///
-/// The turn does not observe the lag. Observing it re-evaluated this modifier
-/// for every mounted turn on every scroll step and spring tick, which was most
-/// of the main thread's work during a scroll. The effect reads the current lag
-/// from `ThreadScrollLag.shared.current` and is run again by its frame in
-/// `ThreadScrollLag.space`, which `ThreadScrollLagHost` moves with the lag.
-struct ThreadScrollLagOffset: ViewModifier {
-    func body(content: Content) -> some View {
-        content.visualEffect { effect, proxy in
-            // Read for the dependency: the host shifts this space by the lag.
-            _ = proxy.frame(in: .named(ThreadScrollLag.space)).minY
-            let now = ThreadScrollLag.shared.current
-            guard now.lag != 0 else { return effect.offset(y: 0) }
-            // A turn out of view is left where it is: moving it changed what
-            // the scroller draws for nothing on screen.
-            if let viewport = proxy.bounds(of: .scrollView),
-               !viewport.insetBy(dx: 0, dy: -ThreadScrollLag.maxLag * 2)
-                   .intersects(CGRect(origin: .zero, size: proxy.size)) {
-                return effect.offset(y: 0)
-            }
-            let distance = abs(proxy.frame(in: .global).midY - now.anchorY)
-            return effect.offset(y: now.lag * min(1, distance / 320))
-        }
-    }
-}
-
-/// Around the turns that carry `ThreadScrollLagOffset`: the one view that
-/// observes the lag. It moves a named coordinate space by the lag and its
-/// content back by the same amount, so nothing is drawn elsewhere, and every
-/// turn's effect, which reads its frame in that space, is run again.
-struct ThreadScrollLagHost: ViewModifier {
-    @ObservedObject private var follow = ThreadScrollLag.shared
-
-    func body(content: Content) -> some View {
-        let lag = follow.lag
-        content
-            .offset(y: -lag)
-            .coordinateSpace(.named(ThreadScrollLag.space))
-            .offset(y: lag)
-    }
-}

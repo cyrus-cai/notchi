@@ -23,7 +23,11 @@ struct MenuBarChat: View {
     }
 
     /// The messages scroll past this height.
-    static let maxMessagesHeight: CGFloat = 440
+    static let maxMessagesHeight: CGFloat = 220
+    /// The messages' second height. A pull down at the end of the list opens
+    /// it, a swipe up at the end closes it (`ChatHeightPull`). At rest the
+    /// messages take one of the two heights, never one in between.
+    static let expandedMessagesHeight: CGFloat = 440
     /// The fade older messages scroll into, under the menu bar.
     private static let topFade: CGFloat = 36
     /// Room under the last message while the messages scroll. None: the
@@ -63,16 +67,28 @@ struct MenuBarChat: View {
         let room = NotchMetrics.canvasHeight - NotchMetrics.chatTopGap - 10 - composerHeight - 12
         return max(120, min(Self.maxMessagesHeight, room))
     }
+    /// The messages' taller height (`expandedMessagesHeight`).
+    private var expandedCap: CGFloat {
+        let room = NotchMetrics.canvasHeight - NotchMetrics.chatTopGap - 10 - composerHeight - 12
+        return max(messagesCap, min(Self.expandedMessagesHeight, room))
+    }
     /// The messages have outgrown `maxMessagesHeight` for this thread. Held
     /// once true, so the lazy list's height estimates, which shift as rows
     /// scroll into view, stop resizing the scroll view and re-rendering the
     /// card mid-scroll.
     @State private var overflowLatched = false
+    /// Between the two heights: 0 `messagesCap`, 1 `expandedCap`.
+    @StateObject private var heightPull = ChatHeightPull()
+    /// The messages' AppKit scroll view, held at its end while the height
+    /// moves.
+    @State private var scrollRef = MessagesScrollRef()
     /// Bumped on each open, to put the messages back at their end.
     @State private var endRequest = 0
     /// The messages are scrolled to their end. A streaming answer keeps them
     /// there only while they are.
     @State private var scroll = ChatScrollEnd()
+    /// The visible part of each message list, for `CullsOffscreenGlass`.
+    @StateObject private var glassViewport = GlassCullViewport()
     /// `scroll.atBottom` as view state, for the size-change anchor. It changes
     /// only when the reader leaves or returns to the end.
     @State private var followsEnd = true
@@ -94,14 +110,22 @@ struct MenuBarChat: View {
     @State private var fold = CardFold()
     /// The pointer is over the composer: its bottom row shows.
     @State private var composerHovering = false
+    /// Redraws the header when the cloud machine turns on or off (its ⋯).
+    @ObservedObject private var cloudAccount = InstaBoxAccount.shared
     /// The header's side-page mark has its menu down.
-    @State private var sidePageMenuOpen = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.colorScheme) private var colorScheme
 
     // MARK: - What is shown
 
-    /// The thread on screen, else the main thread.
+    /// Sub-thread is open: the copy thread takes the messages' place and is
+    /// drawn by the same `messages`.
+    private var showsCopies: Bool { model.showRoutines && model.sidePageTab == .copies }
+
+    /// The thread on screen, else the main thread; the copy thread while
+    /// Sub-thread is open.
     private var thread: [NotchModel.Turn] {
+        if showsCopies { return model.copyThreadConversation }
         if !model.turns.isEmpty { return model.turns }
         guard let peek = model.mainThreadPeek else { return [] }
         return peek.live ?? peek.item.conversation
@@ -112,14 +136,15 @@ struct MenuBarChat: View {
     private var shownTurns: [NotchModel.Turn] {
         // An agent task runs on its own, not in this thread, so the agent
         // prompt shows no messages above it.
-        if model.agentComposeActive { return [] }
+        if model.agentComposeActive, !showsCopies { return [] }
+        if showsCopies { return thread.filter(\.isDrawn) }
         return thread.filter { turn in
-            turn.example == nil && !(turn.role == "user" && turn.hidesUserBubble)
+            !(turn.role == "user" && turn.hidesUserBubble)
         }
     }
 
     /// The thread is the one `model.turns` holds, so its messages take actions.
-    private var onScreen: Bool { !model.turns.isEmpty }
+    private var onScreen: Bool { !showsCopies && !model.turns.isEmpty }
 
     private var overflows: Bool { overflowLatched || contentHeight > messagesCap }
 
@@ -128,7 +153,7 @@ struct MenuBarChat: View {
     var body: some View {
         let turns = shownTurns
         VStack(alignment: .leading, spacing: 10) {
-            if model.showRoutines {
+            if model.showRoutines && (!showsCopies || turns.isEmpty) {
                 sidePage
                     .transition(.opacity)
                     .transaction(stillWhileClosed)
@@ -137,10 +162,13 @@ struct MenuBarChat: View {
                     // Over the messages' top, ending at the bubbles' right
                     // edge. Takes no height of its own.
                     .overlay(alignment: .topLeading) {
-                        headerChips
-                            .frame(width: NotchMetrics.chatWidth * Self.bubbleWidthFraction,
-                                   alignment: .trailing)
-                            .padding(.top, 10)
+                        HStack(spacing: 6) {
+                            if showsCopies { subThreadTitle }
+                            Spacer(minLength: 0)
+                            headerChips
+                        }
+                        .frame(width: NotchMetrics.chatWidth * Self.bubbleWidthFraction)
+                        .padding(.top, 10)
                     }
                     .padding(.bottom, overflows ? -Self.composerOverlap : 0)
                     .transition(.opacity)
@@ -166,13 +194,15 @@ struct MenuBarChat: View {
         }
         .onChange(of: isOpen) { _, open in
             if open {
-                openPagesInWindows()
+                openPagesInWindows(whatsNew: false)
                 opened()
             } else {
                 var quiet = Transaction()
                 quiet.disablesAnimations = true
                 withTransaction(quiet) {
                     revealed = false
+                    heightPull.uninstall()
+                    heightPull.reset()
                     // Like leaving the thread in the panel: the next open
                     // shows the chat, not the side page.
                     model.showRoutines = false
@@ -181,7 +211,7 @@ struct MenuBarChat: View {
             }
         }
         .animation(.spring(response: 0.4, dampingFraction: 0.86), value: model.showRoutines)
-        .onAppear { openPagesInWindows() }
+        .onAppear { openPagesInWindows(whatsNew: false) }
         .onChange(of: model.showHistory) { _, _ in openPagesInWindows() }
         .onChange(of: model.showWhatsNew) { _, _ in openPagesInWindows() }
         .onChange(of: model.cardRetracting) { _, retracting in
@@ -210,6 +240,9 @@ struct MenuBarChat: View {
             model.attachLiveMainThreadRound()
         }
         scroll.atBottom = true
+        heightPull.reset()
+        installHeightPull()
+        model.judgeCardPinOnOpen(thread: thread)
         // The open scrolls to the end after the first layout; until then the
         // top of the list is in view, and must not read as a reader there.
         scroll.pinnedUntil = Date().addingTimeInterval(0.6)
@@ -221,7 +254,9 @@ struct MenuBarChat: View {
     /// Recent, asked for from the card (its ⋯ menu, ↓ on the prompt, the menu bar
     /// menu), opens in its own window; What's New is a page of the Settings
     /// window, which is the only window that reads release notes now.
-    private func openPagesInWindows() {
+    /// `whatsNew` false: the card is opening. A What's New page left up in
+    /// the notch stays there; only a request made from the card moves it.
+    private func openPagesInWindows(whatsNew: Bool = true) {
         // The card's view stays mounted while the card is closed; the island's
         // own Recent and What's New pages are not this view's to move.
         guard isOpen else { return }
@@ -229,7 +264,7 @@ struct MenuBarChat: View {
             model.showHistory = false
             HistoryArchiveWindowController.shared.present(model: model)
         }
-        if model.showWhatsNew {
+        if whatsNew, model.showWhatsNew {
             model.showWhatsNew = false
             model.settingsSection = InlineSettingsView.Section.whatsNew.rawValue
             SettingsWindowController.shared.present(model: model)
@@ -267,17 +302,27 @@ struct MenuBarChat: View {
 
     // MARK: - Header chips
 
-    /// The panel's header trio on this card: the side page, the cloud machine,
-    /// and the pin. Laid over the top of the messages, right-aligned with the
+    /// The panel's header chips on this card: the pin and ⋯
+    /// (the cloud machine's status, while it is on). Laid over the top of the messages, right-aligned with the
     /// bubbles. One group: bare glyphs over a single soft dark blur.
     private var headerChips: some View {
         HStack(spacing: 6) {
-            CloudMachineStatusChip(glass: false, bareChip: false) {
-                model.settingsSection = InlineSettingsView.Section.chat.rawValue
-                model.openSettings()
+            // Jev set the pin (`NotchModel.judgeCardPin`): the pin and its
+            // label in one capsule, like the Recent chip's "N running".
+            let jevPinned = model.isAnswerPinned && model.pinIsAuto
+            if jevPinned {
+                JevPinnedChip {
+                    withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
+                        model.toggleAnswerPin()
+                    }
+                }
+                // Unfolds leftward out of the pin's slot, and folds back
+                // into it.
+                .transition(.scale(scale: 0.3, anchor: .trailing).combined(with: .opacity))
             }
-            GlassSegmentCluster(segments: [
-                .init(engaged: model.isAnswerPinned,
+            GlassSegmentCluster(segments: (jevPinned ? [] : [
+                .init(id: "pin",
+                      engaged: model.isAnswerPinned,
                       tooltip: shortcutHelp(model.isAnswerPinned ? "result.unpin" : "result.pin",
                                             action: .pin),
                       action: {
@@ -287,26 +332,35 @@ struct MenuBarChat: View {
                       }) {
                     PinStateGlyph(pinned: model.isAnswerPinned, size: 12, weight: .light)
                 },
-                .init(id: "sidePage",
-                      engaged: model.showRoutines,
-                      tooltip: L("recent.manage"),
-                      action: { sidePageMenuOpen.toggle() }) {
-                    Image(systemName: "sidebar.right")
-                        .sfFont(13, weight: .light)
+            ]) + [
+                .init(id: "more",
+                      engaged: model.isCardMoreMenuOpen,
+                      tooltip: L("nono.more"),
+                      action: { model.isCardMoreMenuOpen.toggle() }) {
+                    Image(systemName: "ellipsis")
+                        .sfFont(12, weight: .light)
                 },
-            ], glass: false, bareChip: false)
-            .modifier(MenuCardWindow(open: sidePageMenuOpen,
-                                     lowerTrailing: true,
-                                     onDismiss: { _ in sidePageMenuOpen = false },
-                                     card: { AnyView(sidePageMenu) }))
+            ], glass: false, bareChip: false, restsBright: true)
+            .modifier(MenuCardWindow(
+                open: model.isCardMoreMenuOpen,
+                lowerTrailing: true,
+                onDismiss: { _ in model.isCardMoreMenuOpen = false },
+                card: {
+                    AnyView(cardMoreMenu)
+                }))
         }
+        .animation(.spring(response: 0.34, dampingFraction: 0.82),
+                   value: model.isAnswerPinned && model.pinIsAuto)
         .padding(.horizontal, 4)
         .background {
             ZStack {
                 BackdropBlur(radius: 12, spot: true)
                     .padding(-Self.chipBlurSpread)
+                // Dark behind the chips in dark mode, white in light mode,
+                // where a dark smudge turned the icons grey on grey.
                 Capsule(style: .continuous)
-                    .fill(Color.black.opacity(0.6))
+                    .fill(colorScheme == .light ? Color.white.opacity(0.92)
+                                                : Color.black.opacity(0.7))
                     .padding(-4)
                     .blur(radius: 8)
             }
@@ -317,36 +371,35 @@ struct MenuBarChat: View {
     /// How far the blur behind the header chips spreads past them.
     private static let chipBlurSpread: CGFloat = 16
 
-    /// The side-page mark's card: the same three rows the panel's ⋯ holds.
-    /// Choosing a tab shows the side page in place of the messages.
-    private var sidePageMenu: some View {
-        let detach = L("detached.open")
+    /// Open the side page on `tab`, or close it when that tab already shows.
+    /// The ⋯ menu: Routines and Sub-thread open the side page on their tab, and
+    /// the cloud machine's row follows while it is on. Same rows as the
+    /// notch's ⋯ menu (`ResultTrailingCluster.cloudMenu`).
+    private var cardMoreMenu: some View {
         let routines = L("routines.title")
         let copies = L("copyThread.tab")
         return VStack(alignment: .leading, spacing: MenuCard.rowSpacing) {
-            if NotchModel.detachedWindowsEnabled {
-                MenuCardRow(title: detach, selected: false) {
-                    sidePageMenuOpen = false
-                    model.openDetachedWindow()
-                }
-            }
             MenuCardRow(title: routines,
                         selected: model.showRoutines && model.sidePageTab == .routines) {
-                sidePageMenuOpen = false
+                model.isCardMoreMenuOpen = false
                 openSidePage(.routines)
             }
             MenuCardRow(title: copies,
                         selected: model.showRoutines && model.sidePageTab == .copies) {
-                sidePageMenuOpen = false
+                model.isCardMoreMenuOpen = false
                 openSidePage(.copies)
+            }
+            if CloudMachineStatusMenuRow.isShown {
+                CloudMachineStatusMenuRow(compact: false)
             }
         }
         .padding(MenuCard.cardPad)
-        .frame(width: MenuCard.width(titles: [(detach, nil), (routines, nil), (copies, nil)]))
+        .frame(width: max(MenuCard.pickerCardWidth,
+                          MenuCard.width(titles: [(routines, ""), (copies, "")])),
+               alignment: .leading)
         .manageMenuCardBackground()
     }
 
-    /// Open the side page on `tab`, or close it when that tab already shows.
     private func openSidePage(_ tab: NotchModel.SidePageTab) {
         if model.showRoutines, model.sidePageTab == tab {
             model.showRoutines = false
@@ -361,50 +414,53 @@ struct MenuBarChat: View {
     /// Routines and Sub-thread, in the messages' place. The card has no
     /// panel for the side page to cover, so it takes the messages' column.
     private var sidePage: some View {
-        RoutinesPanel(tab: $model.sidePageTab,
-                      onClose: { model.showRoutines = false },
-                      copies: { AnyView(copyThreadTab) })
-            .frame(width: NotchMetrics.chatWidth * Self.bubbleWidthFraction,
-                   height: messagesCap)
-            .clipShape(RoundedRectangle(cornerRadius: Tokens.Radius.shell, style: .continuous))
+        RoutinesPanel(tab: model.sidePageTab, onClose: { model.showRoutines = false },
+                      copies: { AnyView(copyThreadTab) },
+                      onCard: true)
+            // The messages' column: full width, bubbles at the card's own
+            // fraction (`cardWidthFraction` from the body), so every bubble
+            // and its actions sit where the thread's do.
+            .frame(width: NotchMetrics.chatWidth, height: sidePageHeight)
     }
 
-    /// The Sub-thread tab: the copy thread, as this card draws messages.
-    @ViewBuilder
+    /// The messages' own height, so opening the page moves neither the card
+    /// nor the composer: the pulled height while they overflow, else their
+    /// natural height, and at least room for the page's header.
+    private var sidePageHeight: CGFloat {
+        let messages = overflows
+            ? messagesCap + (expandedCap - messagesCap) * heightPull.progress
+            : contentHeight + Self.glassGutter * 2
+        return max(messages, 160)
+    }
+
+    /// The Sub-thread page with no copies yet. With copies, Sub-thread is
+    /// drawn by `messages`, exactly as the thread is.
     private var copyThreadTab: some View {
-        let turns = model.copyThreadConversation.filter(\.isDrawn)
-        if turns.isEmpty {
+        VStack(spacing: 0) {
             Text(L("copyThread.empty"))
                 .sfFont(Tokens.TypeSize.label)
                 .foregroundStyle(Tokens.text4)
                 .multilineTextAlignment(.center)
                 .padding(.top, 8)
             Spacer(minLength: 0)
-        } else {
-            ScrollViewReader { proxy in
-                ScrollView(.vertical, showsIndicators: false) {
-                    LazyVStack(alignment: .leading, spacing: Self.bubbleGap) {
-                        ForEach(Array(turns.enumerated()), id: \.element.id) { i, turn in
-                            ChatRow(turn: turn, model: model,
-                                    isLast: i == turns.count - 1,
-                                    question: turns.question(at: i),
-                                    recentCards: [],
-                                    onScreen: false,
-                                    live: nil, streamingNow: false, askFailed: false)
-                                .equatable()
-                                .modifier(ThreadScrollLagOffset())
-                        }
-                    }
-                    .modifier(ThreadScrollLagHost())
-                    .padding(.bottom, NotchBody.panelPadding)
-                    .background(EnclosingScrollViewReporter { ThreadScrollLag.shared.attach($0) })
-                    Color.clear.frame(height: 0).id(Self.bottomID)
-                }
-                .environment(\.cardWidthFraction, 1)
-                .onAppear {
-                    DispatchQueue.main.async { proxy.scrollTo(Self.bottomID, anchor: .bottom) }
-                }
-            }
+        }
+    }
+
+    /// Sub-thread's name and its ×, at the top left of the messages, on the
+    /// same blur as the header chips.
+    private var subThreadTitle: some View {
+        HStack(spacing: 6) {
+            Text(L("copyThread.tab")).captionLabel()
+            SidePageCloseButton { model.showRoutines = false }
+        }
+        .padding(.leading, 10)
+        .padding(.trailing, 4)
+        .background {
+            Capsule(style: .continuous)
+                .fill(colorScheme == .light ? Color.white.opacity(0.92) : Color.black.opacity(0.7))
+                .padding(-4)
+                .blur(radius: 8)
+                .allowsHitTesting(false)
         }
     }
 
@@ -452,16 +508,18 @@ struct MenuBarChat: View {
                                                                  fresh: id == lastID)
                                         : [],
                                     onScreen: onScreen,
-                                    live: turn.streaming ? model.chatLiveStatus : nil,
-                                    streamingNow: id == lastID && model.isStreaming,
-                                    askFailed: id == lastID && model.visibleAskError != nil)
+                                    live: turn.streaming && !showsCopies ? model.chatLiveStatus : nil,
+                                    streamingNow: !showsCopies && id == lastID && model.isStreaming,
+                                    askFailed: !showsCopies && id == lastID && model.visibleAskError != nil,
+                                    holdsAnswer: model.welcomeHeldAnswers.contains(id),
+                                    holdsLink: model.welcomeHeldLinks.contains(id))
                                 .equatable()
-                                .modifier(ThreadScrollLagOffset())
+                                .modifier(CullsOffscreenGlass(viewport: glassViewport))
                         }
                     }
                 }
-                .modifier(ThreadScrollLagHost())
-                .background(EnclosingScrollViewReporter { ThreadScrollLag.shared.attach($0) })
+                .coordinateSpace(name: GlassCullViewport.space)
+                .background(EnclosingScrollViewReporter { [scrollRef] in scrollRef.view = $0 })
                 .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height in
                     scroll.measured = height
                     // Any growth (streamed text, a settled answer's layout,
@@ -493,6 +551,7 @@ struct MenuBarChat: View {
             .id(turns.first?.id)
             .modifier(OpensAtEnd(followsEnd: followsEnd))
             .scrollDisabled(!overflows)
+            .modifier(TracksGlassViewport(viewport: glassViewport))
             .modifier(TrackScrollEnd(position: scroll, changed: { end in
                 if followsEnd != end { followsEnd = end }
             }, reachedTop: {
@@ -501,18 +560,22 @@ struct MenuBarChat: View {
                 guard start > 0 else { return }
                 loadOlder(proxy, keeping: turns[start].id)
             }))
-            .frame(height: overflows ? messagesCap + Self.composerOverlap
-                   : contentHeight + Self.glassGutter * 2)
-            .mask(fadeMask)
-            // Messages scrolling down toward the composer blur out instead of
-            // fading to clear.
-            .overlay(alignment: .bottom) {
-                if overflows {
-                    BackdropBlur(radius: 14)
-                        .frame(height: Self.bottomBlur + Self.composerOverlap)
-                        .allowsHitTesting(false)
-                }
-            }
+            .modifier(PulledHeight(
+                pull: heightPull,
+                overflows: overflows,
+                collapsed: messagesCap + Self.composerOverlap,
+                expanded: expandedCap + Self.composerOverlap,
+                natural: contentHeight + Self.glassGutter * 2,
+                blurHeight: Self.bottomBlur + Self.composerOverlap,
+                mask: AnyView(fadeMask),
+                // The height moves only with the list at its end: keep it
+                // there through every frame of the move. Not gated on
+                // `scroll.atBottom`: the shrinking frame itself, under fingers
+                // on the trackpad, reads as the reader leaving the end.
+                resized: {
+                    scrollRef.holdEnd()
+                    scroll.atBottom = true
+                }))
             .padding(.horizontal, -Self.glassGutter)
             .padding(.vertical, overflows ? 0 : -Self.glassGutter)
             // The gaps between bubbles take the wheel too, instead of passing
@@ -556,6 +619,7 @@ struct MenuBarChat: View {
                     contentHeight = scroll.measured
                 }
                 recentCardsCache.clear()
+                heightPull.reset()
                 pinMountedBatch()
                 scroll.atBottom = true
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { endRequest += 1 }
@@ -568,6 +632,18 @@ struct MenuBarChat: View {
                 }
             }
         }
+    }
+
+    /// Hands the pull what it judges a gesture by. Reads the view's state
+    /// through its storage, so the closures see current values.
+    private func installHeightPull() {
+        heightPull.span = { expandedCap - messagesCap }
+        heightPull.accepts = { [scrollRef] event in
+            overflows && (!model.showRoutines || showsCopies) && model.pointerInside
+                && event.window != nil && event.window === scrollRef.view?.window
+        }
+        heightPull.atEnd = { scroll.atBottom }
+        heightPull.install()
     }
 
     /// The index of the oldest mounted message: `mountedFromID`'s, or with
@@ -676,6 +752,7 @@ struct MenuBarChat: View {
                                       floating: true))
             .clipShape(shape)
             .overlay(IslandRim(shape: shape))
+            .background(LightGlassShadow(shape: shape))
             .contentShape(shape)
             .contextMenu { chatMenu }
             .onHover { hovering in
@@ -690,6 +767,7 @@ struct MenuBarChat: View {
     private var bottomRowMenuOpen: Bool {
         model.showModelPicker || model.showAskModelPicker || model.showAgentPicker
             || model.showAgentFolderPicker || model.showLoopIntervalPicker
+            || model.isAttachMenuOpen || model.isFolderPickerOpen
     }
 }
 
@@ -756,16 +834,25 @@ private struct ChatRow: View, Equatable {
     /// For the last message: an answer is streaming, or the round failed.
     let streamingNow: Bool
     let askFailed: Bool
+    /// The welcome guide's example card still holds back its answer, or its
+    /// link card (`NotchModel.welcomeHeldAnswers`, `.welcomeHeldLinks`).
+    var holdsAnswer = false
+    var holdsLink = false
 
     static func == (a: ChatRow, b: ChatRow) -> Bool {
         a.turn == b.turn && a.onScreen == b.onScreen && a.live == b.live
+            && a.holdsAnswer == b.holdsAnswer && a.holdsLink == b.holdsLink
             && a.streamingNow == b.streamingNow && a.askFailed == b.askFailed
             && a.isLast == b.isLast && a.question == b.question
             && a.recentCards == b.recentCards
     }
 
     var body: some View {
-        if turn.role == "user" {
+        if let example = turn.example {
+            WelcomeExampleCard(example: example, showsAnswer: !holdsAnswer, showsLink: !holdsLink)
+        } else if turn.licenseCard {
+            WelcomeLicenseCard(model: model)
+        } else if turn.role == "user" {
             VStack(alignment: .leading, spacing: 5) {
                 if !turn.imageFiles.isEmpty {
                     SavedTurnImages(files: turn.imageFiles)
@@ -781,7 +868,6 @@ private struct ChatRow: View, Equatable {
     }
 
     private var assistantRow: some View {
-        let canRegenerate = onScreen && isLast && !turn.isAgent && !streamingNow && !askFailed
         return LiveText(live: turn.streaming ? model.liveAnswer : .inert,
                         id: turn.id, fallback: turn.text) { text in
             AssistantTurnView(
@@ -798,9 +884,6 @@ private struct ChatRow: View, Equatable {
                 isAgent: turn.isAgent,
                 showsFooterMetadata: !turn.isAgent,
                 onInAppCopy: { model.rebaselineClipboardAfterInAppWrite() },
-                onRegenerate: canRegenerate ? { model.regenerateLastAnswer() } : nil,
-                regenerateModels: canRegenerate ? model.regenerateModelOptions : [],
-                onRegenerateWith: canRegenerate ? { model.regenerateLastAnswer(model: $0) } : nil,
                 regenModel: turn.regenModel,
                 answerModel: turn.answerModel,
                 agentTrail: turn.isAgent
@@ -997,6 +1080,336 @@ private struct LiveText<Content: View>: View {
 /// layout) keeps the bottom in place. Once the reader scrolls up, size changes
 /// keep the top in place instead, so a scroll up is not pushed back. macOS 14
 /// has no per-role anchor.
+/// The menu bar chat's message scroll view, for `ChatHeightPull`.
+final class MessagesScrollRef {
+    weak var view: NSScrollView? {
+        didSet {
+            guard view !== oldValue else { return }
+            if let frameObserver { NotificationCenter.default.removeObserver(frameObserver) }
+            frameObserver = nil
+            guard let view else { return }
+            view.postsFrameChangedNotifications = true
+            // In the layout pass that resizes the scroll view, before it
+            // draws: the list never shows a frame away from its end.
+            frameObserver = NotificationCenter.default.addObserver(
+                forName: NSView.frameDidChangeNotification, object: view, queue: nil
+            ) { [weak self] _ in
+                guard let self, self.holdsEnd else { return }
+                self.scrollToEnd()
+            }
+        }
+    }
+    private var frameObserver: NSObjectProtocol?
+    private var release: DispatchWorkItem?
+    /// The height is moving: every resize puts the list back at its end.
+    private(set) var holdsEnd = false
+
+    /// Holds the end through the resizes of the next moment.
+    func holdEnd() {
+        holdsEnd = true
+        scrollToEnd()
+        release?.cancel()
+        let item = DispatchWorkItem { [weak self] in self?.holdsEnd = false }
+        release = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: item)
+    }
+
+    deinit {
+        if let frameObserver { NotificationCenter.default.removeObserver(frameObserver) }
+    }
+
+    /// Puts the list's end at the bottom of the scroll view now, in the
+    /// layout pass that changed its height.
+    func scrollToEnd() {
+        guard let view, let doc = view.documentView else { return }
+        let clip = view.contentView
+        let height = clip.bounds.height
+        let y = doc.isFlipped ? max(0, doc.frame.height - height) : 0
+        guard abs(clip.bounds.minY - y) > 0.5 else { return }
+        clip.scroll(to: NSPoint(x: clip.bounds.minX, y: y))
+        view.reflectScrolledClipView(clip)
+    }
+}
+
+/// The messages' frame in the menu bar chat: as tall as they are while they
+/// fit, else between the two heights by `ChatHeightPull.progress`. Observes
+/// the pull itself, so a pull frame re-runs this and not the whole chat.
+private struct PulledHeight: ViewModifier {
+    @ObservedObject var pull: ChatHeightPull
+    let overflows: Bool
+    let collapsed: CGFloat
+    let expanded: CGFloat
+    let natural: CGFloat
+    let blurHeight: CGFloat
+    let mask: AnyView
+    let resized: () -> Void
+
+    func body(content: Content) -> some View {
+        let height = overflows
+            ? collapsed + (max(expanded, collapsed) - collapsed) * pull.progress
+            : natural
+        content
+            .frame(height: height)
+            .mask(mask)
+            // Messages scrolling down toward the composer blur out instead of
+            // fading to clear.
+            .overlay(alignment: .bottom) {
+                if overflows {
+                    BackdropBlur(radius: 14)
+                        .frame(height: blurHeight)
+                        .allowsHitTesting(false)
+                }
+            }
+            .onChange(of: pull.progress) { _, _ in resized() }
+    }
+}
+
+/// The menu bar chat's two heights, moved the way the notch's thread pull
+/// moves (`NotchModel.handleThreadPullScroll`): at the end of the list a
+/// two-finger pull down grows the messages point for point with the
+/// fingers, and a swipe up shrinks them. Lifted mid-way, the height
+/// settles on one of the two by distance and speed. A gesture that starts
+/// anywhere else, or that goes the other way, scrolls the list.
+final class ChatHeightPull: ObservableObject {
+    /// 0 is the short height, 1 the tall one.
+    @Published private(set) var progress: CGFloat = 0
+
+    /// Points between the two heights.
+    var span: () -> CGFloat = { 0 }
+    /// The event is over the chat and the messages overflow.
+    var accepts: (NSEvent) -> Bool = { _ in false }
+    /// The list is scrolled to its end.
+    var atEnd: () -> Bool = { true }
+
+    private enum Gesture { case none, pendingOpen, pendingClose, tracking, ignoring, coasting }
+    private var gesture: Gesture = .none
+    private var closing = false
+    private var distance: CGFloat = 0
+    private var samples: [(time: TimeInterval, delta: CGFloat)] = []
+    private var monitor: Any?
+    private var ticker: Timer?
+    private var settleID = 0
+
+    func install() {
+        guard monitor == nil else { return }
+        monitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
+            guard let self else { return event }
+            return self.handle(event) ? nil : event
+        }
+    }
+
+    func uninstall() {
+        if let monitor { NSEvent.removeMonitor(monitor) }
+        monitor = nil
+    }
+
+    /// Back to the short height at once.
+    func reset() {
+        settleID += 1
+        ticker?.invalidate()
+        ticker = nil
+        gesture = .none
+        set(0)
+    }
+
+    deinit {
+        if let monitor { NSEvent.removeMonitor(monitor) }
+        ticker?.invalidate()
+    }
+
+    private var room: CGFloat { max(span(), 0) }
+
+    /// Positive `scrollingDeltaY` moves content down (fingers down, with
+    /// natural scrolling): the pull that opens.
+    private func handle(_ event: NSEvent) -> Bool {
+        // The coast after the fingers lift belongs to the gesture that ended.
+        if event.momentumPhase != [] {
+            guard gesture == .coasting else { return false }
+            if event.momentumPhase == .ended || event.momentumPhase == .cancelled {
+                gesture = .none
+            }
+            return true
+        }
+        let dy = event.scrollingDeltaY
+        // A mouse wheel has no phases: one notch plays the whole move.
+        if event.phase == [] {
+            guard ticker == nil, room > 1, accepts(event), atEnd() else { return false }
+            if dy > 0, progress == 0 { settle(open: true, velocity: 0); return true }
+            if dy < 0, progress == 1 { settle(open: false, velocity: 0); return true }
+            return false
+        }
+        switch event.phase {
+        case .began:
+            samples = []
+            distance = 0
+            guard ticker == nil, room > 1, accepts(event), atEnd() else {
+                gesture = .ignoring
+                return false
+            }
+            if progress == 0 {
+                gesture = .pendingOpen
+                return true
+            }
+            if progress == 1 {
+                // Not consumed: until it turns out to be a swipe up, it may be
+                // a scroll, and the list needs its start.
+                gesture = .pendingClose
+                return false
+            }
+            gesture = .ignoring
+            return false
+        case .changed:
+            switch gesture {
+            case .pendingOpen:
+                // Up, or mostly sideways, isn't a pull.
+                if dy < 0 || abs(event.scrollingDeltaX) > abs(dy) {
+                    gesture = .ignoring
+                    return false
+                }
+                guard dy > 0 else { return true }
+                closing = false
+                gesture = .tracking
+                track(dy)
+                return true
+            case .pendingClose:
+                if dy > 0 || abs(event.scrollingDeltaX) > 2 * abs(dy) && dy != 0 {
+                    gesture = .ignoring
+                    return false
+                }
+                guard dy < 0 else { return false }
+                closing = true
+                gesture = .tracking
+                track(dy)
+                return true
+            case .tracking:
+                track(dy)
+                return true
+            case .coasting:
+                return true
+            case .none, .ignoring:
+                return false
+            }
+        case .ended, .cancelled:
+            switch gesture {
+            case .tracking:
+                gesture = .coasting
+                release()
+                return true
+            case .pendingOpen, .coasting:
+                gesture = .coasting
+                return true
+            case .pendingClose, .none, .ignoring:
+                gesture = .none
+                return false
+            }
+        default:
+            return gesture == .tracking
+        }
+    }
+
+    /// The height follows the fingers point for point. Reaching either
+    /// height ends the move without waiting for the fingers to lift.
+    private func track(_ dy: CGFloat) {
+        let step = closing ? -dy : dy
+        distance = max(0, distance + step)
+        let now = ProcessInfo.processInfo.systemUptime
+        samples.append((now, step))
+        samples.removeAll { now - $0.time > 0.08 }
+        let travelled = min(distance / max(room, 1), 1)
+        set(closing ? 1 - travelled : travelled)
+        if travelled >= 1 {
+            gesture = .coasting
+        }
+    }
+
+    /// Fingers lifted mid-way: the same thresholds as the notch's thread pull.
+    private func release() {
+        let times = samples.map(\.time)
+        let elapsed = max((times.max() ?? 0) - (times.min() ?? 0), 1.0 / 120)
+        let velocity = samples.reduce(0) { $0 + $1.delta } / elapsed
+        let speed = velocity / max(room, 1)
+        if closing {
+            let travelled = 1 - progress
+            let closes = (travelled > 0.2 && velocity > -250) || (travelled > 0.1 && velocity > 400)
+            settle(open: !closes, velocity: -speed)
+        } else {
+            let opens = velocity > 500 || (progress > 0.33 && velocity > -250)
+            settle(open: opens, velocity: speed)
+        }
+    }
+
+    /// Written one un-animated value per frame, like the thread pull's
+    /// settle (`NotchModel.settleThreadPull`).
+    private func settle(open opens: Bool, velocity: CGFloat) {
+        let from = Double(progress)
+        let to: Double = opens ? 1 : 0
+        let remaining = to - from
+        guard abs(remaining) > 0.0005 else { set(CGFloat(to)); return }
+        let initial = abs(remaining) > 0.01
+            ? min(max(Double(velocity) / remaining, -10), 10) * remaining : 0
+        let spring = Spring(duration: 0.42, bounce: 0)
+        let duration = spring.settlingDuration(fromValue: from, toValue: to,
+                                               initialVelocity: initial, epsilon: 0.001)
+        settleID += 1
+        let id = settleID
+        let start = CACurrentMediaTime()
+        ticker?.invalidate()
+        let timer = Timer(timeInterval: 1.0 / 120.0, repeats: true) { [weak self] timer in
+            guard let self, self.settleID == id else {
+                timer.invalidate()
+                return
+            }
+            let t = CACurrentMediaTime() - start
+            let value = spring.value(fromValue: from, toValue: to, initialVelocity: initial, time: t)
+            // Done once within half a point of the end: the spring's tail
+            // moves nothing on screen, and a new gesture waits for it.
+            if t >= duration || abs(value - to) * Double(max(self.room, 1)) < 0.5 {
+                timer.invalidate()
+                self.ticker = nil
+                self.set(CGFloat(to))
+                return
+            }
+            self.set(CGFloat(value))
+        }
+        ticker = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    private func set(_ value: CGFloat) {
+        guard progress != value else { return }
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) { progress = value }
+    }
+}
+
+/// The card header's pin while Jev holds it: "Jev pinned" and the tack in
+/// one glass capsule, drawn like the Recent chip's "N running" capsule
+/// (`IdleTrailingCluster.runningRecentChip`). A click takes the pin off.
+private struct JevPinnedChip: View {
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 5) {
+                Text(L("result.jevPinned"))
+                    .sfFont(Tokens.TypeSize.label, weight: .medium)
+                PinStateGlyph(pinned: true, size: 11, weight: .regular)
+            }
+            .foregroundStyle(Color.primary.opacity(hovering ? 1 : 0.82))
+            .padding(.horizontal, 10)
+            .frame(height: 26)
+            .glassCapsule(in: Capsule(style: .continuous), brighter: hovering)
+            .contentShape(Capsule(style: .continuous))
+        }
+        .buttonStyle(GlassPressStyle())
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
+        .help(L("result.unpin"))
+    }
+}
+
 private struct OpensAtEnd: ViewModifier {
     let followsEnd: Bool
 
@@ -1140,6 +1553,52 @@ private final class BackdropBlurView: NSView {
         self.spot = spot
         super.init(frame: .zero)
         wantsLayer = true
+        // After another window or app comes forward, the backdrop kept showing
+        // what was behind the card before the switch. Rebuild it on those events.
+        let center = NotificationCenter.default
+        let workspace = NSWorkspace.shared.notificationCenter
+        observers = [
+            workspace.addObserver(forName: NSWorkspace.didActivateApplicationNotification,
+                                  object: nil, queue: .main) { [weak self] _ in self?.refresh() },
+            center.addObserver(forName: NSWindow.didBecomeKeyNotification,
+                               object: nil, queue: .main) { [weak self] _ in self?.refresh() },
+            center.addObserver(forName: NSWindow.didResignKeyNotification,
+                               object: nil, queue: .main) { [weak self] _ in self?.refresh() },
+        ]
+    }
+
+    private var observers: [NSObjectProtocol] = []
+
+    deinit {
+        observers.forEach {
+            NotificationCenter.default.removeObserver($0)
+            NSWorkspace.shared.notificationCenter.removeObserver($0)
+        }
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        refresh()
+    }
+
+    /// Takes the backdrop off and puts it back a frame later, so the window
+    /// server samples it again instead of reusing the old capture.
+    private func refresh() {
+        guard let layer, window != nil else { return }
+        let filters = layer.filters
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        layer.setValue(false, forKey: "enabled")
+        layer.filters = nil
+        CATransaction.commit()
+        DispatchQueue.main.async { [weak layer] in
+            guard let layer else { return }
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            layer.filters = filters
+            layer.setValue(true, forKey: "enabled")
+            CATransaction.commit()
+        }
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
@@ -1149,6 +1608,10 @@ private final class BackdropBlurView: NSView {
             return CALayer()
         }
         let layer = backdrop.init()
+        // The window server caches the filtered backdrop and on screen kept
+        // showing what was behind the card before (screenshots re-render and
+        // did not show it). Filter every frame from the current backdrop.
+        layer.setValue(true, forKey: "disableFilterCache")
         if !spot, let filter = Self.filter("variableBlur") {
             filter.setValue(radius, forKey: "inputRadius")
             filter.setValue(true, forKey: "inputNormalizeEdges")
@@ -1220,3 +1683,78 @@ private final class BackdropBlurView: NSView {
         return context.makeImage()
     }
 }
+
+/// The visible part of a message list, in the coordinates of its message
+/// stack (`space`), rounded out to `step` so a scroll republishes it once per
+/// `step` points instead of every frame. `nil` until the scroll view reports,
+/// which draws every message's glass.
+final class GlassCullViewport: ObservableObject {
+    static let space = "chatGlassCull"
+    private static let step: CGFloat = 80
+    @Published private(set) var visible: ClosedRange<CGFloat>?
+
+    func update(_ rect: CGRect) {
+        guard rect.height > 0 else { return }
+        let lo = (rect.minY / Self.step).rounded(.down) * Self.step
+        let hi = (rect.maxY / Self.step).rounded(.up) * Self.step
+        if visible != lo...hi { visible = lo...hi }
+    }
+
+    func reset() {
+        if visible != nil { visible = nil }
+    }
+}
+
+/// Feeds a message list's scroll view's visible rect to its `GlassCullViewport`.
+/// Before macOS 15 there is no scroll geometry, and nothing is culled.
+private struct TracksGlassViewport: ViewModifier {
+    let viewport: GlassCullViewport
+
+    func body(content: Content) -> some View {
+        if #available(macOS 15.0, *) {
+            content
+                .onScrollGeometryChange(for: CGRect.self) { $0.visibleRect } action: { _, rect in
+                    viewport.update(rect)
+                }
+                // A new scroll view (a new thread) starts with nothing culled
+                // until it reports.
+                .onAppear { viewport.reset() }
+        } else {
+            content
+        }
+    }
+}
+
+/// Draws a message's glass only while the message is within `margin` of the
+/// visible part of the list. Each bubble's glass is a platform view that the
+/// scroll view moves on every frame, and on a long thread moving all of them
+/// took most of each scroll frame. Messages out of view are not seen, so
+/// dropping their glass changes nothing on screen; the margin puts it back
+/// before the message scrolls in.
+///
+/// The message's frame is read in the message stack's coordinates, which
+/// change only with layout, and the visible range comes from the scroll view's
+/// own geometry. Reading the message's bounds in the scroll view's space
+/// instead missed scrolls, and a message on screen kept its glass off.
+private struct CullsOffscreenGlass: ViewModifier {
+    @ObservedObject var viewport: GlassCullViewport
+    @State private var span: ClosedRange<CGFloat>?
+    private static let margin: CGFloat = 320
+
+    private var culled: Bool {
+        guard let visible = viewport.visible, let span else { return false }
+        return span.upperBound < visible.lowerBound - Self.margin
+            || span.lowerBound > visible.upperBound + Self.margin
+    }
+
+    func body(content: Content) -> some View {
+        content
+            .environment(\.chatGlassCulled, culled)
+            .onGeometryChange(for: CGRect.self) { geo in
+                geo.frame(in: .named(GlassCullViewport.space))
+            } action: { frame in
+                span = frame.minY...max(frame.minY, frame.maxY)
+            }
+    }
+}
+

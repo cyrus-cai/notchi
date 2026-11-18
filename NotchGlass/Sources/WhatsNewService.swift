@@ -33,6 +33,8 @@ final class WhatsNewService: ObservableObject {
         var headline: String?
         var heroAssetName: String?
         var blurb: String?
+        /// A switch under the blurb for the setting the headline is about.
+        var blurbSwitch: BlurbSwitch?
         var features: [String]
         var improvements: [String]
         var fixes: [String]
@@ -50,6 +52,12 @@ final class WhatsNewService: ObservableObject {
         ///
         /// A closed enum, not a closure: `Entry` is `Equatable` (the panel animates
         /// on it) and closures aren't. The view owns where each case goes.
+        enum BlurbSwitch: String, Equatable {
+            /// The menu bar icon (`MenuBarIconVisibility`): clicking it opens
+            /// the menu bar card.
+            case menuBarIcon
+        }
+
         enum Action: String, Equatable {
             /// Settings → Appearance, where Force click pressure lives.
             case forceClickPressure
@@ -70,6 +78,7 @@ final class WhatsNewService: ObservableObject {
             headline: String? = nil,
             heroAssetName: String? = nil,
             blurb: String? = nil,
+            blurbSwitch: BlurbSwitch? = nil,
             features: [String] = [],
             improvements: [String] = [],
             fixes: [String] = [],
@@ -81,6 +90,7 @@ final class WhatsNewService: ObservableObject {
             self.headline = headline
             self.heroAssetName = heroAssetName
             self.blurb = blurb
+            self.blurbSwitch = blurbSwitch
             self.features = features; self.improvements = improvements
             self.fixes = fixes; self.others = others
             self.action = action; self.actionAfter = actionAfter
@@ -106,6 +116,42 @@ final class WhatsNewService: ObservableObject {
     /// English-only by design. Order doesn't matter — `sorted` puts the newest
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
+        Entry(
+            version: "0.9.40",
+            date: "2026-11-18",
+            headline: "Introducing the menu bar mode.",
+            heroAssetName: "WhatsNew0940Promo",
+            blurb: "Click the Notchi icon in the menu bar to chat in a card under it. It shows the same conversation as the notch, and follows light or dark mode.",
+            blurbSwitch: .menuBarIcon,
+            features: [
+                "This update turns the menu bar icon on.",
+                "The menu bar card follows the system's light or dark appearance.",
+                "+ in the prompt attaches files, photos or a folder.",
+                "Pull down at the end of the menu bar card's messages to make it taller. Swipe up to shrink it.",
+                "Jev can pin an answer so the card stays open. Turn it off in Settings → General.",
+                "Answers that worked in a folder show \"Used a folder\". Hover shows the paths.",
+                "The ⋯ menu has a switch for the cloud machine.",
+            ],
+            improvements: [
+                "Scheduled tasks show their answer only when they finish.",
+                "A loop says why it stopped. It pauses when the stop condition you wrote is met.",
+                "Frequent proactive messages have no daily limit and follow up on any topic, paced by your replies.",
+                "New Notchi models show a New tag for seven days.",
+                "The intro animation uses Notchi's eyes.",
+                "Memory recall puts notes that share numbers, emails or words with your message first.",
+                "The cloud machine reads web pages with read_page instead of curl.",
+                "Screenshots from the cloud machine are saved in Notchi instead of a public link.",
+                "In the Settings window, Back sits on its own line under the window buttons.",
+                "Long chats scroll without stutter.",
+                "An answer's right-click menu lists Copy first, then Copy as Markdown.",
+                "Routines and Sub-thread open as separate pages from the ⋯ menu.",
+                "Regenerate, Regenerate with… and ⌘R are removed.",
+            ],
+            fixes: [
+                "Fixed tapping a notification opening a second copy of Notchi.",
+                "Fixed link previews showing cut corners.",
+            ]
+        ),
         Entry(
             version: "0.9.32",
             date: "2026-11-12",

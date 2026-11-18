@@ -98,6 +98,17 @@ enum LucideIcons {
         "M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z",
     ], viewBox: 24)
 
+    /// Lucide `plus` — the prompt's attach chip.
+    static let plus = Mark(paths: [
+        "M5 12h14",
+        "M12 5v14",
+    ], viewBox: 24)
+
+    /// Lucide `paperclip` — the attach menu's file row.
+    static let paperclip = Mark(paths: [
+        "m16 6-8.414 8.586a2 2 0 0 0 2.829 2.829l8.414-8.586a4 4 0 1 0-5.657-5.657l-8.379 8.551a6 6 0 1 0 8.485 8.485l8.379-8.551",
+    ], viewBox: 24)
+
     /// Lucide `chevron-down` — the Recent disclosure on the flat chips.
     static let chevronDown = Mark(paths: [
         "m6 9 6 6 6-6",

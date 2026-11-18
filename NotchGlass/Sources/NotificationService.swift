@@ -1,4 +1,4 @@
-import Foundation
+import AppKit
 import UserNotifications
 
 /// Posts a native macOS notification when an Ask finishes *after the user has
@@ -50,9 +50,54 @@ final class NotificationService: NSObject {
         super.init()
     }
 
+    /// Distributed notification carrying a banner tap from a copy of the app
+    /// that macOS launched for the tap to the copy that is already running.
+    /// LaunchServices can pick another registered Notchi.app (for example the
+    /// Xcode DerivedData build) for a tap; that copy must not replace the
+    /// running one.
+    private static let forwardedTap = Notification.Name("com.notchglass.app.forwardedNotificationTap")
+    private static let forwardedCategoryKey = "category"
+
+    /// Set when this process was launched only to deliver a banner tap while
+    /// another copy is running: the tap is forwarded, then this process quits.
+    private(set) var forwardsTaps = false
+
     /// Wire the delegate so taps route back into the app. Call once at launch.
     func configure() {
         center.delegate = self
+        DistributedNotificationCenter.default().addObserver(
+            forName: Self.forwardedTap, object: nil, queue: .main
+        ) { note in
+            let info = note.userInfo ?? [:]
+            let category = info[Self.forwardedCategoryKey] as? String
+            let raw = info[Self.threadIDKey] as? String
+            Task { @MainActor in
+                Self.route(category: category, threadID: raw)
+            }
+        }
+    }
+
+    /// Configure for a launch that only delivers a banner tap to the running
+    /// copy. Quits after forwarding, or after `timeout` if no tap arrives.
+    func configureAsTapForwarder(timeout: TimeInterval = 3) {
+        forwardsTaps = true
+        center.delegate = self
+        DispatchQueue.main.asyncAfter(deadline: .now() + timeout) {
+            NSApp.terminate(nil)
+        }
+    }
+
+    /// Post the local tap notification that `AppDelegate` observes.
+    private static func route(category: String?, threadID raw: String?) {
+        let id = raw.flatMap(UUID.init(uuidString:))
+        if category == agentCategory {
+            NotificationCenter.default.post(
+                name: agentTapped, object: nil,
+                userInfo: id.map { [threadIDKey: $0] } ?? [:])
+        } else if let id {
+            NotificationCenter.default.post(
+                name: answerTapped, object: nil, userInfo: [threadIDKey: id])
+        }
     }
 
     /// Post an "answer ready" banner for a finished, walked-away Ask. Requests
@@ -181,26 +226,27 @@ extension NotificationService: UNUserNotificationCenterDelegate {
         withCompletionHandler completionHandler: @escaping () -> Void
     ) {
         let content = response.notification.request.content
-        if content.categoryIdentifier == Self.agentCategory {
+        let category = content.categoryIdentifier
+        let raw = content.userInfo[Self.threadIDKey] as? String
+        Task { @MainActor in
+            if self.forwardsTaps {
+                // Hand the tap to the running copy, then quit this one.
+                var info: [String: String] = [Self.forwardedCategoryKey: category]
+                if let raw { info[Self.threadIDKey] = raw }
+                DistributedNotificationCenter.default().postNotificationName(
+                    Self.forwardedTap, object: nil, userInfo: info,
+                    deliverImmediately: true)
+                completionHandler()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                    NSApp.terminate(nil)
+                }
+                return
+            }
             // Agent-task banner: summon the panel and reopen the run's Recent
-            // record when one was filed (the id rides along like an answer tap's).
-            let userInfo: [String: Any] = (content.userInfo[Self.threadIDKey] as? String)
-                .flatMap(UUID.init(uuidString:))
-                .map { [Self.threadIDKey: $0] } ?? [:]
-            Task { @MainActor in
-                NotificationCenter.default.post(name: Self.agentTapped, object: nil,
-                                                userInfo: userInfo)
-            }
-        } else if let raw = content.userInfo[Self.threadIDKey] as? String,
-                  let id = UUID(uuidString: raw) {
-            Task { @MainActor in
-                NotificationCenter.default.post(
-                    name: Self.answerTapped,
-                    object: nil,
-                    userInfo: [Self.threadIDKey: id])
-            }
+            // record when one was filed. Answer banner: reopen the thread.
+            Self.route(category: category, threadID: raw)
+            completionHandler()
         }
-        completionHandler()
     }
 
     /// Show the banner even while Notch is the frontmost app — it's an accessory

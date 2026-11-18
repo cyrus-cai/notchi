@@ -415,7 +415,10 @@ actor InstaBoxMachine {
         let data = try await withMachine { id, key in
             // Waking takes up to 45 seconds on top of the command's own time.
             var body: [String: Any] = ["cmd": command, "timeoutSeconds": Int(timeout)]
-            if !env.isEmpty { body["envs"] = env }
+            // Debian marks the system Python as externally managed, so a plain
+            // `pip install` exits 1. On 2026-11-12 a model lost three calls to
+            // that before adding --break-system-packages by hand.
+            body["envs"] = Self.baseEnv.merging(env) { _, given in given }
             if let cwd { body["cwd"] = cwd }
             let request = InstaBoxAPI.request("POST", "/v1/machines/\(id)/exec", key: key,
                                               timeout: timeout + 75)
@@ -429,6 +432,9 @@ actor InstaBoxMachine {
         if reply["truncated"] as? Bool == true { output += "\n[Output cut at 1 MiB.]" }
         return (output, (reply["exitCode"] as? NSNumber)?.intValue ?? -1, reply["timedOut"] as? Bool ?? false)
     }
+
+    /// Set on every command: `pip install` works without extra flags.
+    private static let baseEnv = ["PIP_BREAK_SYSTEM_PACKAGES": "1"]
 
     func read(_ path: String) async throws -> Data {
         try await withMachine { id, key in
@@ -506,10 +512,13 @@ struct CloudMachineTool: NotchTool {
     action=read and action=write handle text files on it. action=upload copies a file or \
     folder from this Mac to it and action=download saves a file from it to Downloads; \
     action=publish_port gives a port a public URL. These three ask the user first. \
+    action=show_image takes an image file on the machine (a screenshot you made, a \
+    chart) and returns a Markdown image line for your answer; use it to show the user \
+    a picture, not publish_port. pip install works without extra flags. \
     It also has a desktop with Chromium that you drive: action=browse opens a URL \
     and returns the page as numbered elements (fields, check boxes, buttons, links, \
     text). action=click presses element `index` (buttons, links, check boxes, radio \
-    buttons), action=fill types `text` into field `index` (replacing what is there), \
+    buttons; for a check box the result says whether it is now checked), action=fill types `text` into field `index` (replacing what is there), \
     action=select chooses option `text` in drop-down `index`, action=type and \
     action=key send text or a key (Return, Tab, ctrl+a) to what has focus, \
     action=scroll moves the page, action=back goes back, and action=page_state reads \
@@ -524,7 +533,7 @@ struct CloudMachineTool: NotchTool {
     let schema: [String: Any] = [
         "type": "object",
         "properties": [
-            "action": ["type": "string", "enum": ["shell", "read", "write", "upload", "download", "publish_port",
+            "action": ["type": "string", "enum": ["shell", "read", "write", "upload", "download", "publish_port", "show_image",
                                                   "browse", "page_state", "click", "fill", "select",
                                                   "type", "key", "scroll", "back", "show_element"]],
             "url": ["type": "string", "description": "action=browse: the page to open."],
@@ -545,7 +554,7 @@ struct CloudMachineTool: NotchTool {
                            "description": "action=shell: start it and return at once with its log file."],
             "cwd": ["type": "string", "description": "action=shell: working directory. Default /data/home."],
             "path": ["type": "string",
-                     "description": "read, write, download: the path on the machine. upload: where to put it there."],
+                     "description": "read, write, download, show_image: the path on the machine. upload: where to put it there."],
             "content": ["type": "string", "description": "action=write: the file's full text."],
             "local_path": ["type": "string", "description": "action=upload: the file or folder on this Mac."],
             "port": ["type": "integer", "description": "action=publish_port: the port the server listens on."],
@@ -570,10 +579,11 @@ struct CloudMachineTool: NotchTool {
         case "upload": return try await upload(input)
         case "download": return try await download(input)
         case "publish_port": return try await publish(input)
+        case "show_image": return try await showImage(input)
         case let action? where Self.browserActions.contains(action):
             return try await browser(input)
         default:
-            return "Error: action must be shell, read, write, upload, download, publish_port, "
+            return "Error: action must be shell, read, write, upload, download, publish_port, show_image, "
                 + "browse, page_state, click, fill, select, type, key, scroll, back or show_element."
         }
     }
@@ -669,9 +679,119 @@ struct CloudMachineTool: NotchTool {
         return "/data/home/" + raw
     }
 
+    /// A command whose only job is reading public web pages: curl or wget a URL
+    /// and grep, cut or parse what comes back, or strip tags from a saved page.
+    /// On 2026-11-12 and 2026-11-14 a model sent 7, 28 and 32 such calls in
+    /// three rounds (2 to 34 seconds each, read_page answers in about 1), even
+    /// after the system prompt told it to use read_page. Commands that also
+    /// build, install, run containers or send data are left alone.
+    static func pageScraping(_ command: String) -> String? {
+        let lowered = command.lowercased()
+        let work = ["docker", "apt ", "apt-get", "pip install", "npm ", "npx ", "yarn ", "git clone",
+                    "make ", "cargo ", "go build", "go run", "tar ", "unzip", "chmod +x"]
+        if work.contains(where: lowered.contains) { return nil }
+        // curl that sends data (a form, an upload, POST) is not a page read.
+        let sends = #"\bcurl\b[^|\n]*\s(-d|--data\S*|-F|--form|-T|--upload-file|-X\s*(POST|PUT|PATCH|DELETE))\b"#
+        if command.range(of: sends, options: .regularExpression) != nil { return nil }
+        let stripsTags = [#"<[^>]+>"#, #"<[^>]*>"#, "<script", "html.unescape", "beautifulsoup",
+                          "bs4", "html2text", "lynx -dump", "w3m -dump"].contains(where: lowered.contains)
+        let fetches = lowered.range(of: #"\b(curl|wget)\b"#, options: .regularExpression) != nil
+            && lowered.contains("http")
+        let processes = lowered.range(of: #"\|\s*(grep|sed|awk|head|tail|cut|jq|python3?|tr|sort)\b"#,
+                                      options: .regularExpression) != nil
+            || lowered.range(of: #"-o\s+\S+\.(html?|json|xml|md|txt)\b"#, options: .regularExpression) != nil
+        guard stripsTags || (fetches && processes) else { return nil }
+        return """
+        Not run: this command only reads web pages, and the cloud machine is the slow \
+        way to do that. Use read_page with the URL for a page's text (it reads JSON \
+        too). To filter a large JSON reply or loop over many URLs, run the same \
+        command with run_shell on this Mac. A file saved on the cloud machine in an \
+        earlier round is not a current copy: fetch the page again. If neither \
+        read_page nor run_shell can reach the site, open it with action=browse.
+        """
+    }
+
+    /// A refusal for a shell command that drives the desktop by hand: xdotool
+    /// clicks, moves, key presses or typing. On 2026-11-16 a model installed
+    /// xdotool and clicked at guessed screen coordinates 4 times on two
+    /// displays after action=click left a check box unchanged; none landed.
+    /// The browser actions read element frames and click with the mouse
+    /// themselves. Reading window geometry or searching windows is left alone.
+    static func desktopScripting(_ command: String) -> String? {
+        let pattern = #"\bxdotool\b[^|;&\n]*\b(click|mousemove|mousedown|mouseup|key|keydown|keyup|type)\b"#
+        guard command.range(of: pattern, options: [.regularExpression, .caseInsensitive]) != nil else { return nil }
+        return """
+        Not run: clicking or typing on the desktop through xdotool is done by the browser \
+        actions. action=click on a check box or radio button reads its state afterwards and \
+        clicks it with the mouse when the first click left it unchanged; the result says \
+        whether it is checked. Use action=click, fill, type or key with an element number \
+        from the latest page state.
+        """
+    }
+
+    /// Files the command names by absolute path, or by bare name after a `cd`,
+    /// that look like saved data. Their age is reported after the command runs.
+    static func dataFiles(in command: String, cwd: String?) -> [String] {
+        let ext = #"\.(html?|json|xml|md|txt|csv|tsv|log)\b"#
+        var paths = Set<String>()
+        let absolute = try? NSRegularExpression(pattern: #"(?<![\w:/.])(/(?:tmp|data/home)/[\w./-]+"# + ext + ")")
+        let ns = command as NSString
+        for match in absolute?.matches(in: command, range: NSRange(location: 0, length: ns.length)) ?? [] {
+            paths.insert(ns.substring(with: match.range(at: 1)))
+        }
+        var dir = cwd ?? "/data/home"
+        if let cd = command.range(of: #"\bcd\s+(/[\w./-]+)"#, options: .regularExpression) {
+            dir = String(command[cd].dropFirst(2)).trimmingCharacters(in: .whitespaces)
+        }
+        let bare = try? NSRegularExpression(pattern: #"(?<![\w:/.-])([\w-]+"# + ext + ")")
+        for match in bare?.matches(in: command, range: NSRange(location: 0, length: ns.length)) ?? [] {
+            paths.insert(dir + "/" + ns.substring(with: match.range(at: 1)))
+        }
+        return paths.sorted().filter { !$0.contains("'") }
+    }
+
+    private static let mtimeMark = "__NOTCHI_MTIME__"
+    /// A file older than this was left by an earlier round, not by this task.
+    private static let staleAge: TimeInterval = 3600
+
+    /// Adds a line after the command that prints the age of each data file it
+    /// names, and keeps the command's exit code.
+    private static func withAgeCheck(_ command: String, files: [String]) -> String {
+        guard !files.isEmpty else { return command }
+        let quoted = files.map { "'\($0)'" }.joined(separator: " ")
+        return command + """
+
+        __notchi_rc=$?; __notchi_now=$(date +%s); for f in \(quoted); do [ -f "$f" ] && \
+        echo "\(mtimeMark) $(( __notchi_now - $(stat -c %Y "$f") )) $f"; done; exit $__notchi_rc
+        """
+    }
+
+    /// Removes the age lines and, for files older than `staleAge`, adds a note.
+    /// On 2026-11-14 a round reported a model as free from /tmp/sf.html, which
+    /// an earlier round had downloaded 8 hours before.
+    private static func ageNotes(_ output: String) -> (output: String, note: String?) {
+        var kept: [Substring] = []
+        var stale: [String] = []
+        for line in output.split(separator: "\n", omittingEmptySubsequences: false) {
+            guard line.hasPrefix(mtimeMark) else { kept.append(line); continue }
+            let parts = line.split(separator: " ", maxSplits: 2)
+            guard parts.count == 3, let age = TimeInterval(parts[1]) else { continue }
+            if age > staleAge {
+                let hours = age >= 7200 ? "\(Int(age / 3600)) hours" : "\(Int(age / 60)) minutes"
+                stale.append("\(parts[2]) (last changed \(hours) ago)")
+            }
+        }
+        let note = stale.isEmpty ? nil : """
+        [Note: \(stale.joined(separator: ", ")) came from an earlier task, not this one. \
+        Do not report what it says as current; fetch the source again.]
+        """
+        return (kept.joined(separator: "\n"), note)
+    }
+
     private func shell(_ input: [String: Any]) async throws -> String {
         guard let command = Self.text(input, "command") else { return "Error: command is required." }
         let cwd = Self.text(input, "cwd")
+        if let refusal = Self.pageScraping(command) ?? Self.desktopScripting(command) { return refusal }
         if (input["background"] as? Bool) == true || (input["background"] as? String) == "true" {
             // The command rides an env var, so it needs no quoting. A job's output
             // must go to a file: its later writes to exec's output fail once exec returns.
@@ -689,9 +809,14 @@ struct CloudMachineTool: NotchTool {
             """
         }
         let timeout = (input["timeout_seconds"] as? NSNumber).map { min(max($0.doubleValue, 1), 600) } ?? 60
-        let result = try await InstaBoxMachine.shared.exec(command, cwd: cwd, timeout: timeout)
+        let files = Self.dataFiles(in: command, cwd: cwd)
+        let result = try await InstaBoxMachine.shared.exec(Self.withAgeCheck(command, files: files),
+                                                           cwd: cwd, timeout: timeout)
         let head = result.timedOut ? "[stopped after \(Int(timeout)) seconds]" : "[exit code: \(result.exitCode)]"
-        return result.output.isEmpty ? head : head + "\n" + result.output
+        let (output, note) = Self.ageNotes(result.output)
+        var reply = output.isEmpty ? head : head + "\n" + output
+        if let note { reply += "\n" + note }
+        return reply
     }
 
     private func read(_ input: [String: Any]) async throws -> String {
@@ -795,6 +920,36 @@ struct CloudMachineTool: NotchTool {
         }
         try fm.moveItem(at: temp, to: target)
         return "Saved to \(target.path)."
+    }
+
+    private static let imageTypes: Set<String> = ["png", "jpg", "jpeg", "gif", "webp"]
+    private static let imageLimit = 20_000_000
+
+    /// Brings an image from the machine into the captures folder and returns the
+    /// line that shows it. On 2026-11-12 a model published port 8080 to show six
+    /// screenshots: the links were open to anyone and stop working once the
+    /// machine pauses. Copying into this app's own folder asks nothing.
+    private func showImage(_ input: [String: Any]) async throws -> String {
+        guard let raw = Self.text(input, "path") else { return "Error: path is required." }
+        let path = Self.remotePath(raw)
+        let ext = (path as NSString).pathExtension.lowercased()
+        guard Self.imageTypes.contains(ext) else {
+            return "Error: show_image takes a png, jpg, gif or webp file. Convert it on the machine first."
+        }
+        let temp = try await InstaBoxMachine.shared.download(path)
+        let fm = FileManager.default
+        let size = (try? fm.attributesOfItem(atPath: temp.path)[.size] as? NSNumber)?.intValue ?? 0
+        guard size <= Self.imageLimit else {
+            try? fm.removeItem(at: temp)
+            return "Error: \(path) is \(size / 1_000_000) MB. Scale it down on the machine (under 20 MB) and try again."
+        }
+        let target = try Self.capturesFolder().appendingPathComponent("image-\(UUID().uuidString.prefix(8)).\(ext)")
+        try fm.moveItem(at: temp, to: target)
+        let name = ((path as NSString).lastPathComponent as NSString).deletingPathExtension
+        return """
+        The picture is saved on this Mac. To show it, put this line in your answer as it is: \
+        ![\(name)](\(target.absoluteString))
+        """
     }
 
     private func publish(_ input: [String: Any]) async throws -> String {
@@ -1079,9 +1234,10 @@ enum CloudDesktopBridge {
       return Number.isFinite(x) && Number.isFinite(y) ? { x, y } : null;
     }
 
-    // A picture of one element, scrolled into view first: the page's frames run
-    // past the window, and only what is on screen can be captured.
-    async function snap(app, index, el) {
+    // The element's line once it is inside the visible part of the window. The
+    // page's frames run past the window; only what is on screen can be
+    // captured or clicked with the mouse.
+    async function scrollIntoView(app, index, el) {
       let line = el.line;
       for (let i = 0; i < 12; i++) {
         const tree = fs.readFileSync(stateFile(app), 'utf8').split('\n');
@@ -1107,6 +1263,12 @@ enum CloudDesktopBridge {
         const fresh = fs.readFileSync(stateFile(app), 'utf8').split('\n');
         line = fresh.find((l) => identity(l) === identity(el.line)) || fresh.find((l) => new RegExp(`^\\s*${index} `).test(l));
       }
+      return line;
+    }
+
+    // A picture of one element, scrolled into view first.
+    async function snap(app, index, el) {
+      const line = await scrollIntoView(app, index, el);
       const frame = frameOf(line);
       const origin = await windowOrigin(app);
       if (!frame || !origin) throw new Error(`Could not find element ${index} on screen.`);
@@ -1119,6 +1281,83 @@ enum CloudDesktopBridge {
       const shot = await command('scrot', ['-o', '-a', `${x},${y},${w},${h}`, path]);
       if (shot.code !== 0 || !fs.existsSync(path)) throw new Error(`The screenshot failed (scrot ${x},${y},${w},${h}: ${shot.code} ${shot.err || ''}).`);
       return `Saved a picture of element ${index} to ${path}.`;
+    }
+
+    // Roles whose click flips a checked state.
+    const TOGGLES = ['check box', 'radio button', 'toggle button', 'check menu item', 'radio menu item'];
+
+    // Chromium names a check box's action after what it would do: `check` while
+    // the box is unchecked, `uncheck` while it is checked. null when the line
+    // has neither.
+    function checkedOf(line) {
+      if (!line) return null;
+      const acts = (line.match(/ Secondary Actions: (.*?)(?: Frame: |$)/)?.[1] || '').split(', ');
+      if (acts.includes('uncheck')) return true;
+      if (acts.includes('check')) return false;
+      return null;
+    }
+
+    // The line without its number, actions and frame: the same for a check box
+    // before and after it changes.
+    const toggleId = (line) => identity(line).replace(/ Secondary Actions: .*$/, '');
+
+    // The same element in the state file just read: by its number when that
+    // still fits, else the nearest line with the same role and name.
+    function sameElement(app, index, el) {
+      let lines = [];
+      try { lines = fs.readFileSync(stateFile(app), 'utf8').split('\n'); } catch { return null; }
+      const want = toggleId(el.line);
+      const at = lines.find((l) => new RegExp(`^\\s*${index} `).test(l));
+      if (at && toggleId(at) === want) return at;
+      const same = lines.filter((l) => /^\s*\d+ /.test(l) && toggleId(l) === want);
+      const f = frameOf(el.line);
+      if (same.length <= 1 || !f) return same[0] || null;
+      const dist = (l) => { const g = frameOf(l); return g ? Math.abs(g.x - f.x) + Math.abs(g.y - f.y) : 1e9; };
+      return same.sort((a, b) => dist(a) - dist(b))[0];
+    }
+
+    // A left click with the mouse at the middle of the element's frame.
+    async function mouseClick(app, line) {
+      const frame = frameOf(line);
+      const origin = await windowOrigin(app);
+      if (!frame || !origin) return false;
+      await xdo(['mousemove', String(Math.round(origin.x + frame.x + frame.w / 2)),
+        String(Math.round(origin.y + frame.y + frame.h / 2))]);
+      await xdo(['click', '1']);
+      return true;
+    }
+
+    // After a click on a check box or radio button: reads its state again and,
+    // when the accessibility action left it unchanged, clicks it once with the
+    // mouse. On 2026-11-16 an accessibility click left a sign-up's terms box
+    // unchecked; the result said only "Clicked", and the model went on to click
+    // the box, its label and a second box, which flips the box back each time.
+    async function verifyToggle(app, index, el, was) {
+      await sleep(600);
+      await readState(app);
+      let now = checkedOf(sameElement(app, index, el));
+      let how = '';
+      if (now === was) {
+        const fresh = sameElement(app, index, el) || el.line;
+        const target = await scrollIntoView(app, index, { line: fresh });
+        if (await mouseClick(app, target)) {
+          await sleep(800);
+          await readState(app);
+          now = checkedOf(sameElement(app, index, el));
+          how = ' The accessibility click left it unchanged, so it was clicked again with the mouse.';
+        }
+      }
+      const word = (v) => (v ? 'checked' : 'not checked');
+      if (now === null) {
+        return `Clicked ${index} (${el.role}).${how} Its checked state cannot be read; look for it in the page below before clicking it again.`;
+      }
+      if (now !== was) {
+        return `Clicked ${index} (${el.role}).${how} It is now ${word(now)}. `
+          + 'Clicking it or its label again would undo that.';
+      }
+      return `Clicked ${index} (${el.role}) with the accessibility action and then with the mouse; it is still ${word(now)}. `
+        + 'Its label and any drawn box next to it toggle the same input: click one of them once, then read the state '
+        + 'in the result before any other click on this box. If it stays unchanged, say which box will not change.';
     }
 
     // CPU ticks (utime + stime) of a process, from /proc/<pid>/stat.
@@ -1217,10 +1456,19 @@ enum CloudDesktopBridge {
           if (!el) throw new Error('index is required.');
           const own = ['check', 'uncheck', 'press', 'jump', 'click', 'open', 'activate', 'expand or contract']
             .find((a) => el.actions.includes(a));
+          const was = TOGGLES.includes(el.role) ? checkedOf(el.line) : null;
+          if (el.role === 'radio button' && was === true) {
+            job.verified = true;
+            return `${index} (radio button) is already selected; nothing was clicked.`;
+          }
           if (own && el.role !== 'entry' && el.role !== 'combo box') {
             await tool('perform_secondary_action', { app, element_index: index, action: own });
           } else {
             await tool('click', { app, element_index: index });
+          }
+          if (was !== null) {
+            job.verified = true;
+            return await verifyToggle(app, index, el, was);
           }
           const box = frameOf(el.line);
           if (box && (box.w <= 2 || box.h <= 2)) {
@@ -1239,6 +1487,13 @@ enum CloudDesktopBridge {
             await xdo(['key', 'BackSpace']);
           } else {
             await xdo(['type', '--clearmodifiers', '--delay', '12', '--', job.text]);
+          }
+          // On 2026-11-16 an answer gave a password that had only been typed into
+          // a sign-up form that was never submitted, and asked the user to check
+          // the field.
+          if (el.role === 'password text') {
+            return `Filled ${index} (password). The account does not exist yet: keep this password out of your `
+              + 'answer until the site confirms the account was created or the password changed.';
           }
           return `Filled ${index}.`;
         }
@@ -1330,9 +1585,10 @@ enum CloudDesktopBridge {
         if (job.op !== 'state' && job.op !== 'open') await sleep(1200);
         try {
           let state = await readState(app);
-          if (before && plainState(state) === before) {
+          if (before && !job.verified && plainState(state) === before) {
             lines.push('The page is the same as before this click: the click did not take effect. '
-              + 'Do not assume it worked; try the element\'s label, a neighbouring element, or action=key.');
+              + 'Do not assume it worked; check the element is on screen (action=scroll), then try its label, '
+              + 'a neighbouring element, or action=key.');
           }
           if (job.find) {
             const want = String(job.find).toLowerCase();
@@ -1391,7 +1647,7 @@ struct CloudMachineStatusChip: View {
                 GlassSegmentCluster(segments: [
                     .init(id: "cloud", tooltip: tooltip(look), action: openSettings) {
                         Image(systemName: look == .failed ? "icloud.slash" : "icloud")
-                            .sfFont(13, weight: .light)
+                            .sfFont(12, weight: .light)
                             .opacity(look == .connecting ? 0.45 : 1)
                             .id(look)
                             .transition(.opacity)
@@ -1408,6 +1664,75 @@ struct CloudMachineStatusChip: View {
         case .connected: return L("cloud.status.connected")
         case .connecting: return L("cloud.status.connecting")
         case .failed: return L("cloud.status.failed")
+        }
+    }
+}
+
+/// The cloud machine as a row in the ⋯ menus, under a divider: "Cloud
+/// machine" over its status, with a switch that turns it on or off
+/// (`InstaBoxAccount.setOn`). Shown once the machine is on or has a key.
+struct CloudMachineStatusMenuRow: View {
+    /// The model menu's type size; off for the `/` menu's, in a menu whose
+    /// other rows use it.
+    var compact: Bool = true
+    @ObservedObject private var account = InstaBoxAccount.shared
+    @Environment(\.menuCardLight) private var menuCardLight
+
+    static var isShown: Bool {
+        guard DebugFeatureFlags.cloudMachine else { return false }
+        if case .off = InstaBoxAccount.shared.state {
+            return APIKeyStore.currentInstaBoxKey() != nil
+        }
+        return true
+    }
+
+    private var on: Bool {
+        if case .off = account.state { return false }
+        return true
+    }
+
+    private var status: String {
+        switch account.state {
+        case .claiming: return L("cloud.menu.connecting")
+        case .failed: return L("cloud.menu.failed")
+        default: return "InstaBox"
+        }
+    }
+
+    var body: some View {
+        if Self.isShown {
+            let fontSize = compact ? MenuCard.pickerFontSize : MenuCard.fontSize
+            let pad = compact ? MenuCard.pickerRowPad : MenuCard.rowPad
+            VStack(alignment: .leading, spacing: 4) {
+                Rectangle()
+                    .fill(Tokens.hairline)
+                    .frame(height: 0.5)
+                    .padding(.horizontal, pad)
+                    .padding(.vertical, 2)
+                HStack(spacing: 10) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(L("cloud.title"))
+                            .sfFont(fontSize, weight: .regular)
+                            .foregroundStyle(menuCardLight ? Tokens.text2 : Tokens.text3)
+                        Text(status)
+                            .sfFont(MenuCard.accessoryFontSize, weight: .regular)
+                            .foregroundStyle(Tokens.text4)
+                    }
+                    .lineLimit(1)
+                    Spacer(minLength: 0)
+                    Toggle("", isOn: Binding(
+                        get: { on },
+                        set: { Haptics.levelChange(); account.setOn($0) }
+                    ))
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                    .controlSize(.mini)
+                    .tint(Tokens.switchTint)
+                }
+                .padding(.horizontal, pad)
+                .padding(.vertical, 6)
+            }
+            .accessibilityElement(children: .combine)
         }
     }
 }

@@ -80,6 +80,11 @@ enum OwnDecisionModel {
             ? await TypeSafeJevClient.checkFollowUp(question: question, answer: answer)
             : await DecisionEndpointClient.checkFollowUp(question: question, answer: answer)
     }
+    static func checkMemory(question: String, answer: String) async -> NoNoAccount.MemoryCheckVerdict? {
+        DecisionModel.current == .jevKey
+            ? await TypeSafeJevClient.checkMemory(question: question, answer: answer)
+            : await DecisionEndpointClient.checkMemory(question: question, answer: answer)
+    }
     static func checkProactive(kind: String, message: String, localTime: String,
                                sentToday: Int) async -> NoNoAccount.ProactiveVerdict? {
         DecisionModel.current == .jevKey
@@ -212,6 +217,14 @@ enum TypeSafeJevClient {
         "false": "The exchange reads as finished: the person thanked the assistant, said goodbye, or confirmed; the answer is a single fact, a short acknowledgement, a translation, a rewrite, or a saved note or reminder; or the message was small talk.",
     ]
 
+    /// `backend/src/memorycheck.ts`, word for word.
+    private static let memoryCheckInstructions = "Someone sent their assistant `question` and got `answer`. The assistant keeps a memory of lasting facts about them. This exchange holds something to add to that memory or to correct in it. The text may be in any language."
+
+    private static let memoryCheckCriteria: [String: String] = [
+        "true": "The person states or corrects a lasting fact about themselves, their work, projects, people, places, plans, preferences or decisions; says that a number, name, date, address or other detail the assistant used is wrong; or asks the assistant to remember or forget something.",
+        "false": "A one-off task, lookup, how-to or question about the world with nothing lasting about the person; small talk, thanks or a confirmation; or a step in ongoing work that adds no new fact about them.",
+    ]
+
     /// `backend/src/proactive.ts`, word for word.
     private static let proactiveInstructions = "An assistant on someone's Mac is about to write to them without being asked. `message` is what it would send. `kind` says where it comes from: `reminder` is a reminder of theirs that is due, `event` is a calendar event of theirs about to start, `followup` is something they said they would do by now. `local_time` is their time now, and `sent_today` is how many such messages they already got in the last day. The message is worth interrupting them for right now. The text may be in any language."
 
@@ -272,6 +285,16 @@ enum TypeSafeJevClient {
               let p = ((answers["continues"] as? [String: Any])?["noul"] as? NSNumber)?.doubleValue
         else { return nil }
         return NoNoAccount.FollowUpVerdict(verdict: p >= 0.5 ? "suggest" : "skip", probability: p)
+    }
+
+    static func checkMemory(question: String, answer: String) async -> NoNoAccount.MemoryCheckVerdict? {
+        let questions: [String: Any] = ["worth": ["type": "noul", "instructions": memoryCheckInstructions,
+                                                  "criteria": memoryCheckCriteria]]
+        guard let answers = await ask(surface: "memorycheck", state: ["question": question, "answer": answer],
+                                      questions: questions, timeout: 4),
+              let p = ((answers["worth"] as? [String: Any])?["noul"] as? NSNumber)?.doubleValue
+        else { return nil }
+        return NoNoAccount.MemoryCheckVerdict(verdict: p >= 0.5 ? "keep" : "skip", probability: p)
     }
 
     static func checkProactive(kind: String, message: String, localTime: String,
@@ -482,6 +505,24 @@ enum DecisionEndpointClient {
                                     user: "Question:\n\(question)\n\nAnswer:\n\(answer)", timeout: 4),
               let p = probability(reply["probability"]) else { return nil }
         return NoNoAccount.FollowUpVerdict(verdict: p >= 0.5 ? "suggest" : "skip", probability: p)
+    }
+
+    static func checkMemory(question: String, answer: String) async -> NoNoAccount.MemoryCheckVerdict? {
+        let system = """
+        Someone sent their assistant a message and got an answer. The assistant keeps a memory of lasting facts about \
+        them. Decide how likely this exchange holds something to add to that memory or to correct in it. The text may \
+        be in any language.
+        Likely: the person states or corrects a lasting fact about themselves, their work, projects, people, places, \
+        plans, preferences or decisions; says that a number, name, date, address or other detail the assistant used is \
+        wrong; or asks the assistant to remember or forget something.
+        Unlikely: a one-off task, lookup, how-to or question about the world with nothing lasting about the person; \
+        small talk, thanks or a confirmation; or a step in ongoing work that adds no new fact about them.
+        Answer with only a JSON object: {"probability": <0 to 1, how likely it holds something to keep or correct>}
+        """
+        guard let reply = await ask(surface: "memorycheck", system: system,
+                                    user: "Message:\n\(question)\n\nAnswer:\n\(answer)", timeout: 4),
+              let p = probability(reply["probability"]) else { return nil }
+        return NoNoAccount.MemoryCheckVerdict(verdict: p >= 0.5 ? "keep" : "skip", probability: p)
     }
 
     static func checkProactive(kind: String, message: String, localTime: String,

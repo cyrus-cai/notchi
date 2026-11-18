@@ -62,12 +62,17 @@ struct NotchiMark: View {
         Color.clear
             .frame(width: h * NotchiBlob.markWidth, height: h)
             .overlay {
-                TimelineView(.animation(minimumInterval: 1.0 / 60.0, paused: reduceMotion)) { timeline in
+                // At the display's own rate (120 Hz on ProMotion) rather than
+                // capped at 60, and drawn off the main thread, so a busy main
+                // thread (a streaming answer laying out) drops fewer frames.
+                TimelineView(.animation(paused: reduceMotion)) { timeline in
                     let t = timeline.date.timeIntervalSinceReferenceDate
-                    Canvas { ctx, size in
-                        let blobs = reduceMotion
-                            ? NotchiForm.restingEyes
-                            : director.blobs(at: t, mood: mood)
+                    // The director keeps state, so it is asked here on the
+                    // main thread; only the drawing runs off it.
+                    let blobs = reduceMotion
+                        ? NotchiForm.restingEyes
+                        : director.blobs(at: t, mood: mood)
+                    Canvas(rendersAsynchronously: true) { ctx, size in
                         NotchiBlob.draw(blobs, in: &ctx, size: size, unit: h)
                     }
                 }
@@ -620,12 +625,17 @@ struct NotchiMarkPose: Equatable {
 
     /// How far a look of 1 moves the eyes, as a fraction of the eye height.
     static let travel: CGFloat = 0.16
-    /// Top of each eye: warm off-white, the same ink as `NotchiFace`.
-    static let ink = Color(red: 0xEC / 255, green: 0xEB / 255, blue: 0xE6 / 255)
+    /// Top of each eye: warm off-white, the same ink as `NotchiFace`. In a
+    /// light window, the app icon's dark eye ink.
+    static let ink = Tokens.adaptive(
+        dark: NSColor(srgbRed: 0xEC / 255, green: 0xEB / 255, blue: 0xE6 / 255, alpha: 1),
+        light: NSColor(srgbRed: 0x4A / 255, green: 0x4A / 255, blue: 0x52 / 255, alpha: 1))
     /// Bottom of each eye: the icon's gradient mirrored for a dark surface,
-    /// cooler and dimmer. Opaque, so a shape passing in front hides the one
-    /// behind it.
-    static let inkLow = Color(red: 0x9A / 255, green: 0x9A / 255, blue: 0xA2 / 255)
+    /// cooler and dimmer; darker in a light window. Opaque, so a shape passing
+    /// in front hides the one behind it.
+    static let inkLow = Tokens.adaptive(
+        dark: NSColor(srgbRed: 0x9A / 255, green: 0x9A / 255, blue: 0xA2 / 255, alpha: 1),
+        light: NSColor(srgbRed: 0x26 / 255, green: 0x26 / 255, blue: 0x2A / 255, alpha: 1))
 }
 
 /// Draws the two eyes for a pose. Separate from `NotchiFace` so a pose can be

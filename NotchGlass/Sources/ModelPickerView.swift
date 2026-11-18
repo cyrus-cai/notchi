@@ -614,6 +614,9 @@ struct ModelDetailCard: View {
     let onAddCreditFrame: (NSRect) -> Void
     /// Screen frame of Learn more, for the same hit test as the pill.
     let onLearnMoreFrame: (NSRect) -> Void
+    /// Opened from a menu card that is in light mode (`menuCardLight`): the
+    /// card takes the same white glass as that menu.
+    var light = false
 
     /// Menu-adjacent, so it takes the corner radius of the things macOS pops up
     /// next to a menu rather than the tighter one a panel body uses.
@@ -762,12 +765,16 @@ struct ModelDetailCard: View {
             // 0.58 brings the glass luminance over a white page into the native
             // menu's range without adding a separate opaque veil.
             ZStack {
-                Self.shape.fill(.clear)
-                    .nativeGlass(in: Self.shape, tintOpacity: 0.58)
-                Self.shape.strokeBorder(
-                    LinearGradient(colors: [.white.opacity(0.32), .white.opacity(0.07)],
-                                   startPoint: .top, endPoint: .bottom),
-                    lineWidth: 0.75)
+                if light {
+                    LightMenuSlab(shape: Self.shape)
+                } else {
+                    Self.shape.fill(.clear)
+                        .nativeGlass(in: Self.shape, tintOpacity: 0.58)
+                    Self.shape.strokeBorder(
+                        LinearGradient(colors: [.white.opacity(0.32), .white.opacity(0.07)],
+                                       startPoint: .top, endPoint: .bottom),
+                        lineWidth: 0.75)
+                }
             }
             .compositingGroup()
             // The card is the fullest view of a model there is — where a user
@@ -775,7 +782,7 @@ struct ModelDetailCard: View {
             .brandAura(in: Self.shape, active: model.provider.isFirstParty,
                        lineWidth: 1.2)
         }
-        .environment(\.colorScheme, .dark)
+        .environment(\.colorScheme, light ? .light : .dark)
     }
 
     /// The sale, as one line of light across the top of the card that fades
@@ -821,8 +828,8 @@ struct ModelDetailCard: View {
     /// How fast and how smart, on the same scale every other card draws them.
     private var meters: some View {
         VStack(alignment: .leading, spacing: 9) {
-            Meter(title: L("model.detail.speed"), level: figures.speed)
-            Meter(title: L("model.detail.intelligence"), level: figures.intelligence)
+            Meter(title: L("model.detail.speed"), level: figures.speed, light: light)
+            Meter(title: L("model.detail.intelligence"), level: figures.intelligence, light: light)
         }
     }
 
@@ -933,7 +940,7 @@ struct ModelDetailCard: View {
     /// Settings — and reports its screen frame so a native menu can hit-test it
     /// while tracking (SwiftUI buttons do not receive the click then).
     private func pill(_ text: String, tappable: Bool = false) -> some View {
-        let label = Tag(text: text, hovered: tappable && pillHovered)
+        let label = Tag(text: text, hovered: tappable && pillHovered, light: light)
         return Group {
             if tappable {
                 Button(action: onOpenProvider) { label }
@@ -951,6 +958,7 @@ struct ModelDetailCard: View {
     struct Tag: View {
         let text: String
         var hovered = false
+        var light = false
 
         static let shape = RoundedRectangle(cornerRadius: 5, style: .continuous)
 
@@ -961,8 +969,10 @@ struct ModelDetailCard: View {
                 .lineLimit(1)
                 .padding(.horizontal, 7)
                 .padding(.vertical, 3)
-                .overlay(Self.shape.strokeBorder(Color.white.opacity(hovered ? 0.42 : 0.24),
-                                                 lineWidth: 0.75))
+                .overlay(Self.shape.strokeBorder(
+                    light ? Tokens.ink.opacity(hovered ? 0.32 : 0.18)
+                          : Color.white.opacity(hovered ? 0.42 : 0.24),
+                    lineWidth: 0.75))
         }
     }
 
@@ -1207,6 +1217,7 @@ struct ModelDetailCard: View {
     private struct GlassBar: View {
         /// 0–1 of the track.
         let fraction: Double
+        var light = false
 
         static let height: CGFloat = 7
 
@@ -1218,8 +1229,8 @@ struct ModelDetailCard: View {
                 // the floor.
                 let filled = fraction > 0 ? max(Self.height, raw) : 0
                 ZStack(alignment: .leading) {
-                    Self.groove
-                    if filled > 0 { Self.lozenge.frame(width: filled) }
+                    Self.groove(light: light)
+                    if filled > 0 { Self.lozenge(light: light).frame(width: filled) }
                 }
             }
             .frame(height: Self.height)
@@ -1228,7 +1239,25 @@ struct ModelDetailCard: View {
         /// The track, carved rather than drawn: dark inside, its top edge holding
         /// the shadow of the lip above it and its bottom edge catching the light
         /// that made it — which is the whole of what tells an eye "recessed".
-        static var groove: some View {
+        /// On the light card the same groove in ink: a faint well, its top
+        /// edge a little darker.
+        @ViewBuilder
+        static func groove(light: Bool) -> some View {
+            if light {
+                Capsule(style: .continuous)
+                    .fill(Tokens.ink.opacity(0.08))
+                    .overlay(
+                        Capsule(style: .continuous).strokeBorder(
+                            LinearGradient(colors: [Tokens.ink.opacity(0.16), Tokens.ink.opacity(0.04)],
+                                           startPoint: .top, endPoint: .bottom),
+                            lineWidth: 0.75)
+                    )
+            } else {
+                groove
+            }
+        }
+
+        private static var groove: some View {
             Capsule(style: .continuous)
                 .fill(Color.black.opacity(0.40))
                 .overlay(
@@ -1244,7 +1273,19 @@ struct ModelDetailCard: View {
         /// where the light lands, falling off toward the bottom, one soft specular
         /// band just inside the top edge, and a faint spill onto the groove so the
         /// run sits *in* the track instead of on it.
-        static var lozenge: some View {
+        /// On the light card the run is ink, falling off toward the bottom.
+        @ViewBuilder
+        static func lozenge(light: Bool) -> some View {
+            if light {
+                Capsule(style: .continuous)
+                    .fill(LinearGradient(colors: [Tokens.ink.opacity(0.62), Tokens.ink.opacity(0.48)],
+                                         startPoint: .top, endPoint: .bottom))
+            } else {
+                lozenge
+            }
+        }
+
+        private static var lozenge: some View {
             Capsule(style: .continuous)
                 .fill(LinearGradient(colors: [.white.opacity(0.36),
                                               .white.opacity(0.24),
@@ -1279,6 +1320,7 @@ struct ModelDetailCard: View {
         let title: String
         /// 0–5, continuous while it travels between two models' whole levels.
         let level: Double
+        var light = false
 
         private static let height: CGFloat = GlassBar.height
 
@@ -1291,12 +1333,12 @@ struct ModelDetailCard: View {
                     let w = geo.size.width
                     let filled = w * CGFloat(min(5, max(0, level)) / 5)
                     ZStack(alignment: .leading) {
-                        GlassBar.groove
+                        GlassBar.groove(light: light)
                         // Below its own height the capsule is a squashed disc, not
                         // a lozenge, and the specular sliver inside it collapses to
                         // a dot — an empty meter shows the groove and nothing else.
                         if filled >= Self.height * 0.5 {
-                            GlassBar.lozenge.frame(width: filled)
+                            GlassBar.lozenge(light: light).frame(width: filled)
                         }
                         ForEach(1..<5, id: \.self) { i in
                             let x = w * CGFloat(i) / 5
@@ -1306,8 +1348,9 @@ struct ModelDetailCard: View {
                                 // are pitched to be findable rather than read: the
                                 // bar's length is the figure, and ticks loud enough
                                 // to count first turn it into a row of dots.
-                                .fill(x <= filled ? Color.black.opacity(0.20)
-                                                  : Tokens.ink.opacity(0.18))
+                                .fill(x <= filled
+                                      ? (light ? Color.white.opacity(0.45) : Color.black.opacity(0.20))
+                                      : Tokens.ink.opacity(light ? 0.22 : 0.18))
                                 .frame(width: 2, height: 2)
                                 .offset(x: x - 1)
                         }
@@ -1415,6 +1458,8 @@ final class ModelDetailPanel {
     /// model only if the pointer stops on it.
     private var pending: (model: PickerModel, anchor: NSRect?)?
     private var clickMonitor: Any?
+    /// The menu that put the card up is in light mode (`menuCardLight`).
+    private var light = false
 
     /// What the card is drawing, and the travel it is on. See `tick()`.
     private var figures = ModelDetailCard.Figures()
@@ -1464,7 +1509,8 @@ final class ModelDetailPanel {
     /// `beside` is supplied by custom SwiftUI menus, whose window is not an
     /// `NSMenu` window and therefore cannot be discovered by `menuFrame`. Native
     /// model menus leave it nil and keep using the window scan below.
-    func show(_ model: PickerModel, beside explicitAnchor: NSRect? = nil) {
+    func show(_ model: PickerModel, beside explicitAnchor: NSRect? = nil, light: Bool = false) {
+        self.light = light
         let location = NSEvent.mouseLocation
         note(location)
         orphanedAt = nil
@@ -1609,7 +1655,8 @@ final class ModelDetailPanel {
             onStepperFrame: { [weak self] in self?.stepperFrame = $0 },
             onAddCredit: { [weak self] in self?.addCreditTapped() },
             onAddCreditFrame: { [weak self] in self?.addCreditFrame = $0 },
-            onLearnMoreFrame: { [weak self] in self?.learnMoreFrame = $0 }
+            onLearnMoreFrame: { [weak self] in self?.learnMoreFrame = $0 },
+            light: light
         )
         let host = self.host ?? {
             let h = NSHostingView(rootView: card)
@@ -1618,6 +1665,7 @@ final class ModelDetailPanel {
         }()
         host.rootView = card
         let panel = self.panel ?? makePanel(hosting: host)
+        panel.appearance = NSAppearance(named: light ? .aqua : .darkAqua)
         // Menu tracking runs its own event loop, which SwiftUI's normal update
         // pass does not get a turn in — lay out by hand or the card shows the
         // previous model's numbers at the previous model's height.
@@ -2154,6 +2202,7 @@ final class ModelCatalogStore: ObservableObject {
         }
         if live { seededFromDisk.remove(p) }
         if p == .nono {
+            ModelNewMarks.record(result.infos.map { ($0.id, $0.notchiPricing?.addedDate) })
             ModelRatings.nonoNames = Dictionary(result.infos.map { ($0.id, $0.name) },
                                                 uniquingKeysWith: { a, _ in a })
             ModelRatings.nonoBlendHosts = Dictionary(result.infos.filter {
@@ -2687,6 +2736,7 @@ enum AskModelMRU {
 /// state because a pick commits straight to UserDefaults, which re-renders
 /// nothing on its own.
 struct AskRecentModelPickerView: View {
+    @Environment(\.menuCardLight) private var menuLight
     struct Row: Hashable {
         let provider: Provider
         let id: String
@@ -2951,7 +3001,7 @@ struct AskRecentModelPickerView: View {
             haptic: false) {
                 guard !unavailable else { return }
                 // Menu semantics: one click picks and dismisses.
-                if Self.showsNewTag(r) { ModelNewMarks.seen = true }
+                if Self.showsNewTag(r) { ModelNewMarks.markSeen(r.id) }
                 arm(r)
                 // The card goes with the menu, in the same click. Left to the
                 // list's `onDisappear` it hides a beat late, so the detail card
@@ -2962,7 +3012,7 @@ struct AskRecentModelPickerView: View {
             .onHover { inside in
                 if inside, listAnchor.containsPointer { openSubmenu = nil }
                 if inside, listAnchor.containsPointer, let frame = detailAnchor.frame {
-                    ModelDetailPanel.shared.show(Self.detailModel(for: r), beside: frame)
+                    ModelDetailPanel.shared.show(Self.detailModel(for: r), beside: frame, light: menuLight)
                 } else if !inside {
                     ModelDetailPanel.shared.scheduleHide()
                 }
@@ -3002,12 +3052,11 @@ struct AskRecentModelPickerView: View {
                         rows: rows,
                         selected: current,
                         onPick: { r in
-                            if Self.showsNewTag(r) { ModelNewMarks.seen = true }
+                            if Self.showsNewTag(r) { ModelNewMarks.markSeen(r.id) }
                             arm(r)
                             ModelDetailPanel.shared.hide()
                             onDone()
                         })
-                        .preferredColorScheme(.dark)
                         .menuCardBackground())
                 }))
     }
@@ -3051,7 +3100,8 @@ struct AskRecentModelPickerView: View {
     }
 
     /// The Notchi models listed first in their section after the recents.
-    static let featuredNotchiIDs = ["glm-5.3-flash", ModelNewMarks.modelID]
+    /// The newly listed models (`ModelNewMarks`), newest first, then GLM.
+    static var featuredNotchiIDs: [String] { ModelNewMarks.newIDs + ["glm-5.3-flash"] }
 
     /// The row's tag: "New" on the featured model, else the percent off (or
     /// "FREE") on a Notchi model sold below its list price.
@@ -3063,19 +3113,22 @@ struct AskRecentModelPickerView: View {
 
     /// The featured Notchi model, inside its seven days and not yet clicked.
     static func showsNewTag(_ r: Row) -> Bool {
-        r.provider.isFirstParty && r.id == ModelNewMarks.modelID && ModelNewMarks.active
+        r.provider.isFirstParty && ModelNewMarks.isNew(r.id)
     }
 
     /// Ours, with nothing left: the row wears `LowBalanceTag`.
     static func lowBalance(_ r: Row) -> Bool {
         r.provider.isFirstParty && NoNoAccount.shared.snapshot != nil
+            && !ModelDetailCard.isFree(detailModel(for: r))
             && ModelDetailCard.Wallet.current?.state == .empty
     }
 
     /// Ours, and the balance cannot pay for a turn — empty or capped for today.
-    /// Listed grayed rather than hidden; a click does nothing.
+    /// Listed grayed rather than hidden; a click does nothing. A $0 model draws
+    /// nothing from the wallet, so it stays available.
     static func unavailable(_ r: Row) -> Bool {
-        guard r.provider.isFirstParty, let snapshot = NoNoAccount.shared.snapshot else {
+        guard r.provider.isFirstParty, let snapshot = NoNoAccount.shared.snapshot,
+              !ModelDetailCard.isFree(detailModel(for: r)) else {
             return false
         }
         return snapshot.isEmpty || snapshot.cappedForToday
@@ -3176,7 +3229,6 @@ private struct AskModelSubmenuCard: View {
     let selected: Row
     let onPick: (Row) -> Void
 
-    @StateObject private var detailAnchor = ModelDetailAnchor()
     @ObservedObject private var nono = NoNoAccount.shared
 
     /// Rows shown before the list scrolls.
@@ -3189,13 +3241,32 @@ private struct AskModelSubmenuCard: View {
         CGFloat(min(rows.count, Self.listRows)) * Self.rowStride - MenuCard.rowSpacing
     }
 
+    private var contentHeight: CGFloat {
+        CGFloat(rows.count) * Self.rowStride - MenuCard.rowSpacing
+    }
+
+    /// Rows past the tenth sit below the fold. Without the fade the list reads
+    /// as complete and those models look missing.
+    @State private var scrolledOffTop = false
+    @State private var scrolledOffBottom = true
+
     var body: some View {
+        let overflowing = rows.count > Self.listRows
         ScrollViewReader { proxy in
             ScrollView(showsIndicators: false) {
                 LazyVStack(alignment: .leading, spacing: MenuCard.rowSpacing) {
                     ForEach(rows, id: \.self) { r in row(r).id(r) }
                 }
+                .onScrollOffsetChange { offset in
+                    let top = offset > 0.5
+                    if top != scrolledOffTop { scrolledOffTop = top }
+                    let bottom = offset < contentHeight - listHeight - 0.5
+                    if bottom != scrolledOffBottom { scrolledOffBottom = bottom }
+                }
             }
+            .scrollEdgeFade(top: overflowing && scrolledOffTop,
+                            bottom: overflowing && scrolledOffBottom,
+                            fade: 18)
             .frame(height: listHeight)
             .onAppear {
                 if rows.contains(selected) { proxy.scrollTo(selected, anchor: .center) }
@@ -3203,7 +3274,6 @@ private struct AskModelSubmenuCard: View {
         }
         .padding(MenuCard.cardPad)
         .frame(width: MenuCard.pickerCardWidth, alignment: .topLeading)
-        .background(ModelDetailAnchorProbe(anchor: detailAnchor))
     }
 
     private func row(_ r: Row) -> some View {
@@ -3225,13 +3295,6 @@ private struct AskModelSubmenuCard: View {
             haptic: false) {
                 guard !unavailable else { return }
                 onPick(r)
-            }
-            .onHover { inside in
-                if inside, let frame = detailAnchor.frame {
-                    ModelDetailPanel.shared.show(V.detailModel(for: r), beside: frame)
-                } else if !inside {
-                    ModelDetailPanel.shared.scheduleHide()
-                }
             }
     }
 }
@@ -3490,6 +3553,7 @@ struct AgentEngineMark: View {
 /// effort slider and the engine switch keep the card open, since those are dials
 /// you adjust, not a choice you make once.
 struct AgentModelPickerView: View {
+    @Environment(\.menuCardLight) private var menuLight
     /// Every available engine's model choices, flattened in menu order — picking a
     /// model picks its engine with it, exactly as the chip's menu does.
     let choices: [AgentModelChoice]
@@ -3916,7 +3980,7 @@ struct AgentModelPickerView: View {
                 ModelDetailPanel.shared.scheduleHide()
                 return
             }
-            ModelDetailPanel.shared.show(model, beside: frame)
+            ModelDetailPanel.shared.show(model, beside: frame, light: menuLight)
         }
     }
 
@@ -4183,31 +4247,81 @@ struct AgentModelPickerView: View {
     }
 }
 
-/// The "New" tag on one Notchi model in the Ask model menu. It shows for
-/// seven days from the first time the menu lists it, and goes after the row
-/// is clicked once.
+/// The "New" tag on Notchi models in the Ask model menu. A model gets it for
+/// seven days from the date the gateway says it went on sale (`addedAt`),
+/// and loses it once its row is clicked. A model the gateway sends no date for
+/// counts from the first time this install sees it; the first lineup an
+/// install records is the baseline, and nothing in it is new that way.
 enum ModelNewMarks {
-    static let modelID = "claude-haiku-5.5"
-    private static let firstShownKey = "modelNewMark.\(modelID).firstShown"
-    private static let seenKey = "modelNewMark.\(modelID).seen"
+    private static let firstSeenKey = "modelNewMarks.firstSeen"
+    private static let seenKey = "modelNewMarks.seen"
     private static let lifetime: TimeInterval = 7 * 24 * 60 * 60
 
-    static var seen: Bool {
-        get { UserDefaults.standard.bool(forKey: seenKey) }
-        set { UserDefaults.standard.set(newValue, forKey: seenKey) }
+    // Read once, written through. Rows ask on every render.
+    private static var firstSeen: [String: Double] =
+        UserDefaults.standard.dictionary(forKey: firstSeenKey) as? [String: Double] ?? [:] {
+        didSet { UserDefaults.standard.set(firstSeen, forKey: firstSeenKey) }
     }
 
-    /// Starts the seven days on the first read.
-    static var active: Bool {
-        guard !seen else { return false }
-        let defaults = UserDefaults.standard
-        let first: Date
-        if let stored = defaults.object(forKey: firstShownKey) as? Date {
-            first = stored
-        } else {
-            first = Date()
-            defaults.set(first, forKey: firstShownKey)
+    private static var seen: Set<String> =
+        Set(UserDefaults.standard.stringArray(forKey: seenKey) ?? []) {
+        didSet { UserDefaults.standard.set(Array(seen), forKey: seenKey) }
+    }
+
+    /// The gateway's dates, from the last lineup. Not stored: the lineup is.
+    private static var addedAt: [String: Date] = [:]
+
+    /// Note the ids in a lineup. Ids already noted keep their first-seen date.
+    static func record(_ lineup: [(id: String, added: Date?)]) {
+        addedAt = Dictionary(lineup.compactMap { e in e.added.map { (e.id, $0) } },
+                             uniquingKeysWith: { a, _ in a })
+        let ids = lineup.map(\.id)
+        guard !ids.isEmpty else { return }
+        var dates = firstSeen
+        let baseline = dates.isEmpty
+        let now = Date().timeIntervalSince1970
+        var changed = false
+        for id in ids where dates[id] == nil {
+            dates[id] = baseline ? 0 : now
+            changed = true
         }
-        return Date().timeIntervalSince(first) < lifetime
+        if baseline { migrateLegacyMark(into: &dates) }
+        if changed { firstSeen = dates }
+    }
+
+    /// 0.9.32 and earlier tagged one model by hand. Its tag keeps the rest of
+    /// its seven days.
+    private static func migrateLegacyMark(into dates: inout [String: Double]) {
+        let id = "claude-haiku-5.5"
+        let d = UserDefaults.standard
+        guard dates[id] != nil,
+              !d.bool(forKey: "modelNewMark.\(id).seen"),
+              let first = d.object(forKey: "modelNewMark.\(id).firstShown") as? Date
+        else { return }
+        dates[id] = first.timeIntervalSince1970
+    }
+
+    /// When the seven days start for `id`: the gateway's date, else the first
+    /// sighting after the baseline.
+    private static func start(_ id: String) -> Date? {
+        if let date = addedAt[id] { return date }
+        guard let first = firstSeen[id], first > 0 else { return nil }
+        return Date(timeIntervalSince1970: first)
+    }
+
+    static func isNew(_ id: String) -> Bool {
+        guard !seen.contains(id), let start = start(id) else { return false }
+        return Date().timeIntervalSince(start) < lifetime
+    }
+
+    /// The ids tagged right now, newest first.
+    static var newIDs: [String] {
+        Set(Array(addedAt.keys) + Array(firstSeen.keys)).filter(isNew)
+            .sorted { (start($0) ?? .distantPast) > (start($1) ?? .distantPast) }
+    }
+
+    static func markSeen(_ id: String) {
+        var s = seen
+        if s.insert(id).inserted { seen = s }
     }
 }

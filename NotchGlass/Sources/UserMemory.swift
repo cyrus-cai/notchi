@@ -243,11 +243,30 @@ final class UserMemory: ObservableObject {
 
     /// The folder in full, newest first, for a model that will rewrite one of
     /// its files: whole files while they fit a budget, then names only.
-    var promptContents: String {
+    var promptContents: String { promptContents(relevantTo: nil) }
+
+    /// The same, with the files that share words, numbers or addresses with
+    /// `text` first, most shared first. A folder larger than the budget
+    /// otherwise hides an older file the exchange corrects.
+    func promptContents(relevantTo text: String?) -> String {
+        var files = fileURLs().map { url in
+            (url: url, text: (try? String(contentsOf: url, encoding: .utf8)) ?? "")
+        }
+        if let text {
+            let wanted = Self.matchTokens(text)
+            if !wanted.strong.isEmpty || !wanted.weak.isEmpty {
+                let scored = files.enumerated().map { i, file -> (Int, Int) in
+                    let have = Self.matchTokens(file.text)
+                    let score = 10 * have.strong.intersection(wanted.strong).count
+                        + have.weak.intersection(wanted.weak).count
+                    return (score, i)
+                }
+                files = scored.sorted { $0.0 != $1.0 ? $0.0 > $1.0 : $0.1 < $1.1 }.map { files[$0.1] }
+            }
+        }
         var out = ""
         var names: [String] = []
-        for url in fileURLs() {
-            let text = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+        for (url, text) in files {
             let block = "\n## \(relativeName(url))\n\(text)"
             if names.isEmpty, out.count + block.count <= 16_000 {
                 out += block
@@ -257,6 +276,49 @@ final class UserMemory: ObservableObject {
         }
         if !names.isEmpty { out += "\n\nOther files (not shown): " + names.joined(separator: ", ") }
         return out.isEmpty ? "(empty)" : out.trimmingCharacters(in: .newlines)
+    }
+
+    /// Strong: digit runs of 5 or more (phone, ID, order numbers) and email
+    /// addresses. Weak: Latin words of 4 or more letters and pairs of
+    /// adjacent CJK characters.
+    static func matchTokens(_ text: String) -> (strong: Set<String>, weak: Set<String>) {
+        var strong = Set<String>()
+        var weak = Set<String>()
+        var digits = ""
+        var word = ""
+        var previousCJK: Character?
+        func flush() {
+            if digits.count >= 5 { strong.insert(digits) }
+            if word.contains("@"), word.contains(".") {
+                strong.insert(word.trimmingCharacters(in: CharacterSet(charactersIn: ".")))
+            } else if word.count >= 4, word.contains(where: \.isLetter) {
+                weak.insert(word)
+            }
+            digits = ""
+            word = ""
+        }
+        for ch in text.lowercased() {
+            let isCJK = ch.unicodeScalars.first.map { (0x4E00...0x9FFF).contains($0.value) } ?? false
+            if isCJK {
+                flush()
+                if let p = previousCJK { weak.insert(String([p, ch])) }
+                previousCJK = ch
+                continue
+            }
+            previousCJK = nil
+            if ch.isASCII, ch.isNumber {
+                digits.append(ch)
+                word.append(ch)
+            } else if ch.isASCII, ch.isLetter || "@._-".contains(ch) {
+                if digits.count >= 5 { strong.insert(digits) }
+                digits = ""
+                word.append(ch)
+            } else {
+                flush()
+            }
+        }
+        flush()
+        return (strong, weak)
     }
 
     /// The folder as the system prompt shows it: each file's name and opening

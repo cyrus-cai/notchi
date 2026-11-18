@@ -109,6 +109,9 @@ jobs:
             CODE_SIGN_IDENTITY="-" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO \
             build
 
+      - name: Check for test-only code
+        run: ./scripts/check-release-binary.sh build/Build/Products/Release/Notchi.app
+
       - name: Sign
         env:
           NOTCHI_SIGN_KEYCHAIN: ${{ env.SIGN_KEYCHAIN }}

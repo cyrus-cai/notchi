@@ -1,4 +1,5 @@
 import AppKit
+import os
 import Combine
 import SwiftUI
 
@@ -9,7 +10,7 @@ import SwiftUI
 ///
 /// Everything here is behind the gateway's switch. `/v1/me` sends
 /// `license.live`; while it is false, `status` is `.hidden` and no surface in
-/// the app mentions a license. An account registered before the cutoff never
+/// the app mentions a license, but for an early account's Free for good card. An account registered before the cutoff never
 /// sees a purchase either: it is `.included`, or `.active` once its key is
 /// issued.
 ///
@@ -38,8 +39,10 @@ final class NotchiLicense: ObservableObject {
     enum Status: Equatable {
         /// The switch is off: show nothing.
         case hidden
-        /// This account has to buy one.
+        /// This account has to buy one. Everything is locked (`locked`).
         case needed
+        /// Within the free trial: everything works until `ends`.
+        case trial(ends: Date)
         /// This account holds a key. `source` is `purchase`, `early` or `grant`.
         case active(key: String, source: String)
         /// Registered before the cutoff; the key is issued once the switch is on.
@@ -56,7 +59,64 @@ final class NotchiLicense: ObservableObject {
         case failed(String)
     }
 
-    @Published private(set) var status: Status = .hidden
+    @Published private(set) var status: Status = .hidden {
+        didSet { LicenseLock.set(status == .needed) }
+    }
+
+    /// The trial has ended and there is no license: every feature is off but
+    /// Settings, where the license is bought or a key entered.
+    var locked: Bool { status == .needed }
+
+    /// No license yet: Buy and Enter key are offered. True in the trial too.
+    var needsPurchase: Bool {
+        switch status {
+        case .needed, .trial: return true
+        default: return false
+        }
+    }
+
+    /// "Free trial: 5 days left", or "Your free trial has ended." Nil with a
+    /// license, a founding account, or the switch off.
+    var trialLine: String? {
+        // The last 12 hours: when it ends, as on the notch's chip.
+        if let ends = trialFinalDayLeft { return ends }
+        if let left = trialLeft { return L("license.trial.line", left) }
+        return locked ? L("license.locked.title") : nil
+    }
+
+    /// What is left of the trial, in the largest unit that is at least two,
+    /// each rounded up:
+    ///   - more than 24 hours: days ("7 days left" on the first day, "2 days
+    ///     left" until 24 hours remain);
+    ///   - more than 1 hour: hours ("24 hours left" … "2 hours left");
+    ///   - the last hour: minutes ("60 minutes left" … "1 minute left").
+    /// Nil outside the trial. Read again every minute (`clock`).
+    var trialLeft: String? {
+        guard case .trial(let ends) = status else { return nil }
+        let seconds = max(0, ends.timeIntervalSince(clock))
+        if seconds > 86_400 { return L("license.trial.days", Int(ceil(seconds / 86_400))) }
+        if seconds > 3600 { return L("license.trial.hours", Int(ceil(seconds / 3600))) }
+        let minutes = max(1, Int(ceil(seconds / 60)))
+        return minutes == 1 ? L("license.trial.minute") : L("license.trial.minutes", minutes)
+    }
+
+    /// "Trial ends at 18:42" once 12 hours or less remain. The notch's Buy
+    /// License chip shows it as a tag. Nil before that.
+    var trialFinalDayLeft: String? {
+        guard case .trial(let ends) = status, ends.timeIntervalSince(clock) <= 12 * 3600 else { return nil }
+        return L("license.trial.endsAt", Self.endTimeFormatter.string(from: ends))
+    }
+
+    private static let endTimeFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateStyle = .none
+        f.timeStyle = .short
+        return f
+    }()
+
+    /// Moves once a minute during the trial, so `trialLeft` counts down.
+    @Published private(set) var clock = Date()
+    private var clockTimer: Timer?
     @Published private(set) var phase: Phase = .idle
     /// The checkout page is open in the browser and the payment has not
     /// landed yet. The card and the Settings row say so.
@@ -64,23 +124,127 @@ final class NotchiLicense: ObservableObject {
     /// Set by the card's "Enter key": Settings opens with the key field out.
     @Published var wantsKeyEntry = false
 
-    static var preview: Bool { UserDefaults.standard.bool(forKey: "NotchiLicensePreview") }
+    /// Debug builds only: a release build never shows a simulated license.
+    static var preview: Bool {
+        #if DEBUG
+        return UserDefaults.standard.bool(forKey: "NotchiLicensePreview")
+        #else
+        return false
+        #endif
+    }
+    /// Buy and Enter key finish here, without Stripe or the gateway: the
+    /// preview, or the test board's full simulation (Debug builds only), which
+    /// starts from whatever license `debug.licenseOverride` holds.
+    static var simulates: Bool {
+        #if DEBUG
+        if UserDefaults.standard.bool(forKey: "debug.licenseSimulate") { return true }
+        #endif
+        return preview
+    }
+    /// The preview's trial: five days from launch.
+    private static let previewTrialEnd = Date().addingTimeInterval(5 * 86_400 - 60)
     /// The key a simulated payment produced. Not persisted.
     private var previewKey: String?
 
     private let account = NoNoAccount.shared
     private var subscriptions: Set<AnyCancellable> = []
     private var waitTask: Task<Void, Never>?
+    /// Recomputes when the trial runs out while the app is open.
+    private var trialTimer: Timer?
+
+    /// The last license the gateway sent, so an offline launch is locked or
+    /// not as it was when last online.
+    private static let cacheKey = "license.lastKnown"
+    private var cached: NoNoAccount.Snapshot.License? = {
+        guard let data = UserDefaults.standard.data(forKey: NotchiLicense.cacheKey) else { return nil }
+        return try? JSONDecoder().decode(NoNoAccount.Snapshot.License.self, from: data)
+    }()
 
     private init() {
         account.$snapshot
             .receive(on: RunLoop.main)
-            .sink { [weak self] _ in self?.recompute() }
+            .sink { [weak self] snapshot in
+                if let license = snapshot?.license { self?.remember(license) }
+                self?.recompute()
+            }
             .store(in: &subscriptions)
         recompute()
     }
 
-    var priceUSD: Double { account.snapshot?.license?.priceUSD ?? 19 }
+    private func remember(_ license: NoNoAccount.Snapshot.License) {
+        guard license != cached else { return }
+        cached = license
+        if let data = try? JSONEncoder().encode(license) {
+            UserDefaults.standard.set(data, forKey: Self.cacheKey)
+        }
+    }
+
+    /// What the gateway said about the license, or the test board's stand-in
+    /// for it (`scripts/test-board`, Debug builds only).
+    private var gatewayLicense: NoNoAccount.Snapshot.License? {
+        let real = account.snapshot?.license
+        #if DEBUG
+        if let audit = auditLicense { return audit }
+        if let override = Self.debugOverride {
+            // A license bought or activated for real while this process runs
+            // ends the simulation: otherwise a simulated trial hides the
+            // purchase it was set up to test. An account that already held one
+            // at launch keeps the simulation.
+            if let real, realActiveAtStart == nil { realActiveAtStart = real.status == "active" }
+            guard real?.status == "active", realActiveAtStart == false, override.status != "active" else { return override }
+            UserDefaults.standard.removeObject(forKey: Self.debugOverrideKey)
+        }
+        #endif
+        return real
+    }
+
+    #if DEBUG
+    /// Whether the gateway's first answer in this process held a license.
+    private var realActiveAtStart: Bool?
+    /// The license `NOTCH_LICENSE_AUDIT` checks, ahead of the gateway and the
+    /// test board.
+    private var auditLicense: NoNoAccount.Snapshot.License?
+    #endif
+
+    #if DEBUG
+    nonisolated static let debugOverrideKey = "debug.licenseOverride"
+    /// A JSON string of `License`, written by the test board while the app is
+    /// quit; read at launch.
+    nonisolated static var debugOverride: NoNoAccount.Snapshot.License? {
+        guard let text = UserDefaults.standard.string(forKey: debugOverrideKey) else { return nil }
+        return try? JSONDecoder().decode(NoNoAccount.Snapshot.License.self, from: Data(text.utf8))
+    }
+    /// The test board's "follow the gateway, as after 2027": the gateway's own
+    /// license, read as if its switch were on.
+    nonisolated static var debugAssumeLive: Bool {
+        UserDefaults.standard.bool(forKey: "debug.licenseAssumeLive") && debugOverride == nil
+    }
+    #endif
+
+    /// The Free Trial / Buy License chip on the notch's input row. The view
+    /// also waits for the first-run guide to close.
+    var showsNotchChip: Bool { needsPurchase && !locked }
+
+    /// The passport's right page shows the held license (stamp, key, Done)
+    /// in place of the offer: a key is held, or the account is free for good.
+    /// The left page's thanks follows `freeForGood` too.
+    var showsHeldLicense: Bool { key != nil || freeForGood }
+
+    /// The License entry under the Settings sidebar. An account registered
+    /// before the cutoff has it with the switch off too: its Free for good card.
+    var showsSettingsEntry: Bool { status != .hidden || freeForGood }
+
+    /// The trial's length in days, for the first-run guide's line.
+    var trialDays: Int { gatewayLicense?.trialDays ?? 7 }
+
+    /// What is left of the trial, 0…1, for the chip's ring. Nil outside it.
+    var trialFraction: Double? {
+        guard case .trial(let ends) = status else { return nil }
+        let total = Double(max(1, trialDays)) * 86_400
+        return min(1, max(0, ends.timeIntervalSince(clock) / total))
+    }
+
+    var priceUSD: Double { gatewayLicense?.priceUSD ?? 19 }
 
     var priceText: String {
         let price = priceUSD
@@ -90,13 +254,17 @@ final class NotchiLicense: ObservableObject {
     /// When the license was bought, for the Balances line. Nil unless bought.
     var purchasedAt: Date? {
         guard case .active(_, "purchase") = status else { return nil }
-        if Self.preview { return Date() }
-        guard let ms = account.snapshot?.license?.issuedAt else { return nil }
+        if previewKey != nil { return Date() }
+        guard let ms = gatewayLicense?.issuedAt else { return nil }
         return Date(timeIntervalSince1970: ms / 1000)
     }
 
     var key: String? {
         if case .active(let key, _) = status, !key.isEmpty { return key }
+        // A founding key is issued with the switch off too, while `status`
+        // is `.hidden`.
+        if !Self.preview, previewKey == nil, let license = gatewayLicense ?? cached,
+           license.source == "early", let key = license.key, !key.isEmpty { return key }
         return nil
     }
 
@@ -106,13 +274,15 @@ final class NotchiLicense: ObservableObject {
         if Self.preview { return false }
         if status == .included { return true }
         if case .active(_, "early") = status { return true }
-        return account.snapshot?.license?.status == "included"
+        if (gatewayLicense ?? cached)?.source == "early" { return true }
+        return gatewayLicense?.status == "included"
     }
 
     /// The cutoff's year, for "Downloaded before 2027".
     var freeBeforeYear: String? {
-        guard let text = account.snapshot?.license?.freeBefore,
-              let date = ISO8601DateFormatter().date(from: text) else { return nil }
+        guard let text = gatewayLicense?.freeBefore,
+              let date = ISO8601DateFormatter.withFraction.date(from: text)
+                ?? ISO8601DateFormatter().date(from: text) else { return nil }
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(identifier: "UTC")!
         return String(calendar.component(.year, from: date))
@@ -128,10 +298,13 @@ final class NotchiLicense: ObservableObject {
 
     private func recompute() {
         let next = computeStatus()
+        scheduleTrialEnd(next)
         guard next != status else { return }
         let was = status
         status = next
-        if case .active = next, was == .needed {
+        if next == .needed, case .trial = was { LicensePrompt.shared.offer() }
+        let wasBuying: Bool = { if case .trial = was { return true }; return was == .needed }()
+        if case .active = next, wasBuying {
             // Paid in the browser, or a key typed in Settings, while this
             // process was watching.
             waitTask?.cancel()
@@ -144,16 +317,51 @@ final class NotchiLicense: ObservableObject {
     }
 
     private func computeStatus() -> Status {
+        if let previewKey { return .active(key: previewKey, source: "purchase") }
         if Self.preview {
-            if let previewKey { return .active(key: previewKey, source: "purchase") }
-            return .needed
+            // `NotchiLicensePreviewLocked` previews the end of the trial.
+            #if DEBUG
+            if UserDefaults.standard.bool(forKey: "NotchiLicensePreviewLocked") { return .needed }
+            #endif
+            return .trial(ends: Self.previewTrialEnd)
         }
-        guard let license = account.snapshot?.license, license.live else { return .hidden }
+        guard var license = gatewayLicense ?? cached else { return .hidden }
+        #if DEBUG
+        if Self.debugAssumeLive { license.live = true }
+        #endif
+        guard license.live else { return .hidden }
         switch license.status {
         case "active": return .active(key: license.key ?? "", source: license.source ?? "purchase")
         case "included": return .included
+        case "trial":
+            // The gateway said trial; the clock here decides when it ends, so
+            // a Mac that stays offline still locks on time.
+            if let text = license.trialEndsAt, let ends = ISO8601DateFormatter.withFraction.date(from: text)
+                ?? ISO8601DateFormatter().date(from: text), ends > Date() {
+                return .trial(ends: ends)
+            }
+            return .needed
         default: return .needed
         }
+    }
+
+    private func scheduleTrialEnd(_ next: Status) {
+        trialTimer?.invalidate()
+        trialTimer = nil
+        clockTimer?.invalidate()
+        clockTimer = nil
+        guard case .trial(let ends) = next else { return }
+        clock = Date()
+        let tick = Timer(timeInterval: 60, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.clock = Date() }
+        }
+        RunLoop.main.add(tick, forMode: .common)
+        clockTimer = tick
+        let timer = Timer(fire: ends.addingTimeInterval(1), interval: 0, repeats: false) { [weak self] _ in
+            Task { @MainActor in self?.recompute() }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        trialTimer = timer
     }
 
     // MARK: Buying
@@ -161,12 +369,13 @@ final class NotchiLicense: ObservableObject {
     /// Open Stripe's checkout and wait for the license to land. It arrives with
     /// Stripe's webhook, so this polls `/v1/me` until it does.
     func buy() async {
-        guard status == .needed, phase != .buying, phase != .activating else { return }
+        guard needsPurchase, phase != .buying, phase != .activating else { return }
         phase = .buying
-        if Self.preview {
+        if Self.simulates {
             try? await Task.sleep(nanoseconds: 600_000_000)
             phase = .idle
             awaitingPayment = true
+            LicensePrompt.shared.checkoutOpened()
             waitTask?.cancel()
             waitTask = Task { [weak self] in
                 try? await Task.sleep(nanoseconds: 2_400_000_000)
@@ -181,6 +390,7 @@ final class NotchiLicense: ObservableObject {
             NSWorkspace.shared.open(url)
             phase = .idle
             awaitingPayment = true
+            LicensePrompt.shared.checkoutOpened()
             waitForLicense()
         } catch {
             phase = .failed(message(for: error))
@@ -213,7 +423,7 @@ final class NotchiLicense: ObservableObject {
         let typed = key.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !typed.isEmpty, phase != .activating else { return false }
         phase = .activating
-        if Self.preview {
+        if Self.simulates {
             try? await Task.sleep(nanoseconds: 700_000_000)
             guard let normalized = Self.normalize(typed) else {
                 phase = .failed(L("license.error.invalidKey"))
@@ -260,7 +470,7 @@ final class NotchiLicense: ObservableObject {
     /// come here: they fall back on-device, and a card nobody asked for would
     /// interrupt a copy.
     func noteRefusal() {
-        guard status == .needed else { return }
+        guard locked else { return }
         let defaults = UserDefaults.standard
         if let last = defaults.object(forKey: Self.lastOfferKey) as? Date,
            Date().timeIntervalSince(last) < 24 * 3600 { return }
@@ -298,7 +508,7 @@ final class NotchiLicense: ObservableObject {
         if offer {
             LicensePrompt.shared.offer()
         } else {
-            if status != .needed { previewKey = nil; recompute() }
+            if !needsPurchase { previewKey = nil; recompute() }
             previewKey = Self.sampleKey()
             recompute()
         }
@@ -338,6 +548,79 @@ final class NotchiLicense: ObservableObject {
                   "passport-\(Int(p * 100))")
         }
     }
+
+    /// `NOTCH_LICENSE_FORCE`: `license` stands in for the gateway's.
+    func _debugForce(_ license: NoNoAccount.Snapshot.License) {
+        auditLicense = license
+        recompute()
+    }
+
+    /// `NOTCH_LICENSE_AUDIT=<dir>` (`scripts/test-board/check-license.mjs`):
+    /// for each license in `<dir>/cases.json` (`[{"id", "license"}]`, license
+    /// null for none), what every surface reads, into `<dir>/results.json`,
+    /// and the Settings card and row as `<dir>/<id>-pane.png` / `-row.png`.
+    /// Network answers do not reach it: the case's license stands in for the
+    /// gateway's.
+    func _debugAudit(dir: String, model: NotchModel) {
+        struct Case: Decodable { let id: String; let license: NoNoAccount.Snapshot.License? }
+        let base = URL(fileURLWithPath: dir)
+        guard let data = try? Data(contentsOf: base.appendingPathComponent("cases.json")),
+              let cases = try? JSONDecoder().decode([Case].self, from: data) else { return }
+        func write<V: View>(_ view: V, _ name: String) {
+            let renderer = ImageRenderer(content: view.environment(\.colorScheme, .dark))
+            renderer.scale = 2
+            guard let cg = renderer.cgImage else { return }
+            try? NSBitmapImageRep(cgImage: cg).representation(using: .png, properties: [:])?
+                .write(to: base.appendingPathComponent("\(name).png"))
+        }
+        var results: [[String: Any]] = []
+        for item in cases {
+            previewKey = nil
+            // An empty license means "the gateway sent none".
+            auditLicense = item.license ?? NoNoAccount.Snapshot.License(live: false, priceUSD: 19, status: "none")
+            recompute()
+            let statusText: String = {
+                switch status {
+                case .hidden: return "hidden"
+                case .needed: return "needed"
+                case .trial: return "trial"
+                case .active(_, let source): return "active:\(source)"
+                case .included: return "included"
+                }
+            }()
+            let chip: String? = showsNotchChip
+                ? (trialFraction != nil
+                    ? ([L("license.chip.trial"), trialFinalDayLeft].compactMap { $0 }.joined(separator: " "))
+                    : L("license.sidebar.buy"))
+                : nil
+            results.append([
+                "id": item.id,
+                "status": statusText,
+                "locked": locked,
+                "serviceLocked": LicenseLock.isLocked,
+                "needsPurchase": needsPurchase,
+                "notchChip": chip ?? NSNull(),
+                "trialLeft": trialLeft ?? NSNull(),
+                "trialLine": trialLine ?? NSNull(),
+                "settingsEntry": showsSettingsEntry,
+                "freeForGood": freeForGood,
+                "maskedKey": maskedKey ?? NSNull(),
+                "paneShut": needsPurchase,
+                "offerPage": showsHeldLicense ? "held" : "offer",
+                "offerThanks": freeForGood ? "founding" : "intro",
+            ])
+            write(InlineSettingsView._debugLicensePane(model: model).padding(20).frame(width: 520)
+                    .background(Color(white: 0.08)), "\(item.id)-pane")
+            write(InlineSettingsView._debugLicenseRow(model: model).padding(20).frame(width: 520)
+                    .background(Color(white: 0.08)), "\(item.id)-row")
+            write(LicenseOfferCard(openProgress: 1) {}.padding(32).background(Color(white: 0.3)),
+                  "\(item.id)-card")
+        }
+        auditLicense = nil
+        if let json = try? JSONSerialization.data(withJSONObject: results, options: [.prettyPrinted, .sortedKeys]) {
+            try? json.write(to: base.appendingPathComponent("results.json"))
+        }
+    }
     #endif
 }
 
@@ -355,6 +638,13 @@ final class LicensePrompt: ObservableObject {
 
     /// The display the offer card is up on.
     @Published private(set) var offerDisplay: CGDirectDisplayID?
+    /// The display the "license is active" strip is up on, for a few seconds
+    /// after a license lands (`LicenseActivatedStrip`).
+    @Published private(set) var activatedDisplay: CGDirectDisplayID?
+    private var activatedClear: DispatchWorkItem?
+    /// How long the strip stays: a message is read, not glanced at
+    /// (`RestingResult.messageHold`).
+    private static let activatedHold: TimeInterval = 6
 
     private weak var model: NotchModel?
     private var pickDisplay: (() -> CGDirectDisplayID?)?
@@ -371,6 +661,7 @@ final class LicensePrompt: ObservableObject {
                 guard let self else { return }
                 if open {
                     self.hideOffer()
+                    self.hideActivated()
                 } else {
                     Task { @MainActor in
                         try? await Task.sleep(nanoseconds: 700_000_000)
@@ -392,11 +683,26 @@ final class LicensePrompt: ObservableObject {
         hideOffer()
         pendingActivation = true
         showPending()
+        model?.postLicenseThanks()
+    }
+
+    /// The checkout is open in the browser: the panel folds. Nothing shows
+    /// the wait; the notch speaks again when the license lands (`activated`).
+    func checkoutOpened() {
+        guard let model, model.open else { return }
+        model.beginClose()
     }
 
     func dismissOffer() {
         pendingOffer = false
         hideOffer()
+    }
+
+    func hideActivated() {
+        activatedClear?.cancel()
+        activatedClear = nil
+        guard activatedDisplay != nil else { return }
+        withAnimation(.spring(response: 0.42, dampingFraction: 0.86)) { activatedDisplay = nil }
     }
 
     private func hideOffer() {
@@ -406,15 +712,43 @@ final class LicensePrompt: ObservableObject {
 
     private func showPending() {
         guard let model, !model.open, !OnboardingService.shared.showIntro else { return }
-        if pendingActivation {
+        if pendingActivation, let display = pickDisplay?() {
             pendingActivation = false
-            RestingResult.shared.show(L("license.activated"), failed: false, kind: .license)
+            withAnimation(.spring(response: 0.5, dampingFraction: 0.8)) { activatedDisplay = display }
+            activatedClear?.cancel()
+            let work = DispatchWorkItem { [weak self] in self?.hideActivated() }
+            activatedClear = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.activatedHold, execute: work)
             return
         }
         guard pendingOffer, offerDisplay == nil, UpdatePrompt.shared.showing == nil,
               let display = pickDisplay?() else { return }
         pendingOffer = false
         withAnimation(.spring(response: 0.5, dampingFraction: 0.8)) { offerDisplay = display }
+    }
+}
+
+// MARK: - Activated strip
+
+/// The resting notch unfolds into one line when a license lands: Notchi's nod
+/// (the activation ear's `.saved`) and one line, on the island's own glass
+/// in the update card's slot (`NotchIsland`), centered. It folds after a few
+/// seconds or when the panel opens, where the thanks waits in the invitation
+/// slot (`LicenseThanksInvite`).
+struct LicenseActivatedStrip: View {
+    var body: some View {
+        HStack(spacing: 12) {
+            NotchiFace(expression: .saved)
+                .frame(width: NotchiFace.slotWidth)
+            Text(L("license.strip.active"))
+                .font(.sf(15))
+                .foregroundStyle(Tokens.text1)
+                .lineLimit(1)
+                .fixedSize()
+        }
+        .padding(.top, 8)
+        .padding(.bottom, 20)
+        .frame(width: UpdatePromptCard.width)
     }
 }
 
@@ -489,7 +823,10 @@ struct LicensePromptCard: View {
     private var buyButton: some View {
         BuyButtonFace(title: license.priceText, busy: buying) {
             license.clearFailure()
-            Task { await license.buy() }
+            Task {
+                await license.buy()
+                if license.awaitingPayment { LicensePrompt.shared.dismissOffer() }
+            }
         }
     }
 
@@ -730,7 +1067,11 @@ struct LicenseOfferCard: View {
                     .modifier(LightInvert(on: colorScheme == .light))
             }
             .padding(.bottom, 28)
-            if resultKey != nil && !license.freeForGood {
+            if license.freeForGood {
+                // Early users: the thanks, in every language in turn.
+                ThanksRotation(director: markDirector, founding: true)
+                    .padding(.horizontal, 36)
+            } else if resultKey != nil {
                 ThanksRotation(director: markDirector)
                     .padding(.horizontal, 36)
             } else {
@@ -740,6 +1081,15 @@ struct LicenseOfferCard: View {
                     .multilineTextAlignment(.center)
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.horizontal, 36)
+                // Where the trial stands, while there is no license.
+                if let trialLine = license.trialLine {
+                    Text(trialLine)
+                        .font(.sf(Tokens.TypeSize.meta))
+                        .foregroundStyle(Tokens.text3)
+                        .multilineTextAlignment(.center)
+                        .padding(.top, 10)
+                        .padding(.horizontal, 36)
+                }
             }
             Spacer(minLength: 0)
         }
@@ -764,7 +1114,7 @@ struct LicenseOfferCard: View {
     /// result in its place.
     private var rightPage: some View {
         ZStack {
-            if resultKey != nil || license.status == .included {
+            if resultKey != nil || license.showsHeldLicense {
                 resultContent(resultKey)
                     .transition(.opacity)
             } else {
@@ -780,7 +1130,7 @@ struct LicenseOfferCard: View {
         .background { PassportPageSurface(shape: Self.rightShape, spine: .leading, rosette: false) }
         .overlay(alignment: .topTrailing) {
             // The license prompt card's close control. The result has Done.
-            if resultKey == nil && license.status != .included {
+            if resultKey == nil && !license.showsHeldLicense {
                 GlassIconButton(systemName: "xmark",
                                 help: L("updatePrompt.dismiss"),
                                 tipEdge: .bottom,
@@ -938,7 +1288,11 @@ struct LicenseOfferCard: View {
                                   busy: license.phase == .buying, fullWidth: true,
                                   gradient: true) {
                         license.clearFailure()
-                        Task { await license.buy() }
+                        Task {
+                            await license.buy()
+                            // The checkout is open in the browser.
+                            if license.awaitingPayment { onClose() }
+                        }
                     }
                     UnderlineLink(title: L("license.alreadyPurchased")) { openKeyField() }
                         .fixedSize()
@@ -1095,7 +1449,8 @@ final class LicenseOfferWindow {
 
     var isOpen: Bool { panel != nil }
 
-    func show(over host: NSWindow, startWithKeyField: Bool, onClose: @escaping () -> Void) {
+    func show(over host: NSWindow, startWithKeyField: Bool, followsSystem: Bool = false,
+              onClose: @escaping () -> Void) {
         close(animated: false)
         let presentation = LicenseOfferPresentation()
         let card = LicenseOfferEntrance(presentation: presentation) {
@@ -1114,8 +1469,9 @@ final class LicenseOfferWindow {
         panel.isMovable = false
         panel.isReleasedWhenClosed = false
         // Dark over the notch (pinned dark Aqua); over the Settings window it
-        // takes that window's light or dark.
-        panel.appearance = host.effectiveAppearance
+        // takes that window's light or dark; from the menu bar card, the
+        // system's.
+        panel.appearance = followsSystem ? NSApp.effectiveAppearance : host.effectiveAppearance
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
         panel.contentView = hosting
         panel.alphaValue = 0
@@ -1320,21 +1676,37 @@ private struct PassportPageSurface: View {
 /// language and moving to the next each time Notchi's eyes change form.
 private struct ThanksRotation: View {
     let director: NotchiDirector
-    private static let others = [
+    /// The early user's thanks (`license.page.introFounding`) instead of the
+    /// purchase thanks.
+    var founding = false
+    private static let purchase = [
         "Thanks for your purchase.", "感谢你的购买。", "感謝你的購買。",
         "ご購入ありがとうございます。", "구매해 주셔서 감사합니다.", "Merci pour votre achat.",
         "Gracias por tu compra.", "Danke für deinen Kauf.", "Grazie per l'acquisto.",
         "Obrigado/Obrigada pela sua compra.",
     ]
-    private let lines: [String] = {
-        let own = L("license.page.thanks")
-        return [own] + others.filter { $0 != own }
-    }()
+    private static let early = [
+        "Thanks for being an early Notchi user. Your license is free for good.",
+        "感谢你成为 Notchi 的早期用户。你的授权永久免费。",
+        "感謝你成為 Notchi 的早期用戶。你的授權永久免費。",
+        "Notchi の初期ユーザーになっていただき、ありがとうございます。ライセンスはずっと無料です。",
+        "Notchi 초기 사용자가 되어 주셔서 감사합니다. 라이선스는 영구 무료입니다.",
+        "Merci d'être parmi les premiers utilisateurs de Notchi. Votre licence est gratuite pour toujours.",
+        "Gracias por ser uno de los primeros usuarios de Notchi. Tu licencia es gratis para siempre.",
+        "Danke, dass du Notchi von Anfang an nutzt. Deine Lizenz bleibt für immer kostenlos.",
+        "Grazie per essere tra i primi utenti di Notchi. La tua licenza è gratuita per sempre.",
+        "Obrigado por estar entre os primeiros usuários do Notchi. Sua licença é gratuita para sempre.",
+    ]
+    private var lines: [String] {
+        let own = L(founding ? "license.page.introFounding" : "license.page.thanks")
+        return [own] + (founding ? Self.early : Self.purchase).filter { $0 != own }
+    }
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 0.1)) { _ in
             CrossfadeText(text: lines[max(0, director.formsStarted - 1) % lines.count],
-                          font: Tokens.TypeSize.form, color: Tokens.text1, shimmers: false)
+                          font: Tokens.TypeSize.form, color: Tokens.text1, shimmers: false,
+                          centered: founding)
                 .frame(maxWidth: .infinity)
         }
     }
@@ -1396,6 +1768,64 @@ private struct SplitMix64 {
 /// Passport security print, drawn once in a Canvas: two bands of interleaved
 /// waves along the top and bottom edges and, optionally, a rosette of
 /// overlapping loops centered where the page's mark sits.
+/// The passport's wave pattern (`PassportGuilloche.band`) repeated down the
+/// whole view, in the blue-to-green ink. Part of `LicenseChipSurface`.
+struct LicenseWavePattern: View {
+    /// Distance between band centres; the bands overlap, so the strands
+    /// fill the view.
+    private static let pitch: CGFloat = 12
+    /// Wave units to points: a band reaches about 10 pt either side.
+    private static let scale: CGFloat = 0.5
+
+    var body: some View {
+        Canvas { context, size in
+            let shading = GraphicsContext.Shading.linearGradient(
+                Gradient(colors: LicenseTeal.hues),
+                startPoint: CGPoint(x: 0, y: size.height),
+                endPoint: CGPoint(x: size.width, y: 0))
+            var path = Path()
+            var y: CGFloat = 0
+            while y <= size.height + Self.pitch {
+                path.addPath(PassportGuilloche.band(width: size.width, centerY: y, scale: Self.scale))
+                y += Self.pitch
+            }
+            context.stroke(path, with: shading, lineWidth: 0.5)
+        }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+}
+
+/// The surface every Buy License control wears (the home page's chip, the
+/// Settings sidebar row, the Model pane's Buy chip): the chip fill, a faint
+/// wash of the passport's blue-to-green, and its wave pattern faintly over
+/// the whole shape.
+struct LicenseChipSurface<S: Shape>: ViewModifier {
+    let shape: S
+    var hovered: Bool
+
+    func body(content: Content) -> some View {
+        content.background {
+            ZStack {
+                shape.fill(LinearGradient(colors: LicenseTeal.hues,
+                                          startPoint: .leading, endPoint: .trailing))
+                    .opacity(0.12)
+                LicenseWavePattern()
+                    .opacity(0.3)
+                    .clipShape(shape)
+                shape.fill(Tokens.ink.opacity(hovered ? 0.12 : 0.07))
+            }
+            .allowsHitTesting(false)
+        }
+    }
+}
+
+extension View {
+    func licenseChipSurface<S: Shape>(_ shape: S, hovered: Bool) -> some View {
+        modifier(LicenseChipSurface(shape: shape, hovered: hovered))
+    }
+}
+
 private struct PassportGuilloche: View {
     enum Ink { case teal, white }
     let ink: Ink
@@ -1434,7 +1864,7 @@ private struct PassportGuilloche: View {
 
     /// Fourteen waves, each a little out of phase with the last, so the
     /// strands cross and part along the band.
-    private static func band(width: CGFloat, centerY: CGFloat, scale: CGFloat) -> Path {
+    static func band(width: CGFloat, centerY: CGFloat, scale: CGFloat) -> Path {
         var path = Path()
         let strands = 14
         for j in 0..<strands {
@@ -1582,25 +2012,27 @@ struct SettingsPassport: View {
 }
 
 /// A visa stamp in the license teal: the words in a double-ruled frame, set
-/// at a slant.
-private struct PassportStamp: View {
+/// at a slant. `compact` is the one-line size beside the sidebar's License row.
+struct PassportStamp: View {
     let text: String
+    var compact = false
 
     var body: some View {
-        let frame = RoundedRectangle(cornerRadius: 7, style: .continuous)
+        let frame = RoundedRectangle(cornerRadius: compact ? 4 : 7, style: .continuous)
         Text(text.uppercased())
-            .font(.sf(Tokens.TypeSize.label, weight: .bold))
-            .tracking(1.6)
+            .font(.sf(compact ? 7.5 : Tokens.TypeSize.label, weight: .bold))
+            .tracking(compact ? 1 : 1.6)
             .multilineTextAlignment(.center)
             .lineSpacing(2)
             .fixedSize()
-            .padding(.horizontal, 14)
-            .padding(.vertical, 9)
-            .overlay(frame.inset(by: 3).stroke(lineWidth: 0.75))
-            .overlay(frame.stroke(lineWidth: 2))
+            .padding(.horizontal, compact ? 5 : 14)
+            .padding(.vertical, compact ? 3 : 9)
+            .overlay(frame.inset(by: compact ? 1.75 : 3).stroke(lineWidth: compact ? 0.5 : 0.75))
+            .overlay(frame.stroke(lineWidth: compact ? 1.1 : 2))
             .foregroundStyle(LinearGradient(colors: [LicenseTeal.blue, LicenseTeal.green],
                                             startPoint: .bottomLeading, endPoint: .topTrailing))
-            .opacity(0.9)
+            // Beside the sidebar title it stays faint, so the title reads first.
+            .opacity(compact ? 0.5 : 0.9)
             .rotationEffect(.degrees(-9))
             .accessibilityLabel(text.replacingOccurrences(of: "\n", with: " "))
     }
@@ -1656,7 +2088,7 @@ enum LicenseTeal {
 /// The gradient buy button's fill: `LicenseTeal` from blue at the
 /// bottom-leading corner to green at the top-trailing one, drifting slowly
 /// along the diagonal. Still under Reduce Motion.
-private struct BuyButtonGradient: View {
+struct BuyButtonGradient: View {
     var dimmed: Bool
     var shape: RoundedRectangle
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -1666,13 +2098,19 @@ private struct BuyButtonGradient: View {
     var body: some View {
         TimelineView(.animation(paused: reduceMotion)) { context in
             let t = reduceMotion ? 0 : context.date.timeIntervalSinceReferenceDate
-            let sway = CGFloat(sin(t * 0.6)) * 0.18
+            let sway = CGFloat(sin(t * 0.4)) * 0.35
             shape.fill(LinearGradient(colors: Self.hues,
                                       startPoint: UnitPoint(x: 0 + sway, y: 1),
                                       endPoint: UnitPoint(x: 1 + sway, y: 0)))
         }
         .overlay(shape.fill(Color.white.opacity(dimmed ? 0.10 : 0)))
-        .overlay(shape.strokeBorder(LinearGradient(colors: [.white.opacity(0.35), .white.opacity(0.05)],
+        // Glass: light pooling on the upper face.
+        .overlay(shape.fill(LinearGradient(stops: [
+            .init(color: .white.opacity(0.06), location: 0),
+            .init(color: .white.opacity(0.01), location: 0.5),
+            .init(color: .clear, location: 0.5),
+        ], startPoint: .top, endPoint: .bottom)))
+        .overlay(shape.strokeBorder(LinearGradient(colors: [.white.opacity(0.25), .white.opacity(0.08)],
                                                    startPoint: .top, endPoint: .bottom),
                                     lineWidth: 0.75))
     }
@@ -1737,4 +2175,60 @@ private struct SparkleField: View {
             .accessibilityHidden(true)
         }
     }
+}
+
+
+// MARK: - Lock
+
+/// Whether the app is locked (`NotchiLicense.locked`), readable from any
+/// thread. The service factory (`AppDelegate.makeService`) and background work
+/// read it; `NotchiLicense` writes it.
+enum LicenseLock {
+    private static let state = OSAllocatedUnfairLock(initialState: false)
+
+    static var isLocked: Bool { state.withLock { $0 } }
+
+    static func set(_ locked: Bool) {
+        let changed = state.withLock { value -> Bool in
+            defer { value = locked }
+            return value != locked
+        }
+        if changed {
+            DispatchQueue.main.async { NotificationCenter.default.post(name: LicenseLock.changed_, object: nil) }
+        }
+    }
+
+    /// Posted on the main queue when `isLocked` changes.
+    static let changed_ = Notification.Name("NotchiLicenseLockChanged")
+
+    /// What a refused round throws: the gateway's own refusal, so the round
+    /// fails the way a refused Notchi round already does.
+    static var error: Error {
+        OpenAICompatAIService.ServiceError.http(
+            provider: "Notchi", status: 402,
+            body: #"{"error":{"type":"license_required","code":"license_required"}}"#)
+    }
+}
+
+/// The service every round gets while the app is locked: it answers nothing.
+struct LockedAIService: AgentCapableService {
+    func stream(system: String, messages: [ChatMessage]) -> AsyncThrowingStream<String, Error> {
+        AsyncThrowingStream { $0.finish(throwing: LicenseLock.error) }
+    }
+
+    func streamTurn(system: String,
+                    messages: [AgentMessage],
+                    tools: [ToolSpec],
+                    requiredTool: String?) -> AsyncThrowingStream<TurnEvent, Error> {
+        AsyncThrowingStream { $0.finish(throwing: LicenseLock.error) }
+    }
+}
+
+extension ISO8601DateFormatter {
+    /// ISO 8601 with milliseconds, as the gateway writes dates.
+    static let withFraction: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
 }

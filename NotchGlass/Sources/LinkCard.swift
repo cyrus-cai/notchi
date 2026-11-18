@@ -998,7 +998,8 @@ final class LinkCardStore {
     private nonisolated static func readRecord(_ url: URL) -> LPLinkMetadata? {
         guard let data = try? Data(contentsOf: recordURL(url)),
               let record = try? JSONDecoder().decode(Record.self, from: data),
-              record.version == recordVersion
+              record.version == recordVersion,
+              record.icon != nil
         else { return nil }
         return metadata(from: record, original: url)
     }
@@ -1088,6 +1089,42 @@ final class LinkCardStore {
         return await task.value
     }
 
+    /// The capture with `LPLinkView`'s own rounded corners filled in with the
+    /// card's colour, taken near the middle of its bottom edge. The card is
+    /// clipped to our continuous corner (`ChatBubbleChrome.cardRadius`); left
+    /// in, the system's circular corner crossed that curve and showed as a cut
+    /// at each corner.
+    private static func filledCorners(_ rep: NSBitmapImageRep, size: CGSize) -> NSImage {
+        let fallback = NSImage(size: size)
+        fallback.addRepresentation(rep)
+        let scale = CGFloat(rep.pixelsWide) / max(size.width, 1)
+        let sampleY = max(0, rep.pixelsHigh - 1 - Int(4 * scale))
+        guard let fill = rep.colorAt(x: rep.pixelsWide / 2, y: sampleY),
+              fill.alphaComponent > 0.99,
+              let out = NSBitmapImageRep(bitmapDataPlanes: nil,
+                                         pixelsWide: rep.pixelsWide, pixelsHigh: rep.pixelsHigh,
+                                         bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
+                                         isPlanar: false, colorSpaceName: .deviceRGB,
+                                         bytesPerRow: 0, bitsPerPixel: 0),
+              let context = NSGraphicsContext(bitmapImageRep: out)
+        else { return fallback }
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = context
+        let w = CGFloat(rep.pixelsWide), h = CGFloat(rep.pixelsHigh)
+        let corner = 24 * scale
+        fill.setFill()
+        for origin in [CGPoint(x: 0, y: 0), CGPoint(x: w - corner, y: 0),
+                       CGPoint(x: 0, y: h - corner), CGPoint(x: w - corner, y: h - corner)] {
+            NSRect(origin: origin, size: CGSize(width: corner, height: corner)).fill()
+        }
+        rep.draw(in: NSRect(x: 0, y: 0, width: w, height: h), from: .zero,
+                 operation: .sourceOver, fraction: 1, respectFlipped: false, hints: nil)
+        NSGraphicsContext.restoreGraphicsState()
+        let image = NSImage(size: size)
+        image.addRepresentation(out)
+        return image
+    }
+
     /// Lay `LPLinkView` out in a window that is never shown, wait until it has
     /// loaded its icon and two captures in a row match, and keep that capture.
     private func render(_ card: LPLinkMetadata) async -> NSImage? {
@@ -1123,9 +1160,7 @@ final class LinkCardStore {
                 Data(bytes: $0, count: rep.bytesPerRow * rep.pixelsHigh)
             }
             if bytes != nil, bytes == previous {
-                let image = NSImage(size: size)
-                image.addRepresentation(rep)
-                return image
+                return Self.filledCorners(rep, size: size)
             }
             previous = bytes
         }

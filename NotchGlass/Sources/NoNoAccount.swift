@@ -1,4 +1,6 @@
+import CryptoKit
 import Foundation
+import IOKit
 import AppKit
 
 /// What the app tells nono about a request besides the request itself: which
@@ -50,8 +52,25 @@ struct NoNoRequestContext: Sendable {
                 as? String ?? "0",
         ]
         if let turn = current?.turnID { headers["X-Notchi-Turn-Id"] = turn.uuidString }
+        if let device = DeviceIdentity.hash { headers["X-Notchi-Device"] = device }
         return headers
     }
+}
+
+/// This Mac, as the gateway knows it: a SHA-256 of the hardware UUID, never the
+/// UUID itself. The gateway starts the license trial from the first time it saw
+/// this id, so reinstalling does not start a new one (`backend/src/license.ts`).
+enum DeviceIdentity {
+    static let hash: String? = {
+        let service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("IOPlatformExpertDevice"))
+        guard service != 0 else { return nil }
+        defer { IOObjectRelease(service) }
+        guard let uuid = IORegistryEntryCreateCFProperty(service, kIOPlatformUUIDKey as CFString,
+                                                         kCFAllocatorDefault, 0)?
+                .takeRetainedValue() as? String, !uuid.isEmpty else { return nil }
+        let digest = SHA256.hash(data: Data("notchi-device-v1:\(uuid)".utf8))
+        return digest.map { String(format: "%02x", $0) }.joined()
+    }()
 }
 
 /// The client half of nono's billing: getting a token, reading what credit is
@@ -152,18 +171,23 @@ final class NoNoAccount: ObservableObject {
 
         /// The Notchi license (`NotchiLicense`). Missing from a gateway older
         /// than the license.
-        struct License: Decodable, Equatable {
+        /// Kept on disk by `NotchiLicense`, so a Mac offline at launch is
+        /// locked or not as it was when last online.
+        struct License: Codable, Equatable {
             /// The gateway's switch. False hides every license surface.
             var live: Bool
             var priceUSD: Double
             /// ISO 8601. Accounts registered before it need no purchase.
             var freeBefore: String?
-            /// `active`, `included` or `none`.
+            /// `active`, `included`, `trial` or `none`.
             var status: String
             var source: String?
             var key: String?
             /// Milliseconds since the epoch: when it was bought or given.
             var issuedAt: Double?
+            /// ISO 8601: when the trial ends or ended. Nil without one.
+            var trialEndsAt: String?
+            var trialDays: Int?
         }
 
         var license: License?
@@ -436,7 +460,7 @@ final class NoNoAccount: ObservableObject {
         guard hasToken else { return }
         phase = .working(work)
         do {
-            let redirect: Redirect = try await post(path, body: body, authorized: true)
+            let redirect: Redirect = try await send(checkoutRequest(path, body: body))
             guard let url = URL(string: redirect.url) else {
                 phase = .failed(L("nono.error.badRedirect"))
                 return
@@ -498,7 +522,7 @@ final class NoNoAccount: ObservableObject {
     /// The Stripe checkout page for the license (`POST /v1/billing/license`).
     func openLicenseCheckout() async throws -> URL {
         if !hasToken { await register() }
-        let redirect: LicenseCheckout = try await post("/billing/license", body: [:], authorized: true)
+        let redirect: LicenseCheckout = try await send(checkoutRequest("/billing/license", body: [:]))
         guard let url = URL(string: redirect.url) else { throw Failed.api(status: 502, code: "", message: L("nono.error.badRedirect")) }
         return url
     }
@@ -705,6 +729,29 @@ final class NoNoAccount: ObservableObject {
         return try? await jev("followup") { try await send(request) as FollowUpVerdict }
     }
 
+    // MARK: - Memory check
+
+    /// Jev's verdict on whether an exchange holds something to keep or
+    /// correct in memory (`POST /v1/memorycheck`). `verdict` is `keep` or `skip`.
+    struct MemoryCheckVerdict: Decodable, Equatable {
+        var verdict: String
+        var probability: Double
+    }
+
+    /// Ask the gateway whether the round's memory pass is worth running.
+    /// Free for every account with a token. Nil on any failure; the caller
+    /// then runs the pass. The caller must have run `ClipPrivacy` first.
+    func checkMemory(question: String, answer: String) async -> MemoryCheckVerdict? {
+        if DecisionModel.usesOwn {
+            return await OwnDecisionModel.checkMemory(question: question, answer: answer)
+        }
+        guard hasToken else { return nil }
+        guard var request = try? jsonRequest("/memorycheck", body: ["question": question, "answer": answer],
+                                             authorized: true) else { return nil }
+        request.timeoutInterval = 4
+        return try? await jev("memorycheck") { try await send(request) as MemoryCheckVerdict }
+    }
+
     // MARK: - Proactive check
 
     /// Jev's verdict on a message the app is about to write on its own
@@ -807,6 +854,15 @@ final class NoNoAccount: ObservableObject {
         try await send(jsonRequest(path, body: body, authorized: authorized))
     }
 
+    /// A checkout request carries the Mac's region setting. The gateway keeps
+    /// buyers in mainland China off Stripe Managed Payments, which does not
+    /// serve them, and the IP alone misses anyone behind a proxy abroad.
+    private func checkoutRequest(_ path: String, body: [String: Any]) throws -> URLRequest {
+        var request = try jsonRequest(path, body: body, authorized: true)
+        if let region = Locale.current.region?.identifier { request.setValue(region, forHTTPHeaderField: "X-Notchi-Region") }
+        return request
+    }
+
     private func jsonRequest(_ path: String, body: [String: Any], authorized: Bool) throws -> URLRequest {
         var request = URLRequest(url: URL(string: base + path)!)
         request.httpMethod = "POST"
@@ -841,7 +897,7 @@ final class NoNoAccount: ObservableObject {
         // the app's version: a request without one is a build too old to send
         // it on completions either, and those would read as a script's.
         var request = request
-        for (field, value) in NoNoRequestContext.headers where field == "X-Notchi-Version" {
+        for (field, value) in NoNoRequestContext.headers where field == "X-Notchi-Version" || field == "X-Notchi-Device" {
             request.setValue(value, forHTTPHeaderField: field)
         }
         RequestAudit.current?.request(request)

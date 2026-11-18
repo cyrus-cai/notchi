@@ -38,6 +38,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// available (env var or the stored entry from Settings), otherwise fall
     /// back to the offline stub so the UI still works out of the box.
     private static func makeService() -> AIService {
+        // Past the trial with no license, nothing answers (`NotchiLicense`).
+        if LicenseLock.isLocked { return LockedAIService() }
         let provider = APIKeyStore.selectedProvider
         // Codex is keyless — it authenticates via the user's `codex login`, not an
         // API key — so it bypasses the key guard entirely. If the CLI isn't installed
@@ -98,6 +100,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// without duplicating the Anthropic-vs-OpenAI client selection. Same protocol
     /// split as the main path — nothing else about a request changes.
     static func makeService(provider: Provider, apiKey: String, model: String?) -> AIService {
+        if LicenseLock.isLocked { return LockedAIService() }
         // Codex is a subprocess backend, not HTTP — route it before the client split
         // (the `apiKey` is ignored; it authenticates via `codex login`). Defensive:
         // the no-arg `makeService` already special-cases it, but any other caller
@@ -281,6 +284,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return true   // an even newer instance exists; it runs the same sweep
     }
 
+    private func hasOtherInstance() -> Bool {
+        guard let bundleID = Bundle.main.bundleIdentifier else { return false }
+        let me = NSRunningApplication.current.processIdentifier
+        return NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
+            .contains { $0.processIdentifier != me }
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         TelegramBridge.shared.restoreLidSleep()
     }
@@ -298,6 +308,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // pkill→open sequences. LaunchServices only dedups launches that go
         // through it — a directly-spawned binary bypasses that — and nothing
         // in-app stopped a second copy, so once doubled the app stayed doubled.
+        // A banner tap launches whichever Notchi.app LaunchServices picks for the
+        // bundle id, which can be a different copy (the Xcode DerivedData build)
+        // than the one running. Such a launch is not a default launch: forward
+        // the tap to the running copy and quit, instead of replacing it.
+        let isDefaultLaunch = (notification.userInfo?[NSApplication.launchIsDefaultUserInfoKey] as? Bool) ?? true
+        if !isDefaultLaunch, hasOtherInstance() {
+            NotificationService.shared.configureAsTapForwarder()
+            return
+        }
         if resignedToNewerInstance() {
             NSApp.terminate(nil)
             return
@@ -413,6 +432,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             // The license card uses the same screen rule (see `LicensePrompt`).
             _ = NotchiLicense.shared
+            #if DEBUG
+            // NOTCH_LICENSE_FORCE=<License JSON>: this license in place of the
+            // gateway's for the whole run (`check-license.mjs`).
+            if let text = ProcessInfo.processInfo.environment["NOTCH_LICENSE_FORCE"],
+               let forced = try? JSONDecoder().decode(NoNoAccount.Snapshot.License.self, from: Data(text.utf8)) {
+                NotchiLicense.shared._debugForce(forced)
+            }
+            #endif
             LicensePrompt.shared.start(model: self.model) { [weak self] in
                 self?.updatePromptDisplay()
             }
@@ -807,6 +834,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 NotchiLicense.shared._debugRender(to: dir, model: self.model)
             }
         }
+        // NOTCH_WINDOW_SNAPSHOT=<path prefix>: after NOTCH_WINDOW_SNAPSHOT_DELAY
+        // seconds (default 4), every visible window of the app drawn into
+        // <prefix>-<n>.png, then quit. The app draws its own windows, so no
+        // screen recording permission and no pointer.
+        if let prefix = env["NOTCH_WINDOW_SNAPSHOT"], !prefix.isEmpty {
+            let delay = Double(env["NOTCH_WINDOW_SNAPSHOT_DELAY"] ?? "") ?? 4
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                var n = 0
+                for window in NSApp.windows where window.isVisible {
+                    guard let view = window.contentView, view.bounds.width > 40, view.bounds.height > 40,
+                          let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { continue }
+                    view.cacheDisplay(in: view.bounds, to: rep)
+                    try? rep.representation(using: .png, properties: [:])?
+                        .write(to: URL(fileURLWithPath: "\(prefix)-\(n).png"))
+                    n += 1
+                }
+                exit(0)
+            }
+        }
+        if let dir = env["NOTCH_LICENSE_AUDIT"], !dir.isEmpty {
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 1_500_000_000)
+                NotchiLicense.shared._debugAudit(dir: dir, model: self.model)
+                exit(0)
+            }
+        }
         if let kind = env["NOTCH_DEMO_LICENSE"], kind == "offer" || kind == "activated" {
             Task { @MainActor in
                 try? await Task.sleep(nanoseconds: 5_000_000_000)
@@ -1060,6 +1113,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
+        // The trial ending, or a license arriving, swaps the service: a locked
+        // app answers nothing (`LockedAIService`).
+        NotificationCenter.default.addObserver(
+            forName: LicenseLock.changed_,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.syncService()
+            }
+        }
+
         // Settings live *inside* the panel (see `InlineSettingsView`), so the
         // request just opens the panel straight into the settings view. Making the
         // panel open also makes it the key window (via the `$open` observer above),
@@ -1283,7 +1348,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             selectedTextForceClick = ForceClickMonitor(
                 progress: { [weak self] reached in
                     MainActor.assumeIsolated {
-                        guard let reached else { return ForceClickHerald.shared.cancel() }
+                        guard let reached, !LicenseLock.isLocked else { return ForceClickHerald.shared.cancel() }
                         // The press draws the composer window itself, so it needs
                         // the model the window will be built against.
                         guard let self else { return }
@@ -1332,9 +1397,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard NotchModel.screenAreaAskEnabled, !ShortcutRecording.isActive else { return }
         let chord = AppShortcutStore.chord(for: .askScreen)
         askScreenHotKey = HotKey(keyCode: chord.keyCode, modifiers: chord.modifiers) { [weak self] in
-            guard let self else { return }
+            guard let self, !self.openLockedPromptIfLocked() else { return }
             self.model.askAboutScreenArea(on: self.displayForSummon())
         }
+    }
+
+    /// Trial ended (`LicenseLock`): a prompt shortcut, the selected-text
+    /// action and the screen-area ask would each open a composer that takes
+    /// no input. They open the notch's idle prompt instead, which says the
+    /// trial has ended and carries Buy License. True when it did.
+    private func openLockedPromptIfLocked() -> Bool {
+        guard LicenseLock.isLocked else { return false }
+        ForceClickHerald.shared.abort()
+        withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
+            if !model.open { model.toggleSummon(on: displayForSummon()) }
+            else { model.mode = .idle }
+        }
+        return true
     }
 
     /// The top-right card's own global shortcut, on the same path as summon's.
@@ -1342,7 +1421,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         cardHotKey = nil
         cardDoubleTap = nil
         let config = SummonHotKey.card
-        guard DebugFeatureFlags.menuBarCard, config.enabled, !ShortcutRecording.isActive else { return }
+        guard config.enabled, !ShortcutRecording.isActive else { return }
         let fire: () -> Void = { [weak self] in self?.toggleMenuBarCard(tip: false) }
         if config.isDoubleTap {
             cardDoubleTap = DoubleTapModifierMonitor(carbonModifier: config.doubleTapModifier,
@@ -1418,6 +1497,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Missing/unsupported selections deliberately do not fall back to clipboard.
     private func runPromptShortcut(id: UUID) {
         guard let binding = PromptShortcutStore.shortcut(id: id), binding.canRunFromHotKey else { return }
+        if openLockedPromptIfLocked() { return }
 
         // While the `/` menu owns the active prompt, the chord printed beside a
         // visible shortcut row means "pick this row". Sending it through the
@@ -1474,6 +1554,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             ForceClickHerald.shared.abort()
             return
         }
+        // Locked: a force click rides a press the user was making anyway, so
+        // it opens nothing; the chord opens the locked prompt.
+        if LicenseLock.isLocked, grownFromPressure {
+            ForceClickHerald.shared.abort()
+            return
+        }
+        if openLockedPromptIfLocked() { return }
         let config = SelectedTextShortcutStore.current
         let open: (String, NSPoint, NSRunningApplication?) -> Void = {
             [weak self] selectedText, triggerPoint, sourceApplication in
@@ -1716,6 +1803,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// no behaviour of its own, it just makes those paths reachable from the bar.
     /// Opens land on the screen the mouse is on (`displayForSummon`), same as ⌘,.
     private func installMenuBar() {
+        MenuBarIconVisibility.showOnceForMenuBarMode()
         menuBar = MenuBarController(actions: MenuBarController.Actions(
             toggleCard: { [weak self] in self?.toggleMenuBarCard(tip: true) },
             closeCard: { [weak self] in
@@ -1886,12 +1974,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         // The menu bar icon's card exists on every setup; `toggleMenuBarCard`
         // moves it to the screen the click came from.
-        if DebugFeatureFlags.menuBarCard {
-            let cardID = NotchModel.menuBarCardDisplay
-            live.insert(cardID)
-            if panels[cardID] == nil, let screen = preferredScreen() {
-                panels[cardID] = makePanel(on: screen, id: cardID)
-            }
+        let cardID = NotchModel.menuBarCardDisplay
+        live.insert(cardID)
+        if panels[cardID] == nil, let screen = preferredScreen() {
+            panels[cardID] = makePanel(on: screen, id: cardID)
         }
         for (id, panel) in panels where !live.contains(id) {
             panel.close()
@@ -2002,7 +2088,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Whether this panel draws as the top-right card: the menu bar icon's card,
     /// or any panel on a Dynamic Island screen.
     private static func isCorner(_ id: CGDirectDisplayID, on screen: NSScreen) -> Bool {
-        DebugFeatureFlags.menuBarCard && (id == NotchModel.menuBarCardDisplay || isIslandScreen(screen))
+        isIslandScreen(screen) || id == NotchModel.menuBarCardDisplay
     }
 
     /// Whether the system's Dynamic Island owns the top centre of `screen`: the
@@ -2299,6 +2385,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let columnMid = canvasWidth - inset - NotchMetrics.chatWidth / 2
             let lowest = full.minX + inset - (canvasWidth - inset - NotchMetrics.chatWidth)
             x = min(max(anchor - columnMid, lowest), full.maxX - canvasWidth)
+            top = full.maxY - Self.menuBarHeight(of: screen)
+            anchoredCorners.insert(id)
+        } else if corner, id == NotchModel.menuBarCardDisplay, cardOffset == .zero {
+            // The icon is not on screen (hidden by the system, or behind the
+            // notch with a full menu bar). The card still hangs right under
+            // the menu bar at the right and unfolds down, the same as under
+            // the icon, instead of flying in from the screen's edge.
             top = full.maxY - Self.menuBarHeight(of: screen)
             anchoredCorners.insert(id)
         } else {
@@ -2683,8 +2776,8 @@ enum AppIconStyle: String, CaseIterable, Identifiable {
 
     private static let key = "appIconStyle"
 
-    /// The original icon is deliberately the fallback for new and existing
-    /// installs, including an unknown value left by a future build.
+    /// Eyes is the fallback for installs that never picked a style, including
+    /// an unknown value left by a future build.
     static var current: AppIconStyle {
         get {
             guard AppIconStyleFeature.isEnabled else { return .original }
@@ -2693,8 +2786,8 @@ enum AppIconStyle: String, CaseIterable, Identifiable {
             // means the single adaptive Dot style.
             let style: AppIconStyle = (stored == "lightMode" || stored == "darkMode")
                 ? .dot
-                : stored.flatMap(AppIconStyle.init(rawValue:)) ?? .original
-            return selectable.contains(style) ? style : .original
+                : stored.flatMap(AppIconStyle.init(rawValue:)) ?? .eyes
+            return selectable.contains(style) ? style : .eyes
         }
         set {
             UserDefaults.standard.set(newValue.rawValue, forKey: key)

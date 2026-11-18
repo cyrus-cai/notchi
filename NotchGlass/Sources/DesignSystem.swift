@@ -9,7 +9,9 @@ enum Tokens {
     /// live in the *upper, dark* part of the panel, so the scale is kept bright:
     /// opacity-on-dark below ~0.7 turns to muddy gray. Every level derives from this one ink so the text reads as one
     /// family, but no level drops so far that it greys out against the glass.
-    static let ink = adaptive(dark: .white, light: .black)
+    /// In light mode a dark grey instead of pure black, which read too hard on
+    /// the white glass.
+    static let ink = adaptive(dark: .white, light: NSColor(white: 0.16, alpha: 1))
 
     /// A color that resolves against the view's appearance. Every notch panel
     /// is pinned to dark Aqua, so there it is always the `dark` value; only the
@@ -374,17 +376,6 @@ enum DebugFeatureFlags {
     static let historySplitView: Bool = {
         #if DEBUG
         UserDefaults.standard.bool(forKey: "NotchiHistorySplitView")
-        #else
-        false
-        #endif
-    }()
-
-    /// The top-right card: the menu bar icon's click, its shortcut, and the
-    /// corner panel on a Dynamic Island screen. Off, the icon opens its menu and
-    /// every screen keeps its island.
-    static let menuBarCard: Bool = {
-        #if DEBUG
-        UserDefaults.standard.bool(forKey: "NotchiMenuBarCard")
         #else
         false
         #endif
@@ -1539,8 +1530,11 @@ private struct NotchTooltip: ViewModifier {
             .onReceive(NotificationCenter.default.publisher(for: .notchOverlayChromePresented)) { _ in
                 hide()
             }
+            // Mounted only while the pointer is here. Left mounted, every
+            // control with a tip kept an AppKit view that a scrolling list
+            // had to move on every frame.
             .background {
-                TooltipClickDismiss(enabled: hovering, hide: hide)
+                if hovering { TooltipClickDismiss(enabled: true, hide: hide) }
             }
     }
 

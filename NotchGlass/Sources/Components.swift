@@ -154,6 +154,9 @@ struct PromptField: NSViewRepresentable {
     /// Extra space between wrapped lines, as the answer text sets it. 0: none.
     var lineSpacing: CGFloat = 0
     var onSubmit: () -> Void
+    /// False: the field shows its placeholder and takes no typing (the app
+    /// is locked, `NotchiLicense.locked`).
+    var editable: Bool = true
     /// Invoked when ← is pressed while the field is empty — lets a result view bind
     /// it to "back / new conversation". No-op by default (e.g. the idle prompt),
     /// so left-arrow there just moves the caret as usual.
@@ -313,6 +316,10 @@ struct PromptField: NSViewRepresentable {
 
     func updateNSView(_ scroll: NSScrollView, context: Context) {
         guard let tv = scroll.documentView as? PromptTextView else { return }
+        if tv.isEditable != editable {
+            tv.isEditable = editable
+            tv.isSelectable = editable
+        }
         // Refresh the coordinator's view of us so its callbacks (onCaretWidth, the
         // nav hooks) run against the current closures, not the ones captured at init.
         context.coordinator.parent = self
@@ -1505,6 +1512,10 @@ struct ComposeImagesAttachedLine: View {
     /// A task can carry 20 images, far more than fits across the panel or a
     /// detached window, so the strip shows the first few and counts the rest.
     private static let stripMax = 6
+    /// The remove badge: dark on the notch glass, white in a light window,
+    /// where the dark badge hid its dark xmark.
+    private static let removeFill = Tokens.adaptive(dark: .black.withAlphaComponent(0.66),
+                                                    light: .white)
 
     var body: some View {
         HStack(spacing: 6) {
@@ -1528,7 +1539,9 @@ struct ComposeImagesAttachedLine: View {
                             .sfFont(Tokens.TypeSize.badge, weight: .semibold)
                             .foregroundStyle(Tokens.text1)
                             .frame(width: 15, height: 15)
-                            .background(Circle().fill(Color.black.opacity(0.66)))
+                            .background(Circle().fill(Self.removeFill))
+                            .overlay(Circle().strokeBorder(Tokens.hairline, lineWidth: 0.5))
+                            .shadow(color: .black.opacity(0.12), radius: 1.5, y: 0.5)
                             .contentShape(Circle())
                     }
                     .buttonStyle(.plain).exemptsDoubleClickPin()
@@ -1740,6 +1753,9 @@ struct GlassSegmentCluster: View {
     /// Bare cluster only: off draws no glass chip under a hovered or engaged
     /// glyph; the glyph brightens and nothing else changes.
     var bareChip: Bool = true
+    /// Bare cluster only: the glyphs rest at `text2` instead of `text3`,
+    /// for a cluster over a busy backdrop (the menu bar chat's header).
+    var restsBright: Bool = false
 
     // Fixed clusters keep their index identity. A cluster with conditional
     // segments can supply semantic ids so removing a neighbour does not make
@@ -1826,7 +1842,7 @@ struct GlassSegmentCluster: View {
                 // live pin) brings it up to full ink.
                 .foregroundStyle(glass ? Tokens.ink
                                       : (hovering || seg.engaged ? Tokens.text1
-                                                                 : Tokens.text3))
+                                         : (restsBright ? Tokens.text2 : Tokens.text3)))
                 .frame(width: chip, height: chip)
                 .background {
                     if glass {
@@ -2043,19 +2059,13 @@ struct PlatePressStyle: ButtonStyle {
     }
 }
 
-/// "Saved a note ↗" / "Created a reminder ↗" / "Added to Calendar ↗" above an
-/// answer that filed one.
-/// The settled "Searched the web" headline's face, with `CaptureJumpButton`'s
-/// arrow and hover brightening.
+/// "Saved a note" / "Created a reminder" / "Added to Calendar" above an answer
+/// that filed one, as a `processTag`. Clicking opens what it filed.
 struct CaptureLineLink: View {
     let capture: NotchModel.Turn.Capture
     let font: CGFloat
     let action: (() -> Void)?
-    /// "Updated memory" only: a separate "Undo" after the line, which itself
-    /// opens the file.
-    var undo: (() -> Void)? = nil
     @State private var hovering = false
-    @State private var hoveringUndo = false
 
     private var label: String {
         switch capture.kind {
@@ -2070,37 +2080,37 @@ struct CaptureLineLink: View {
     }
 
     var body: some View {
-        HStack(spacing: 6) {
-            Button { action?() } label: {
-                HStack(spacing: 3) {
-                    Text(label)
-                        .sfFont(font)
-                        .lineLimit(1)
-                    if action != nil, capture.kind != .copied {
-                        Image(systemName: "arrow.up.right")
-                            .sfFont(Tokens.TypeSize.badge, weight: .semibold)
-                    }
+        Button { action?() } label: {
+            HStack(spacing: 3) {
+                Text(label)
+                    .sfFont(font)
+                    .lineLimit(1)
+                // Only under the cursor: at rest every tag looks the same.
+                if hovering {
+                    Image(systemName: "arrow.up.right")
+                        .sfFont(Tokens.TypeSize.badge, weight: .semibold)
                 }
+            }
                 .foregroundStyle(hovering ? Tokens.text2 : Tokens.text3)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain).exemptsDoubleClickPin()
-            .disabled(action == nil || capture.kind == .copied)
-            .onHover { hovering = $0 && action != nil && capture.kind != .copied }
-
-            if capture.kind == .memory, let undo {
-                Button(action: undo) {
-                    Text(L("agent.process.undo"))
-                        .sfFont(font)
-                        .foregroundStyle(hoveringUndo ? Tokens.text2 : Tokens.text3)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain).exemptsDoubleClickPin()
-                .onHover { hoveringUndo = $0 }
-            }
+                .processTag(hovered: hovering)
         }
+        .buttonStyle(.plain).exemptsDoubleClickPin()
+        .disabled(action == nil || capture.kind == .copied)
+        .onHover { hovering = $0 && action != nil && capture.kind != .copied }
         .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
-        .animation(.easeOut(duration: Tokens.hoverFade), value: hoveringUndo)
+    }
+}
+
+/// The face of the lines above an answer ("Used folder …", "Updated memory"):
+/// a small rounded tag with a faint fill, `ModelPickerView.Tag`'s shape.
+extension View {
+    func processTag(hovered: Bool = false) -> some View {
+        let shape = RoundedRectangle(cornerRadius: 5, style: .continuous)
+        return self
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(Tokens.ink.opacity(hovered ? 0.10 : 0.06), in: shape)
+            .contentShape(shape)
     }
 }
 
@@ -2114,22 +2124,20 @@ struct CloudMachineMark: View {
             .sfFont(font)
             .lineLimit(1)
             .foregroundStyle(Tokens.text3)
+            .processTag()
     }
 }
 
-/// "Used folder Downloads" above an answer whose file calls worked in a folder
-/// on this Mac; "Used 3 folders" for more than one. Hover shows the paths.
+/// "Used a folder" above an answer whose file calls worked in a folder on this
+/// Mac; "Used 3 folders" for more than one. Hover shows the paths.
 /// Plain text, like `CloudMachineMark`.
 struct FolderMark: View {
     let folders: [String]
     let font: CGFloat
 
     private var label: String {
-        guard folders.count == 1, let only = folders.first else {
-            return L("agent.process.usedFolders", folders.count)
-        }
-        let name = only == "~" ? "~" : (only as NSString).lastPathComponent
-        return L("agent.process.usedFolder", name)
+        folders.count == 1 ? L("agent.process.usedOneFolder")
+                           : L("agent.process.usedFolders", folders.count)
     }
 
     var body: some View {
@@ -2138,6 +2146,7 @@ struct FolderMark: View {
             .lineLimit(1)
             .truncationMode(.middle)
             .foregroundStyle(Tokens.text3)
+            .processTag()
             .help(folders.joined(separator: "\n"))
     }
 }
@@ -2374,6 +2383,9 @@ struct ConfirmationDialogOverlay<Content: View>: View {
     /// away should not be the prettiest thing on screen.
     var edgeGlow: Bool = false
     let content: Content
+    /// Lighter in the Settings window, where the dim covers the whole window
+    /// rather than the notch panel (`SettingsMetrics.scrimOpacity`).
+    @Environment(\.settingsMetrics) private var settingsMetrics
 
     init(onDismiss: @escaping () -> Void,
          outerPadding: CGFloat = 24,
@@ -2389,7 +2401,7 @@ struct ConfirmationDialogOverlay<Content: View>: View {
 
     var body: some View {
         ZStack {
-            Color.black.opacity(0.45)
+            Color.black.opacity(settingsMetrics.scrimOpacity)
                 .contentShape(Rectangle())
                 .onTapGesture(perform: onDismiss)
                 .exemptsDoubleClickPin()
@@ -2896,6 +2908,8 @@ struct CrossfadeText: View {
     /// The sweep is a live-work cue. Settled labels that reuse this component
     /// keep the text transition but must not continue advertising activity.
     var shimmers: Bool = true
+    /// Centred lines that wrap (the passport's thanks); otherwise one leading line.
+    var centered: Bool = false
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -2926,10 +2940,12 @@ struct CrossfadeText: View {
     }
 
     var body: some View {
-        ZStack(alignment: .leading) {
+        ZStack(alignment: centered ? .center : .leading) {
             Text(shown)
                 .sfFont(font, weight: .regular)
                 .foregroundStyle(color)
+                .multilineTextAlignment(centered ? .center : .leading)
+                .fixedSize(horizontal: false, vertical: centered)
                 .modifier(WaitShimmer(active: shimmers && !reduceMotion))
                 .id(shown)
                 .transition(reduceMotion
@@ -3221,16 +3237,6 @@ struct AssistantTurnView: View {
     /// beside its follow-up composer; detached threads keep the original metadata.
     var showsFooterMetadata: Bool = true
     var onInAppCopy: (() -> Void)? = nil
-    /// Re-run this answer's question for a fresh take. Non-nil only on the LAST
-    /// assistant turn — regenerating a mid-thread answer would orphan everything
-    /// after it, so earlier turns never offer it.
-    var onRegenerate: (() -> Void)? = nil
-    /// The models offered by the regenerate button's right-click menu (XII-135) —
-    /// each with whether it's the one currently in effect (greyed as "current").
-    /// Empty ⇒ no menu (just the plain left-click regenerate).
-    var regenerateModels: [(model: String, label: String, isCurrent: Bool)] = []
-    /// Regenerate this answer with a specific model, once (XII-135).
-    var onRegenerateWith: ((String) -> Void)? = nil
     /// Quote this answer in the next follow-up. Nil leaves Reply off the menu.
     var onReply: (() -> Void)? = nil
     /// Remove this answer from the thread. Nil leaves Delete off the menu.
@@ -3312,27 +3318,6 @@ struct AssistantTurnView: View {
         if let slash = s.lastIndex(of: "/") { s = String(s[s.index(after: slash)...]) }
         if s.hasSuffix(":free") { s = String(s.dropLast(":free".count)) }
         return s.isEmpty ? id : s
-    }
-
-    /// The regenerate model list, shared by the chevron menu and the glyph's
-    /// right-click menu so both gestures open exactly the same thing. The model
-    /// that produced this answer is greyed and disabled — it's the plain
-    /// regenerate the glyph already does.
-    @ViewBuilder
-    private func regenerateModelItems(_ regenerateWith: @escaping (String) -> Void) -> some View {
-        Text(L("result.regenerate.with"))
-        ForEach(regenerateModels, id: \.model) { option in
-            Button {
-                regenerateWith(option.model)
-            } label: {
-                if option.isCurrent {
-                    Text(L("result.regenerate.current", option.label))
-                } else {
-                    Text(option.label)
-                }
-            }
-            .disabled(option.isCurrent)
-        }
     }
 
     /// The reader's own last call on the reading block, once they've made one.
@@ -3660,7 +3645,7 @@ struct AssistantTurnView: View {
                 // Beside the headline, outside its button: it names where the
                 // work ran and opens nothing.
                 if showsMarks {
-                    HStack(alignment: .firstTextBaseline, spacing: 12) { marks }
+                    HStack(alignment: .firstTextBaseline, spacing: 6) { marks }
                         .transition(.opacity)
                 }
             }
@@ -3945,18 +3930,13 @@ struct AssistantTurnView: View {
             }
             // What this answer filed, in the settled headline's face. Each
             // entry opens its note or reminder, like a Recent capture row's jump.
-            // Captures of one kind share a line: it opens the first, and its
-            // Undo takes back all of them, newest first, so two edits to one
-            // file restore what was there before the first.
+            // Captures of one kind share a tag, which opens the first.
             if !captures.isEmpty || (showsMarks && !showsReadingBlock) {
-                HStack(spacing: 12) {
+                HStack(spacing: 6) {
                     ForEach(Self.captureGroups(captures), id: \.first?.kind) { group in
                         if let first = group.first {
                             CaptureLineLink(capture: first, font: waitFont,
-                                            action: onOpenCapture.map { open in { open(first) } },
-                                            undo: onUndoCapture.map { undo in {
-                                                group.reversed().forEach(undo)
-                                            } })
+                                            action: onOpenCapture.map { open in { open(first) } })
                         }
                     }
                     if showsMarks && !showsReadingBlock {
@@ -4117,7 +4097,7 @@ struct AssistantTurnView: View {
         Haptics.confirm()
     }
 
-    /// Right-click on the answer bubble: copy, copy as plain text, regenerate,
+    /// Right-click on the answer bubble: copy, copy as Markdown,
     /// which model answered — grouped like a Messages context menu.
     @ViewBuilder
     private var answerTurnMenu: some View {
@@ -4128,40 +4108,21 @@ struct AssistantTurnView: View {
                 }
                 Divider()
             }
-            Button {
-                copyAnswerMarkdown()
-            } label: {
-                Label(L("result.copyMarkdown"), systemImage: "doc.on.doc")
-            }
             if !isAgent {
                 Button {
                     copyAnswerPlainText()
                 } label: {
-                    Label(L("result.copyPlainText"), systemImage: "text.alignleft")
+                    Label(L("result.copyPlainText"), systemImage: "doc.on.doc")
                 }
+            }
+            Button {
+                copyAnswerMarkdown()
+            } label: {
+                Label(L("result.copyMarkdown"), systemImage: "text.alignleft")
             }
             if let onReplaceOriginal, !streaming {
                 Button(action: onReplaceOriginal) {
                     Label(L("result.replaceOriginal"), systemImage: "arrow.uturn.left")
-                }
-            }
-            if let onRegenerate {
-                Divider()
-                Button {
-                    onRegenerate()
-                } label: {
-                    Label(shortcutHelp("result.regenerate", action: .regenerate),
-                          systemImage: "arrow.clockwise")
-                }
-                .disabled(streaming)
-                if !regenerateModels.isEmpty, let onRegenerateWith {
-                    Menu {
-                        regenerateModelItems(onRegenerateWith)
-                    } label: {
-                        Label(L("result.regenerate.with"),
-                              systemImage: "arrow.triangle.2.circlepath")
-                    }
-                    .disabled(streaming)
                 }
             }
             if showsFooterMetadata {
@@ -4638,6 +4599,19 @@ extension EnvironmentValues {
     var chatBubbleGlass: Bool {
         get { self[ChatBubbleGlassKey.self] }
         set { self[ChatBubbleGlassKey.self] = newValue }
+    }
+}
+
+private struct ChatGlassCulledKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
+extension EnvironmentValues {
+    /// The message is far from the visible part of the list, so its glass is
+    /// not drawn (`CullsOffscreenGlass` in `MenuBarChat`).
+    var chatGlassCulled: Bool {
+        get { self[ChatGlassCulledKey.self] }
+        set { self[ChatGlassCulledKey.self] = newValue }
     }
 }
 
@@ -7703,6 +7677,80 @@ struct SavedImageThumb: View {
     }
 }
 
+/// A saved attachment that fills the width it is offered, with the height
+/// following the picture's shape (clamped like `SavedImageThumb`).
+private struct SavedImageTile: View {
+    let file: String
+    let corner: CGFloat
+
+    var body: some View {
+        if let image = NotchModel.historyImage(named: file) {
+            let ratio: CGFloat = (image.size.width > 0 && image.size.height > 0)
+                ? min(max(image.size.height / image.size.width, 0.45), 1.1)
+                : 0.62
+            Color.clear
+                .aspectRatio(1 / ratio, contentMode: .fit)
+                .overlay(
+                    Image(nsImage: image)
+                        .resizable()
+                        .aspectRatio(contentMode: .fill)
+                )
+                .clipShape(RoundedRectangle(cornerRadius: corner, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: corner, style: .continuous)
+                        .strokeBorder(Tokens.ink.opacity(0.14), lineWidth: 1)
+                )
+                .contentShape(RoundedRectangle(cornerRadius: corner, style: .continuous))
+        }
+    }
+}
+
+/// Two tiles per row, each half the offered width. Never reports a width wider
+/// than it was offered; with no offer it uses `fallbackWidth`.
+private struct TwoUpImageGrid: Layout {
+    let gap: CGFloat
+    private static let fallbackWidth: CGFloat = 280
+
+    private func width(_ proposal: ProposedViewSize) -> CGFloat {
+        guard let w = proposal.width, w.isFinite else { return Self.fallbackWidth }
+        return max(0, w)
+    }
+
+    private func tile(_ width: CGFloat) -> CGFloat { max(0, (width - gap) / 2) }
+
+    private func rowHeights(_ subviews: Subviews, tile: CGFloat) -> [CGFloat] {
+        stride(from: 0, to: subviews.count, by: 2).map { start in
+            subviews[start..<min(start + 2, subviews.count)]
+                .map { $0.sizeThatFits(ProposedViewSize(width: tile, height: nil)).height }
+                .max() ?? 0
+        }
+    }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let w = width(proposal)
+        let rows = rowHeights(subviews, tile: tile(w))
+        let height = rows.reduce(0, +) + gap * CGFloat(max(0, rows.count - 1))
+        return CGSize(width: w, height: height)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize,
+                       subviews: Subviews, cache: inout ()) {
+        let t = tile(bounds.width)
+        var y = bounds.minY
+        for (row, height) in rowHeights(subviews, tile: t).enumerated() {
+            for column in 0..<2 {
+                let index = row * 2 + column
+                guard index < subviews.count else { break }
+                subviews[index].place(
+                    at: CGPoint(x: bounds.minX + CGFloat(column) * (t + gap), y: y),
+                    anchor: .topLeading,
+                    proposal: ProposedViewSize(width: t, height: nil))
+            }
+            y += height + gap
+        }
+    }
+}
+
 /// The images a SAVED turn rode in with — the copied screenshot an Ask attached, the
 /// shots pasted into an agent task — shown above that turn's text wherever a saved
 /// thread is read back (the reopened panel, the archive transcript). Two per row at
@@ -7716,12 +7764,7 @@ struct SavedTurnImages: View {
     /// size the grid shows four and counts the rest on the last tile.
     private static let stripMax = 4
     private static let gap: CGFloat = 8
-    /// The column the grid is laid out against until its own has been measured —
-    /// the widest thread column, so the first frame never runs past it.
-    private static let designWidth: CGFloat = 440
-
     @Environment(\.imageLightboxHostID) private var lightboxHostID
-    @State private var columnWidth: CGFloat = designWidth
 
     private var shown: [String] { Array(files.prefix(Self.stripMax)) }
 
@@ -7732,54 +7775,32 @@ struct SavedTurnImages: View {
             : nil
     }
 
-    /// Half the column for each tile, two per row.
-    private var tileWidth: CGFloat {
-        max(80, (columnWidth - Self.gap) / 2)
-    }
-
-    private var rows: [[(offset: Int, file: String)]] {
-        let items = Array(shown.enumerated()).map { (offset: $0.offset, file: $0.element) }
-        return stride(from: 0, to: items.count, by: 2).map { start in
-            Array(items[start..<min(start + 2, items.count)])
-        }
-    }
-
     var body: some View {
-        VStack(alignment: .leading, spacing: Self.gap) {
-            ForEach(rows.indices, id: \.self) { rowIndex in
-                HStack(alignment: .top, spacing: Self.gap) {
-                    ForEach(rows[rowIndex], id: \.offset) { tile in
-                        Button { presentLightbox(at: tile.offset) } label: {
-                            SavedImageThumb(file: tile.file,
-                                            width: tileWidth,
-                                            corner: Tokens.Radius.menu)
-                        }
-                        .buttonStyle(.plain).exemptsDoubleClickPin()
-                        .overlay(alignment: .bottomTrailing) {
-                            if let overflow, overflow.index == tile.offset {
-                                Text("+\(overflow.count)")
-                                    .sfFont(Tokens.TypeSize.caption, weight: .medium)
-                                    .monospacedDigit()
-                                    .foregroundStyle(Tokens.text1)
-                                    .padding(.horizontal, 8)
-                                    .frame(height: 22)
-                                    .background(Capsule(style: .continuous).fill(Color.black.opacity(0.66)))
-                                    .padding(6)
-                                    .allowsHitTesting(false)
-                            }
-                        }
+        // Tiles take their width from the width the parent offers, not from a
+        // measured copy of it: a measured width fed back into the tiles let the
+        // grid keep whatever width it first drew at and run past the column.
+        TwoUpImageGrid(gap: Self.gap) {
+            ForEach(Array(shown.enumerated()), id: \.offset) { offset, file in
+                Button { presentLightbox(at: offset) } label: {
+                    SavedImageTile(file: file, corner: Tokens.Radius.menu)
+                }
+                .buttonStyle(.plain).exemptsDoubleClickPin()
+                .overlay(alignment: .bottomTrailing) {
+                    if let overflow, overflow.index == offset {
+                        Text("+\(overflow.count)")
+                            .sfFont(Tokens.TypeSize.caption, weight: .medium)
+                            .monospacedDigit()
+                            .foregroundStyle(Tokens.text1)
+                            .padding(.horizontal, 8)
+                            .frame(height: 22)
+                            .background(Capsule(style: .continuous).fill(Color.black.opacity(0.66)))
+                            .padding(6)
+                            .allowsHitTesting(false)
                     }
                 }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            GeometryReader { geo in
-                Color.clear
-                    .onAppear { columnWidth = geo.size.width }
-                    .onChange(of: geo.size.width) { _, width in columnWidth = width }
-            }
-        )
     }
 
     private var refs: [AnswerImageRef] {
@@ -8839,6 +8860,7 @@ struct MenuCardRow: View {
     var onHoverIn: (() -> Void)? = nil
     let action: () -> Void
 
+    @Environment(\.menuCardLight) private var menuCardLight
     @State private var hovering = false
 
     var body: some View {
@@ -8862,8 +8884,10 @@ struct MenuCardRow: View {
                     .font(brandTitle
                           ? .brand(fontSize)
                           : .sf(fontSize, weight: emphasized && selected ? .medium : .regular))
+                    // A step darker on the white light-mode card, where
+                    // text3 read too faint.
                     .foregroundStyle(selected || (promptShortcutID != nil && hovering)
-                        ? Tokens.text1 : Tokens.text3)
+                        ? Tokens.text1 : (menuCardLight ? Tokens.text2 : Tokens.text3))
                     .lineLimit(1)
                     .truncationMode(.tail)
                 if lowBalance {
@@ -8960,8 +8984,18 @@ struct MenuCardRow: View {
 /// bright Finder window, a white page. Lighter, the words washed out the moment
 /// the card left the glass; this makes a menu read the same over anything.
 struct MenuCardSlab: View {
+    @Environment(\.menuCardLight) private var light
+
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: MenuCard.radius, style: .continuous)
+        if light {
+            LightMenuSlab(shape: shape)
+        } else {
+            darkSlab(shape)
+        }
+    }
+
+    private func darkSlab(_ shape: RoundedRectangle) -> some View {
         ZStack {
             shape.fill(.clear).nativeGlass(in: shape)
                 .overlay(shape.fill(Color.black.opacity(0.66)))
@@ -8983,9 +9017,65 @@ extension View {
     /// rim, clipping and shadows. Metadata cards use this instead of the denser
     /// generic `MenuCard` slab.
     func manageMenuCardBackground() -> some View {
+        modifier(ManageMenuCardBackground())
+    }
+
+    /// The slab behind a menu that draws its own window (the `/` card), plus the
+    /// two shadows that lift it off whatever it hangs over.
+    func menuCardBackground() -> some View {
+        modifier(MenuCardBackground())
+    }
+}
+
+/// The white glass a menu card wears when opened from the menu bar card in
+/// light mode (`menuCardLight`), matching that card's bubbles.
+struct LightMenuSlab<S: InsettableShape>: View {
+    let shape: S
+
+    var body: some View {
+        ZStack {
+            shape.fill(.clear).nativeGlass(in: shape, tint: .white, frosted: true)
+                .overlay(shape.fill(Color.white.opacity(0.55)))
+            shape.strokeBorder(Color.white.opacity(0.95), lineWidth: 0.75)
+        }
+        .allowsHitTesting(false)
+    }
+}
+
+private struct MenuCardBackground: ViewModifier {
+    @Environment(\.menuCardLight) private var light
+
+    func body(content: Content) -> some View {
+        let shape = RoundedRectangle(cornerRadius: MenuCard.radius, style: .continuous)
+        content
+            .environment(\.colorScheme, light ? .light : .dark)
+            .background { MenuCardSlab() }
+            .clipShape(shape)
+            .shadow(color: .black.opacity(light ? 0.10 : 0.30), radius: 3, y: 1)
+            .shadow(color: .black.opacity(light ? 0.14 : 0.35), radius: 16, y: 8)
+    }
+}
+
+private struct ManageMenuCardBackground: ViewModifier {
+    @Environment(\.menuCardLight) private var light
+
+    func body(content: Content) -> some View {
         let shape = RoundedRectangle(cornerRadius: ManageMenuMetrics.radius,
                                      style: .continuous)
-        return environment(\.colorScheme, .dark).background {
+        if light {
+            content
+                .environment(\.colorScheme, .light)
+                .background { LightMenuSlab(shape: shape) }
+                .clipShape(shape)
+                .shadow(color: .black.opacity(0.10), radius: 3, y: 1)
+                .shadow(color: .black.opacity(0.14), radius: 16, y: 8)
+        } else {
+            darkBody(content, shape: shape)
+        }
+    }
+
+    private func darkBody(_ content: Content, shape: RoundedRectangle) -> some View {
+        content.environment(\.colorScheme, .dark).background {
             shape.fill(.clear).nativeGlass(in: shape)
                 .overlay(shape.fill(Color.black.opacity(0.38)))
         }
@@ -9009,18 +9099,9 @@ extension View {
         .shadow(color: .black.opacity(0.30), radius: 3, y: 1)
         .shadow(color: .black.opacity(0.35), radius: 16, y: 8)
     }
+}
 
-    /// The slab behind a menu that draws its own window (the `/` card), plus the
-    /// two shadows that lift it off whatever it hangs over.
-    func menuCardBackground() -> some View {
-        let shape = RoundedRectangle(cornerRadius: MenuCard.radius, style: .continuous)
-        return environment(\.colorScheme, .dark)
-            .background { MenuCardSlab() }
-            .clipShape(shape)
-            .shadow(color: .black.opacity(0.30), radius: 3, y: 1)
-            .shadow(color: .black.opacity(0.35), radius: 16, y: 8)
-    }
-
+extension View {
     /// The same slab for a menu presented in an `NSPopover` — the popover owns the
     /// window (and its shadow), so this replaces its background instead of drawing
     /// one behind the content. Same call `GlassPopoverBackground` makes.

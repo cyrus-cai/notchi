@@ -780,7 +780,7 @@ Supported setting ids and values:
 - hover_sensitivity: low, balanced, or instant
 - note_destination: apple_notes or markdown_folder; notes_folder: absolute path
 - summon_shortcut: disabled, default, double_option, double_command, double_control, double_shift, double_left_command, double_right_command, or a chord such as command+shift+k
-- action_shortcut: a chord such as command+shift+c, or default to restore the shipped one. scope is required: regenerate, pin, new_chat, filter, picker, or detach
+- action_shortcut: a chord such as command+shift+c, or default to restore the shipped one. scope is required: pin, new_chat, filter, picker, or detach
 - prompt_shortcut: value is the key chord itself (e.g. option+a), or remove to delete, or keep to edit only its text — never a name. prompt is the instruction it runs on the selected text, required when creating one. scope picks an existing binding by chord or prompt text; omit scope to create. Example, "Option+A 做语句优化": {"setting":"prompt_shortcut","value":"option+a","prompt":"Polish the selected text: clearer and shorter, same meaning, same language. Output only the result."}
 - custom_instructions: text (empty clears it); proxy: URL/host, or auto to clear
 - weather_city: city the weather uses when Location access is off (empty clears it)
@@ -2585,9 +2585,45 @@ enum ShellRisk {
         """
     }
 
+    /// A refusal for an `osascript` that walks or clicks another app's window
+    /// through System Events. On 2026-11-12 a model installed an app and spent
+    /// 12 calls listing `entire contents` and `UI elements` of its windows to
+    /// reach one button, then asked the user to click it anyway. Clicking menu
+    /// items by name stays allowed.
+    static func windowScripting(_ command: String) -> String? {
+        let lowered = command.lowercased()
+        guard lowered.contains("osascript"), lowered.contains("system events") else { return nil }
+        let walks = ["entire contents", "ui element", "click button", "click checkbox",
+                     "click radio button", "click pop up button"]
+        guard walks.contains(where: lowered.contains) else { return nil }
+        return """
+        Not run: run_shell does not click or read controls inside another app's window. \
+        Tell the user the one step to take in that app (which window, which button) and \
+        go on with the rest of the task.
+        """
+    }
+
+    /// Commands that put software from the web on this Mac or run it: mounting a
+    /// disk image, running a package installer, copying into /Applications,
+    /// opening a .dmg or .pkg, clearing the quarantine flag. On 2026-11-12 a
+    /// model downloaded, installed and opened a third-party app during an
+    /// unattended run with no card.
+    private static func installsSoftware(name: String, rest: ArraySlice<String>, segment: String) -> Bool {
+        let lowered = segment.lowercased()
+        switch name {
+        case "hdiutil": return rest.contains { $0 == "attach" || $0 == "mount" }
+        case "installer", "spctl": return true
+        case "cp", "ditto", "mv", "rsync": return lowered.contains("/applications")
+        case "open": return lowered.contains(".dmg") || lowered.contains(".pkg")
+        case "xattr": return lowered.contains("quarantine")
+        default: return false
+        }
+    }
+
     /// True when the command deletes files on this Mac in a way the Trash
     /// functions in `ShellRunner.prelude` cannot catch, or reads the API keys
-    /// Notchi stores. Everything else runs without a card.
+    /// Notchi stores, or installs software from the web. Everything else runs
+    /// without a card.
     static func needsConfirmation(_ command: String) -> Bool {
         let lowered = command.lowercased()
         // Keys Notchi keeps in its own defaults (`api_key.*`). A model once
@@ -2607,6 +2643,7 @@ enum ShellRisk {
             let name = words[at]
             let rest = words[(at + 1)...]
             if fileErasers.contains(name) { return true }
+            if installsSoftware(name: name, rest: rest, segment: segment) { return true }
             if name == "diskutil", rest.contains(where: { $0.hasPrefix("erase") || $0 == "partitiondisk" }) {
                 return true
             }
@@ -2888,6 +2925,7 @@ struct RunShellTool: NotchTool {
             timeout = min(max(raw.doubleValue, 1), ShellRunner.maxTimeout)
         }
         if let refusal = ShellRisk.unboundedMailQuery(command) { return refusal }
+        if let refusal = ShellRisk.windowScripting(command) { return refusal }
         if ShellRisk.needsConfirmation(command) {
             guard try await confirm(command) else {
                 return "The user did not approve this command. It was not run. Do not retry it."

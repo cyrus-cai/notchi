@@ -29,6 +29,8 @@ struct WhatsNewView: View {
     /// height so the reader fills the window instead of a 320pt strip.
     var height: CGFloat? = nil
     @ObservedObject private var service = WhatsNewService.shared
+    /// Mirrors `MenuBarIconVisibility.current` for the switch under a blurb.
+    @State private var menuBarIconShown = MenuBarIconVisibility.current == .shown
 
     /// Which release the notes column is currently parked in — the row the rail
     /// highlights. Empty until the first scroll report lands (see `activeVersion`),
@@ -342,6 +344,10 @@ struct WhatsNewView: View {
                             .lineSpacing(4)
                             .fixedSize(horizontal: false, vertical: true)
                     }
+
+                    if let blurbSwitch = entry.blurbSwitch {
+                        blurbSwitchRow(blurbSwitch)
+                    }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -368,6 +374,32 @@ struct WhatsNewView: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// The setting the headline is about, as a switch under the blurb.
+    private func blurbSwitchRow(_ kind: WhatsNewService.Entry.BlurbSwitch) -> some View {
+        HStack(spacing: 10) {
+            Text(L("general.menuBarIcon.toggle"))
+                .font(.sf(Tokens.TypeSize.label, weight: .medium))
+                .foregroundStyle(Tokens.text2)
+            Spacer(minLength: 0)
+            switch kind {
+            case .menuBarIcon:
+                Toggle("", isOn: Binding(
+                    get: { menuBarIconShown },
+                    set: { on in
+                        Haptics.levelChange()
+                        menuBarIconShown = on
+                        MenuBarIconVisibility.current = on ? .shown : .hidden
+                        NotificationCenter.default.post(name: .menuBarIconVisibilityChanged, object: nil)
+                    }))
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                    .controlSize(.mini)
+                    .tint(Tokens.switchTint)
+            }
+        }
+        .padding(.top, 2)
     }
 
     /// A release's call to action, under its notes: the switch the release is

@@ -224,19 +224,6 @@ struct ContentView: View {
                 }
                 return true
             }
-            // Answer-state action keys: regenerate on the keyboard so the
-            // flow stays hands-on-keys. Only in a settled result (not idle/
-            // settings/what's-new, not mid-stream) — the toolbar it mirrors
-            // only exists there. Guarded so a follow-up being typed keeps
-            // normal editing: when the prompt field editor is first responder,
-            // ⌘R falls through. ⌘P/⌘D handle their own state below.
-            if model.mode == .result, !model.showSettings, !model.showWhatsNew,
-               !model.isStreaming, !fieldEditorIsFirstResponder() {
-                if AppShortcutStore.matches(.regenerate, event: event) {
-                    model.regenerateLastAnswer()
-                    return true
-                }
-            }
             // ⌘P (and ⌘D) pins/unpins the panel — the keyboard twin of the pin
             // button, which the result header, the idle prompt and the Settings
             // header all carry. Pinned → the panel stays open when the pointer
@@ -678,6 +665,8 @@ struct NotchIsland: View {
     @ObservedObject private var restingResult = RestingResult.shared
     @Environment(\.notchMetrics) private var metrics
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    /// The floating card follows the system into light mode; the island stays dark.
+    @ObservedObject private var systemAppearance = SystemAppearance.shared
 
     /// How far the black bleeds above the screen's top edge, guaranteeing no gap.
     /// None on the floating card, which does not touch the edge.
@@ -732,8 +721,14 @@ struct NotchIsland: View {
         return display
     }
 
-    /// Either card. Both are drawn at the same width on the same glass.
-    private var showsPrompt: Bool { promptShowing != nil || licenseShowing != nil }
+    /// The "license is active" strip, when it is up on THIS screen's resting notch.
+    private var activatedShowing: Bool {
+        !isOpen && promptShowing == nil && licenseShowing == nil
+            && licensePrompt.activatedDisplay == metrics.displayID
+    }
+
+    /// Any card. All are drawn at the same width on the same glass.
+    private var showsPrompt: Bool { promptShowing != nil || licenseShowing != nil || activatedShowing }
 
     /// True when the panel is fully closed (on every display) and background
     /// work is running or has just finished — a detached Ask round, or an
@@ -1012,6 +1007,8 @@ struct NotchIsland: View {
     /// bookkeeping.
     private var menuBarChat: some View {
         MenuBarChat(model: model, isOpen: isOpen)
+            .environment(\.colorScheme, systemAppearance.colorScheme)
+            .environment(\.menuCardLight, !systemAppearance.isDark)
             .linkGateHost(active: isOpen)
             .imageLightboxHost()
             .background(GeometryReader { proxy in
@@ -1140,6 +1137,12 @@ struct NotchIsland: View {
                         removal: .opacity.combined(with: .scale(scale: 0.92, anchor: .top))))
             } else if let display = licenseShowing {
                 LicensePromptCard(display: display, model: model)
+                    .padding(.horizontal, topFlare)
+                    .transition(.asymmetric(
+                        insertion: .opacity,
+                        removal: .opacity.combined(with: .scale(scale: 0.92, anchor: .top))))
+            } else if activatedShowing {
+                LicenseActivatedStrip()
                     .padding(.horizontal, topFlare)
                     .transition(.asymmetric(
                         insertion: .opacity,

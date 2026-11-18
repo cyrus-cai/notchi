@@ -30,17 +30,28 @@ enum LoopInterval {
         UserDefaults.standard.set(minutes, forKey: lastKey)
     }
 
-    /// Appended to every agent loop round's prompt on the wire only — the
-    /// record keeps the prompt the user wrote.
-    static func agentWireSuffix(minutes: Int) -> String {
-        "\n\n(This task repeats every \(short(minutes)). When it is complete and no "
-            + "further runs are needed, end your reply with \(doneMarker).)"
+    /// Appended to every loop round's prompt on the wire only — the record
+    /// keeps the prompt the user wrote. It states the loop's real settings, so
+    /// a round never has to guess them, and what the round may do about the
+    /// schedule: nothing, except report that a stop condition the user wrote
+    /// has been met. Even then the loop only pauses (`LoopEndReason.doneSuggested`).
+    static func wireSuffix(minutes: Int, round: Int?, endsAt: Date? = nil,
+                           weekdaysOnly: Bool = false) -> String {
+        var schedule = "repeats every \(short(minutes))"
+        if weekdaysOnly { schedule += " on weekdays" }
+        if let endsAt {
+            schedule += " until "
+                + endsAt.formatted(.iso8601.year().month().day().time(includingFractionalSeconds: false))
+        }
+        let roundText = round.map { "This is round \($0) of a loop that \(schedule)." }
+            ?? "This task is a loop that \(schedule)."
+        return "\n\n(" + roundText
+            + " The app runs the schedule. You cannot start, stop, pause or re-time this loop,"
+            + " and you have no tool for it, so never say you changed it."
+            + " Only if the message above names a condition for stopping and that condition is now met,"
+            + " end your reply with \(doneMarker); the app then pauses the loop and asks the user."
+            + " A round that finds nothing new is not a reason to stop.)"
     }
-
-    /// Appended on the wire to every Ask loop round's question, so the model can
-    /// end the loop once what it watches for has happened.
-    static let chatWireSuffix = "\n\n(This message repeats on a schedule. When what it asks for "
-        + "is done and no further rounds are needed, end your reply with \(doneMarker).)"
 
     /// A loop round's answer as shown while it streams: the done marker
     /// removed, including the part of it that has already arrived.
@@ -132,6 +143,24 @@ final class NetworkReachability: @unchecked Sendable {
     }
 }
 
+/// Why a loop is no longer running. Shown in its ⌘ card and in the banner
+/// that announces it, so a loop never stops without saying why.
+enum LoopEndReason: String, Codable {
+    /// Stop in the ⌘ card, or a stop from a manage_loop request.
+    case stopped
+    /// The Routines switch.
+    case paused
+    /// A round wrote `LoopInterval.doneMarker`. The loop is paused, not ended:
+    /// Continue or the Routines switch picks it back up.
+    case doneSuggested
+    /// The end date the user set has passed.
+    case endDate
+    /// The agent CLI could not be found.
+    case failed
+
+    var cardText: String { L("loop.reason.\(rawValue)") }
+}
+
 /// What a loop's ⌘ card shows about it — the same for a chat loop and an agent
 /// loop.
 struct LoopMenuInfo: Equatable {
@@ -139,6 +168,7 @@ struct LoopMenuInfo: Equatable {
     let rounds: Int
     let nextRoundAt: Date?
     let active: Bool
+    var endReason: LoopEndReason? = nil
 }
 
 // MARK: - Chat loops
@@ -181,6 +211,8 @@ final class ChatLoopManager: ObservableObject {
         /// Set while the Routines switch has the loop off: when its next round
         /// was due, so switching it back on keeps the same schedule.
         var pausedSlot: Date? = nil
+        /// Why the loop stopped; nil while it runs.
+        var endReason: LoopEndReason? = nil
 
         var isRunning: Bool { roundStartedAt != nil }
         var isWaiting: Bool { active && !isRunning }
@@ -205,6 +237,7 @@ final class ChatLoopManager: ObservableObject {
         var endsAt: Date? = nil
         var weekdaysOnly: Bool? = nil
         var pausedSlot: Date? = nil
+        var endReason: LoopEndReason? = nil
     }
 
     private static let persistKey = "notch_chat_loops"
@@ -235,7 +268,8 @@ final class ChatLoopManager: ObservableObject {
     func menuInfo(for id: UUID, turns: [NotchModel.Turn]) -> LoopMenuInfo? {
         if let loop = loop(for: id) {
             return LoopMenuInfo(intervalMinutes: loop.intervalMinutes, rounds: loop.rounds,
-                                nextRoundAt: loop.nextRoundAt, active: loop.active)
+                                nextRoundAt: loop.nextRoundAt, active: loop.active,
+                                endReason: loop.active ? nil : loop.endReason)
         }
         guard let rounds = turns.compactMap(\.loopRound).max() else { return nil }
         return LoopMenuInfo(intervalMinutes: LoopInterval.lastMinutes, rounds: rounds,
@@ -251,6 +285,7 @@ final class ChatLoopManager: ObservableObject {
         for i in loops.indices where loops[i].active && (loops[i].endsAt.map { $0 < now } ?? false) {
             loops[i].active = false
             loops[i].nextRoundAt = nil
+            loops[i].endReason = .endDate
         }
         persist()
         for loop in loops where loop.active && !loop.isRunning {
@@ -279,7 +314,8 @@ final class ChatLoopManager: ObservableObject {
                                   dismissed: record.dismissed ?? false,
                                   endsAt: record.endsAt,
                                   weekdaysOnly: record.weekdaysOnly ?? false,
-                                  pausedSlot: active ? nil : record.pausedSlot))
+                                  pausedSlot: active ? nil : record.pausedSlot,
+                                  endReason: active ? nil : record.endReason))
         }
     }
 
@@ -341,15 +377,17 @@ final class ChatLoopManager: ObservableObject {
             return
         }
         let loop = loops[i]
+        // The round reports the user's stop condition met. The loop pauses on
+        // its schedule and the banner asks the user; it does not end here.
         if done, loopRound != nil {
-            end(threadID, failed: false)
-            notify(loop, subtitle: L("notify.loop.ended", loop.rounds),
+            pause(threadID, reason: .doneSuggested)
+            notify(loop, subtitle: L("notify.loop.doneSuggested"),
                    silent: false, answer: answer)
             return
         }
         if let endsAt = loop.endsAt, Date().addingTimeInterval(loop.interval) > endsAt {
-            end(threadID, failed: loopRound != nil && failed)
-            notify(loop, subtitle: L("notify.loop.ended", loop.rounds),
+            end(threadID, failed: loopRound != nil && failed, reason: .endDate)
+            notify(loop, subtitle: L("notify.loop.endDate", loop.rounds),
                    silent: false, answer: answer)
             return
         }
@@ -370,7 +408,7 @@ final class ChatLoopManager: ObservableObject {
     /// The Stop in the loop's ⌘ card. A round already streaming finishes; no
     /// further round starts.
     func stop(_ id: UUID) {
-        end(id, failed: false)
+        end(id, failed: false, reason: .stopped)
     }
 
     /// The Continue in a stopped loop's ⌘ card. The next round runs now.
@@ -389,6 +427,8 @@ final class ChatLoopManager: ObservableObject {
         loops[i].active = true
         loops[i].failed = false
         loops[i].dismissed = false
+        loops[i].pausedSlot = nil
+        loops[i].endReason = nil
         loops[i].startedAt = Date()
         persist()
         schedule(id, at: Date())
@@ -396,11 +436,12 @@ final class ChatLoopManager: ObservableObject {
 
     /// The Routines switch's off. Like Stop — a round already streaming
     /// finishes — but the slot the next round was due in is kept for `unpause`.
-    func pause(_ id: UUID) {
+    func pause(_ id: UUID, reason: LoopEndReason = .paused) {
         guard let loop = loop(for: id), loop.active else { return }
         let slot = loop.nextRoundAt
             ?? loop.roundStartedAt.map { $0.addingTimeInterval(loop.interval) }
-        end(id, failed: false)
+            ?? Date().addingTimeInterval(loop.interval)
+        end(id, failed: false, reason: reason)
         guard let i = loops.firstIndex(where: { $0.id == id }) else { return }
         loops[i].pausedSlot = slot
         persist()
@@ -417,6 +458,7 @@ final class ChatLoopManager: ObservableObject {
         loops[i].failed = false
         loops[i].dismissed = false
         loops[i].pausedSlot = nil
+        loops[i].endReason = nil
         loops[i].startedAt = Date()
         schedule(id, at: next)
     }
@@ -424,7 +466,7 @@ final class ChatLoopManager: ObservableObject {
     /// manage_loop's delete: the loop stops if it is running and leaves the
     /// task list and Routines, on or off. The thread stays in Recent.
     func delete(_ id: UUID) {
-        if isActive(id) { end(id, failed: false) }
+        if isActive(id) { end(id, failed: false, reason: .stopped) }
         dismiss(id)
     }
 
@@ -457,12 +499,13 @@ final class ChatLoopManager: ObservableObject {
         if loops[i].isWaiting { schedule(id) }
     }
 
-    private func end(_ id: UUID, failed: Bool) {
+    private func end(_ id: UUID, failed: Bool, reason: LoopEndReason) {
         timers[id]?.cancel()
         timers[id] = nil
         guard let i = loops.firstIndex(where: { $0.id == id }) else { return }
         loops[i].active = false
         loops[i].failed = failed
+        loops[i].endReason = reason
         loops[i].nextRoundAt = nil
         if let started = loops[i].roundStartedAt {
             loops[i].lastRoundDuration = Date().timeIntervalSince(started)
@@ -497,7 +540,8 @@ final class ChatLoopManager: ObservableObject {
                    nextRoundAt: loop.isRunning ? nil : loop.nextRoundAt,
                    active: loop.active, failed: loop.failed,
                    dismissed: loop.dismissed, endsAt: loop.endsAt,
-                   weekdaysOnly: loop.weekdaysOnly, pausedSlot: loop.pausedSlot)
+                   weekdaysOnly: loop.weekdaysOnly, pausedSlot: loop.pausedSlot,
+                   endReason: loop.active ? nil : loop.endReason)
         }
         if let data = try? JSONEncoder().encode(records) {
             UserDefaults.standard.set(data, forKey: Self.persistKey)
@@ -511,8 +555,8 @@ final class ChatLoopManager: ObservableObject {
         // A weekday skip can carry the next round past the end date.
         if let endsAt = loops[i].endsAt, Date() > endsAt {
             let loop = loops[i]
-            end(id, failed: false)
-            notify(loop, subtitle: L("notify.loop.ended", loop.rounds), silent: false, answer: "")
+            end(id, failed: false, reason: .endDate)
+            notify(loop, subtitle: L("notify.loop.endDate", loop.rounds), silent: false, answer: "")
             return
         }
         // A follow-up is streaming on the thread: let it finish. Its finish
