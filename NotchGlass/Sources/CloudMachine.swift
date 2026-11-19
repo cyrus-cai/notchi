@@ -1431,6 +1431,55 @@ enum CloudDesktopBridge {
       return text;
     }
 
+    // An element's own name: its line without number, role, value, actions and frame.
+    function nameOf(el) {
+      return el.line.trim().replace(/^\d+ /, '').slice(el.role.length)
+        .replace(/ (Value:|Secondary Actions:|Frame:).*$/, '').trim();
+    }
+
+    // A consent banner's "accept all" button, when the same page also has a
+    // button that declines optional cookies: the decline button's line, so the
+    // click goes there instead.
+    const ACCEPT_ALL = /^(accept|allow) (all|cookies)\b|^(接受|同意)(全部|所有)|^全部(接受|同意)/i;
+    const DECLINE = /reject|decline|deny|necessary only|only necessary|essential only|only essential|拒绝|仅必要|仅限必要/i;
+    function cookieRejectInstead(app, el) {
+      if (!['button', 'push button', 'link'].includes(el.role) || !ACCEPT_ALL.test(nameOf(el))) return null;
+      let tree = '';
+      try { tree = fs.readFileSync(stateFile(app), 'utf8'); } catch { return null; }
+      for (const line of tree.split('\n')) {
+        const m = line.match(/^\s*(\d+) (push button|button|link) (.*?)(?: (?:Value:|Secondary Actions:|Frame:).*)?$/);
+        if (m && DECLINE.test(m[3])) return `${m[1]} (${m[3].trim()})`;
+      }
+      return null;
+    }
+
+    // Elements more than one screen above or below the visible part of the
+    // page are left out: a long page's footer alone runs to hundreds of lines.
+    // `find` still searches the whole page.
+    function nearViewport(state) {
+      const lines = state.split('\n');
+      const doc = lines.find((l) => /^\s*\d+ document web\b/.test(l));
+      const view = doc && doc.match(/ @-?\d+,(-?\d+) \d+x(\d+)$/);
+      if (!view) return state;
+      const top = +view[1], h = +view[2];
+      let above = 0, below = 0;
+      const kept = lines.filter((l) => {
+        const f = l.match(/ @-?\d+,(-?\d+) \d+x(\d+)$/);
+        if (!f || l === doc) return true;
+        const y = +f[1], fh = +f[2];
+        if (y + fh < top - h) { above++; return false; }
+        if (y > top + 2 * h) { below++; return false; }
+        return true;
+      });
+      if (!above && !below) return state;
+      const parts = [];
+      if (above) parts.push(`${above} above`);
+      if (below) parts.push(`${below} below`);
+      kept.push(`[${parts.join(', ')} the visible part of the page are left out. `
+        + 'Pass find=<words> to get them by text, or action=scroll.]');
+      return kept.join('\n');
+    }
+
     // One operation from Notchi. Each picks the method that works on Chromium's
     // accessibility tree: check boxes, radio buttons and links answer to their
     // own actions; text goes in through the keyboard, since Chromium's fields are
@@ -1454,7 +1503,12 @@ enum CloudDesktopBridge {
           return '';
         case 'click': {
           if (!el) throw new Error('index is required.');
-          const own = ['check', 'uncheck', 'press', 'jump', 'click', 'open', 'activate', 'expand or contract']
+          const reject = cookieRejectInstead(app, el);
+          if (reject) {
+            throw new Error(`${index} accepts all optional cookies. Click ${reject} instead; `
+              + 'accept all only when the user asked for it.');
+          }
+          const own =['check', 'uncheck', 'press', 'jump', 'click', 'open', 'activate', 'expand or contract']
             .find((a) => el.actions.includes(a));
           const was = TOGGLES.includes(el.role) ? checkedOf(el.line) : null;
           if (el.role === 'radio button' && was === true) {
@@ -1596,6 +1650,8 @@ enum CloudDesktopBridge {
             state = hits.length
               ? `Elements matching "${job.find}" (${hits.length}):\n` + hits.map((l) => l.trim()).join('\n')
               : `No element matches "${job.find}".`;
+          } else if (isChromium(app)) {
+            state = nearViewport(state);
           }
           lines.push(state);
         } catch (e) {

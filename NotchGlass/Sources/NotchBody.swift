@@ -167,6 +167,8 @@ struct NotchBody: View {
     /// chat thread). Separate from the compose chip's picker: those two
     /// surfaces never share a screen, but each owns its own open flag.
     @State private var showLiveLoopIntervalPicker = false
+    /// The loop the ⌘ card's interval row picked; nil uses the headline loop.
+    @State private var liveLoopIntervalTarget: UUID? = nil
     /// Whether the agent detail page is still pinned to the tail. The page
     /// follows the newest line like a terminal — but only while the reader is
     /// AT the tail: scroll up to read an earlier tool output and the follow
@@ -282,6 +284,24 @@ struct NotchBody: View {
     /// prompt, and the bottom row.
     private var composerContent: some View {
         VStack(alignment: .leading, spacing: 0) {
+            // Reply / Edit picked on a message above: the same chips the
+            // notch's follow-up field shows (`followUpRow`).
+            if let quote = model.activeReplyQuote {
+                SelectionContextChip(selection: quote, isReply: true) {
+                    withAnimation(.easeOut(duration: Tokens.hoverFade)) { model.cancelReply() }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.bottom, 8)
+                .transition(moduleTransition)
+            }
+            if let original = model.activeEditOriginal {
+                SelectionContextChip(selection: original, icon: "pencil", label: L("message.editing")) {
+                    withAnimation(.easeOut(duration: Tokens.hoverFade)) { model.cancelEdit() }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.bottom, 8)
+                .transition(moduleTransition)
+            }
             // A failed Ask: the island's capsule (Open Settings, Try again with
             // its model list, Retry on Notchi, Add credit) over the prompt.
             if !model.agentComposeActive, let askError = model.visibleAskError {
@@ -311,7 +331,9 @@ struct NotchBody: View {
             }
             // On a settled answer the placeholder is the suggested next
             // question, as on the result page; Tab or Enter takes it.
-            inputRow(placeholder: model.agentComposeActive
+            inputRow(placeholder: model.usingPromptShortcutContext
+                        ? L("shortcuts.promptAction.window.placeholder")
+                        : model.agentComposeActive
                         || (model.mode == .idle && model.turns.isEmpty)
                         ? L(model.idlePlaceholderKey)
                         : (model.threadIsAgentRun ? nil : model.followUpSuggestion)
@@ -326,6 +348,11 @@ struct NotchBody: View {
                     .transition(.opacity)
             }
         }
+        // Reply / Edit from a message's menu puts the caret here.
+        .onChange(of: model.replyTarget) { _, target in if target != nil { refocusInput() } }
+        .onChange(of: model.editTarget) { _, target in if target != nil { refocusInput() } }
+        // The ⌘F bar took the caret; closing it gives it back to the prompt.
+        .onChange(of: model.threadSearchOpen) { _, open in if !open { refocusInput() } }
     }
 
     private var panelContent: some View {
@@ -466,6 +493,7 @@ struct NotchBody: View {
             showLiveLoopIntervalPicker = false
         }
         .onChange(of: showLiveLoopIntervalPicker) { _, open in
+            if !open { liveLoopIntervalTarget = nil }
             if open { model.isModelPickerOpen = true }
             else if !model.showLoopIntervalPicker
                       && !model.showAskModelPicker
@@ -621,6 +649,10 @@ struct NotchBody: View {
     /// next runloop — otherwise there's no edge and the new field never grabs focus.
     /// The small delay also lets SwiftUI finish swapping the field in.
     private func refocusInput() {
+        // The ⌘F bar holds the caret while it is open. A turn that finishes
+        // streaming, or any other re-arm here, must not take it back; closing
+        // the bar refocuses the prompt (see `threadSearchOpen` above).
+        guard !model.threadSearchOpen else { return }
         focused = false
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { focused = true }
     }
@@ -1023,7 +1055,7 @@ struct NotchBody: View {
         return VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 16) {
                 ForEach(turns) { turn in
-                    turnView(turn, thread: thread)
+                    turnView(turn, thread: thread, peek: true)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .id(turn.id)
                     if turn.id != lastID, let mark = marks[turn.id] {
@@ -1751,7 +1783,7 @@ struct NotchBody: View {
             notchi.append(r)
         }
         let free = notchi.filter(Self.isFreeNotchiRow)
-        let paid = notchi.filter { !Self.isFreeNotchiRow($0) }
+        let paid = Self.byVendor(notchi.filter { !Self.isFreeNotchiRow($0) })
         var own = recents.filter { !$0.provider.isFirstParty }
         own += askBYOKRows.filter { !own.contains($0) }
         return [
@@ -1759,6 +1791,20 @@ struct NotchBody: View {
             Section(title: L("nono.pricing.payAsYouGo"), rows: paid, folded: true, tag: "Notchi"),
             Section(title: L("model.picker.ownKeys"), rows: own),
         ]
+    }
+
+    /// Auto first, then OpenAI, Anthropic, Google and every other vendor.
+    /// Rows of one vendor keep the order they came in.
+    private static func byVendor(_ rows: [AskRecentModelPickerView.Row]) -> [AskRecentModelPickerView.Row] {
+        let order = ["OpenAI", "Anthropic", "Google"]
+        func rank(_ r: AskRecentModelPickerView.Row) -> Int {
+            if AskRecentModelPickerView.isAuto(r) { return -1 }
+            let vendor = AskRecentModelPickerView.detailModel(for: r).info.vendor
+            return order.firstIndex(of: vendor) ?? order.count
+        }
+        return rows.enumerated()
+            .sorted { (rank($0.element), $0.offset) < (rank($1.element), $1.offset) }
+            .map(\.element)
     }
 
     /// Input and output both $0 in the live lineup. A row whose rates have not
@@ -2196,7 +2242,7 @@ struct NotchBody: View {
     private func chatLoopRow(_ loop: ChatLoopManager.ChatLoop) -> some View {
         agentListRow(id: loop.id) {
             withAnimation(.spring(response: 0.42, dampingFraction: 0.82)) {
-                model.openLoopThread(id: loop.id)
+                model.openLoopThread(id: loop.threadID)
                 if !loop.active { chatLoops.dismiss(loop.id) }
             }
         } label: {
@@ -2222,7 +2268,7 @@ struct NotchBody: View {
                                  : (loop.failed ? Tokens.danger.opacity(0.9) : Tokens.text2))
                 .lineLimit(1)
                 .truncationMode(.tail)
-            if loopStartedThread(loop.id) { loopTag }
+            if loopStartedThread(loop.threadID) { loopTag }
             Spacer(minLength: 8)
             if let started = loop.roundStartedAt {
                 TimelineView(.periodic(from: .now, by: 1)) { context in
@@ -2639,22 +2685,23 @@ struct NotchBody: View {
                                 agentDetailMetadataOpen = false
                                 NSWorkspace.shared.open(task.folder)
                             },
-                            loop: task.loop.map {
-                                LoopMenuInfo(intervalMinutes: $0.intervalMinutes,
-                                             rounds: $0.rounds,
-                                             nextRoundAt: $0.nextRoundAt,
-                                             active: $0.active,
-                                             endReason: $0.active ? nil : $0.endReason)
-                            },
-                            onStopLoop: {
+                            loops: task.loop.map {
+                                [LoopMenuInfo(id: task.id, prompt: task.prompt,
+                                              intervalMinutes: $0.intervalMinutes,
+                                              rounds: $0.rounds,
+                                              nextRoundAt: $0.nextRoundAt,
+                                              active: $0.active,
+                                              endReason: $0.active ? nil : $0.endReason)]
+                            } ?? [],
+                            onStopLoop: { _ in
                                 agentDetailMetadataOpen = false
                                 AgentTaskManager.shared.stopLoop(taskID: task.id)
                             },
-                            onContinueLoop: {
+                            onContinueLoop: { _ in
                                 agentDetailMetadataOpen = false
                                 AgentTaskManager.shared.resumeLoop(taskID: task.id)
                             },
-                            onChangeInterval: {
+                            onChangeInterval: { _ in
                                 agentDetailMetadataOpen = false
                                 showLiveLoopIntervalPicker = true
                             })
@@ -3812,7 +3859,7 @@ struct NotchBody: View {
                 }
                 UserQuestionBubble(text: turn.text, baseFont: Tokens.TypeSize.reading,
                                    isAgent: turn.isAgent, reaction: turn.reaction,
-                                   fromTelegram: turn.fromTelegram)
+                                   fromTelegram: turn.fromTelegram, savedOnly: turn.savedOnly)
             }
         } else {
             VStack(alignment: .leading, spacing: 14) {
@@ -3824,6 +3871,14 @@ struct NotchBody: View {
                     completedAt: turn.isAgent && item.conversation.last?.id == turn.id
                         ? item.t : nil,
                     onInAppCopy: { model.rebaselineClipboardAfterInAppWrite() },
+                    // Quote on a saved record opens it as the live thread, as
+                    // its follow-up field does, and replies quoting the text.
+                    onQuote: { quote in
+                        withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
+                            model.openHistory(item)
+                            model.beginReply(quote: quote)
+                        }
+                    },
                     answerModel: turn.answerModel,
                     agentTrail: turn.isAgent
                         ? (turn.agentLog?.droppingTrailingAnswer(turn.text) ?? []) : [],
@@ -5520,6 +5575,11 @@ struct NotchBody: View {
     private var loopSegments: [LoopSegment]? {
         guard model.conversation.hasLoopRound else { return nil }
         let turns = model.turns
+        let threadID = model.threadHistoryID
+        // A thread holding rounds of more than one loop names each round's loop.
+        let multiLoop = Set(turns.compactMap { turn in
+            turn.loopRound == nil ? nil : (turn.loopID ?? threadID)
+        }).count > 1
         var segments: [LoopSegment] = []
         var title = ""
         var followUp = false
@@ -5533,7 +5593,8 @@ struct NotchBody: View {
                     segments.append(LoopSegment(title: title, isFollowUp: followUp, turns: members))
                 }
                 inFlight = false
-                title = turn.loopRound.map { L("loop.round", $0) } ?? turn.text
+                title = turn.loopRound.map { roundTitle($0, loopID: turn.loopID,
+                                                        multiLoop: multiLoop) } ?? turn.text
                 followUp = turn.loopRound == nil
                 members = index == 0 || turn.hidesUserBubble ? [] : [turn]
                 open = true
@@ -5547,6 +5608,16 @@ struct NotchBody: View {
             segments.append(LoopSegment(title: title, isFollowUp: followUp, turns: members))
         }
         return segments
+    }
+
+    /// A round's name in the round column: "Round n", headed by its loop's
+    /// prompt when the thread holds more than one loop.
+    private func roundTitle(_ round: Int, loopID: UUID?, multiLoop: Bool) -> String {
+        let name = L("loop.round", round)
+        guard multiLoop else { return name }
+        let id = loopID ?? model.threadHistoryID
+        guard let prompt = chatLoops.loop(for: id)?.prompt else { return name }
+        return String(prompt.prefix(40)) + "\n" + name
     }
 
     /// A loop thread: its prompt once, then the chosen round and the round
@@ -5589,17 +5660,32 @@ struct NotchBody: View {
         .onChange(of: model.threadHistoryID) { _, _ in loopRoundSelection = nil }
     }
 
-    /// The loop behind the thread on screen, for its ⌘ card — nil when the thread
-    /// isn't a loop this app instance is running (or ran).
-    private var threadLoopInfo: LoopMenuInfo? {
+    /// The loops behind the thread on screen, for its ⌘ card — empty when the
+    /// thread holds no loop this app instance is running (or ran).
+    private var threadLoops: [LoopMenuInfo] {
         let id = model.threadHistoryID
-        if let loop = agentManager.tasks.first(where: { $0.id == id })?.loop {
-            return LoopMenuInfo(intervalMinutes: loop.intervalMinutes, rounds: loop.rounds,
-                                nextRoundAt: loop.nextRoundAt, active: loop.active,
-                                endReason: loop.active ? nil : loop.endReason)
+        if let task = agentManager.tasks.first(where: { $0.id == id }), let loop = task.loop {
+            return [LoopMenuInfo(id: id, prompt: task.prompt,
+                                 intervalMinutes: loop.intervalMinutes, rounds: loop.rounds,
+                                 nextRoundAt: loop.nextRoundAt, active: loop.active,
+                                 endReason: loop.active ? nil : loop.endReason)]
         }
-        if let info = model.dismissedAgentLoopInfo(id) { return info }
-        return chatLoops.menuInfo(for: id, turns: chatLoopTurns)
+        if let info = model.dismissedAgentLoopInfo(id) { return [info] }
+        return chatLoops.menuInfo(forThread: id, turns: chatLoopTurns)
+    }
+
+    /// The loop the header chip and the placeholder speak for: the running
+    /// one whose next round comes first.
+    private var headlineLoop: LoopMenuInfo? {
+        threadLoops.filter(\.active).min {
+            ($0.nextRoundAt ?? .distantFuture) < ($1.nextRoundAt ?? .distantFuture)
+        }
+    }
+
+    /// The loop the header chip's interval card changes: the one picked in the
+    /// ⌘ card, else the headline loop.
+    private var intervalLoop: LoopMenuInfo? {
+        liveLoopIntervalTarget.flatMap { id in threadLoops.first { $0.id == id } } ?? headlineLoop
     }
 
     /// The thread's turns when it is an Ask thread — what a chat loop with no
@@ -5614,7 +5700,7 @@ struct NotchBody: View {
     /// placeholder counts down to the next round, and the ⌘ card can end it.
     private var threadLoopActive: Bool {
         let id = model.threadHistoryID
-        return chatLoops.isActive(id)
+        return chatLoops.hasActiveLoop(onThread: id)
             || agentManager.tasks.contains { $0.id == id && $0.loopActive }
     }
 
@@ -5630,19 +5716,19 @@ struct NotchBody: View {
         model.hasText || !model.askComposeImages.isEmpty
     }
 
-    private func continueThreadLoop() {
+    private func continueThreadLoop(_ loopID: UUID) {
         let id = model.threadHistoryID
         if agentManager.tasks.first(where: { $0.id == id })?.loop != nil {
             agentManager.resumeLoop(taskID: id)
-        } else if !model.reviveAgentLoop(id) {
-            chatLoops.resume(id, turns: chatLoopTurns)
+        } else if !(loopID == id && model.reviveAgentLoop(id)) {
+            chatLoops.resume(loopID, threadID: id, turns: chatLoopTurns)
         }
     }
 
-    private func stopThreadLoop() {
+    private func stopThreadLoop(_ loopID: UUID) {
         let id = model.threadHistoryID
-        chatLoops.stop(id)
-        if agentManager.tasks.contains(where: { $0.id == id && $0.loopActive }) {
+        chatLoops.stop(loopID)
+        if loopID == id, agentManager.tasks.contains(where: { $0.id == id && $0.loopActive }) {
             agentManager.stopLoop(taskID: id)
         }
     }
@@ -5920,7 +6006,8 @@ struct NotchBody: View {
     /// unless given (the idle page's main-thread reveal draws a saved row).
     @ViewBuilder
     private func turnView(_ turn: NotchModel.Turn,
-                          thread: [NotchModel.Turn]? = nil) -> some View {
+                          thread: [NotchModel.Turn]? = nil,
+                          peek: Bool = false) -> some View {
         // Reply and Delete act on the conversation on screen, so a saved row
         // drawn by the idle page's reveal offers neither. Delete also stays off
         // an agent run's record, which is rebuilt from the run's exchanges.
@@ -5972,7 +6059,7 @@ struct NotchBody: View {
                 // left-aligns with the answer below. Regenerate lives on the
                 // answer's right-click menu.
                 UserQuestionBubble(text: turn.text, isAgent: turn.isAgent, reaction: turn.reaction,
-                                   fromTelegram: turn.fromTelegram)
+                                   fromTelegram: turn.fromTelegram, savedOnly: turn.savedOnly)
                     .contextMenu { QuestionTurnMenu(onReply: onReply, onEdit: onEdit, onDelete: onDelete) }
             }
         } else {
@@ -6016,6 +6103,16 @@ struct NotchBody: View {
                     showsFooterMetadata: !turn.isAgent,
                     onInAppCopy: { model.rebaselineClipboardAfterInAppWrite() },
                     onReply: onReply,
+                    // On the idle page's peek, Quote opens the thread first
+                    // (`quoteFromPeek`).
+                    onQuote: peek ? { quote in model.quoteFromPeek(quote) }
+                        : thread != nil ? nil : { quote in
+                        withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
+                            model.beginReply(quote: quote)
+                            followUpExpanded = true
+                        }
+                        refocusInput()
+                    },
                     onDelete: onDelete,
                     regenModel: turn.regenModel,
                     answerModel: turn.answerModel,
@@ -6108,11 +6205,10 @@ struct NotchBody: View {
             Spacer(minLength: 0)
             // Only a thread the loop started shows its schedule here. A loop
             // running in a conversation is managed from the task list.
-            if loopThreadOnScreen, let info = threadLoopInfo {
+            if loopThreadOnScreen, let info = intervalLoop {
                 loopScheduleChip(minutes: info.intervalMinutes) { minutes in
-                    let id = model.threadHistoryID
-                    chatLoops.setInterval(id, minutes: minutes)
-                    AgentTaskManager.shared.setLoopInterval(taskID: id, minutes: minutes)
+                    chatLoops.setInterval(info.id, minutes: minutes)
+                    AgentTaskManager.shared.setLoopInterval(taskID: info.id, minutes: minutes)
                 }
                 .arrowCursor()
                 if let next = info.nextRoundAt {
@@ -6801,7 +6897,7 @@ struct NotchBody: View {
                         .allowsHitTesting(!model.guideLocksInput)
 
                     if agentFollowUpMetadata != nil
-                        || (threadLoopInfo != nil && model.conversation.hasLoopRound) {
+                        || (!threadLoops.isEmpty && model.conversation.hasLoopRound) {
                         GlassIconButton(systemName: "command",
                                         help: L("agent.detail"),
                                         size: Self.splitRailChip,
@@ -6823,17 +6919,18 @@ struct NotchBody: View {
                                         model.isResultMetadataMenuOpen = false
                                         model.openThreadAgentFolder()
                                     },
-                                    loop: threadLoopInfo,
-                                    onStopLoop: {
+                                    loops: threadLoops,
+                                    onStopLoop: { loopID in
                                         model.isResultMetadataMenuOpen = false
-                                        stopThreadLoop()
+                                        stopThreadLoop(loopID)
                                     },
-                                    onContinueLoop: {
+                                    onContinueLoop: { loopID in
                                         model.isResultMetadataMenuOpen = false
-                                        continueThreadLoop()
+                                        continueThreadLoop(loopID)
                                     },
-                                    onChangeInterval: {
+                                    onChangeInterval: { loopID in
                                         model.isResultMetadataMenuOpen = false
+                                        liveLoopIntervalTarget = loopID
                                         showLiveLoopIntervalPicker = true
                                     })
                                     .manageMenuCardBackground())
@@ -6974,7 +7071,7 @@ struct NotchBody: View {
                 Text(model.agentThreadTaskRunning
                     ? L("result.followUp.agentQueue", engine.displayName)
                     : L("result.followUp.agentContinue", engine.displayName))
-            } else if loopThreadOnScreen, let next = threadLoopInfo?.nextRoundAt {
+            } else if loopThreadOnScreen, let next = headlineLoop?.nextRoundAt {
                 TimelineView(.periodic(from: .now, by: 1)) { context in
                     Text(L("loop.waiting",
                            LoopInterval.countdown(next.timeIntervalSince(context.date))))
@@ -7064,14 +7161,15 @@ struct AgentRunMetadataMenu: View {
     let folderPath: String?
     let completedAt: Date?
     let onOpenFolder: () -> Void
-    /// A `/loop` thread's schedule: its interval and round count, when the next
-    /// round runs, and — while it is still going — the row that stops it.
-    var loop: LoopMenuInfo? = nil
-    var onStopLoop: (() -> Void)? = nil
+    /// The thread's loops, each with its schedule: interval and round count,
+    /// when the next round runs, and — while it is still going — the row that
+    /// stops it. A thread can hold several; each is then headed by its prompt.
+    var loops: [LoopMenuInfo] = []
+    var onStopLoop: ((UUID) -> Void)? = nil
     /// Restarts a stopped loop.
-    var onContinueLoop: (() -> Void)? = nil
+    var onContinueLoop: ((UUID) -> Void)? = nil
     /// Opens the interval card. Live loops only — compose already has its chip.
-    var onChangeInterval: (() -> Void)? = nil
+    var onChangeInterval: ((UUID) -> Void)? = nil
 
     private var folderName: String? {
         guard let folderPath, !folderPath.isEmpty else { return nil }
@@ -7098,35 +7196,8 @@ struct AgentRunMetadataMenu: View {
             if let completed {
                 ResultMetadataRow(icon: LucideIcons.clock, title: completed)
             }
-            if let loop {
-                ResultMetadataRow(icon: LucideIcons.loop,
-                                  title: L("loop.every", LoopInterval.short(loop.intervalMinutes))
-                                      + " · " + L("loop.round", loop.rounds),
-                                  hoverSymbol: (loop.active && onChangeInterval != nil)
-                                    ? "chevron.right" : nil,
-                                  hint: loop.active ? L("loop.change") : nil,
-                                  action: loop.active ? onChangeInterval : nil)
-                if loop.active, let next = loop.nextRoundAt {
-                    TimelineView(.periodic(from: .now, by: 1)) { context in
-                        ResultMetadataRow(
-                            icon: LucideIcons.clock,
-                            title: L("loop.waiting",
-                                     LoopInterval.countdown(next.timeIntervalSince(context.date))))
-                    }
-                }
-                if loop.active, let onStopLoop {
-                    ResultMetadataRow(icon: LucideIcons.circleStop, title: L("loop.stop"),
-                                      hint: L("loop.stop"),
-                                      action: onStopLoop)
-                }
-                if !loop.active, let reason = loop.endReason {
-                    ResultMetadataRow(icon: LucideIcons.circleStop, title: reason.cardText)
-                }
-                if !loop.active, let onContinueLoop {
-                    ResultMetadataRow(icon: LucideIcons.play, title: L("loop.continue"),
-                                      hint: L("loop.continue"),
-                                      action: onContinueLoop)
-                }
+            ForEach(loops) { loop in
+                loopRows(loop)
             }
         }
         .padding(ManageMenuMetrics.cardPadding)
@@ -7134,6 +7205,42 @@ struct AgentRunMetadataMenu: View {
         // their row instead of making the whole menu sprawl across the answer.
         .frame(width: 220, alignment: .leading)
         .preferredColorScheme(.dark)
+    }
+
+    @ViewBuilder
+    private func loopRows(_ loop: LoopMenuInfo) -> some View {
+        if loops.count > 1 {
+            ResultMetadataRow(icon: LucideIcons.scrollText, title: loop.prompt)
+                .padding(.top, loop.id == loops.first?.id ? 0 : 6)
+        }
+        ResultMetadataRow(icon: LucideIcons.loop,
+                          title: L("loop.every", LoopInterval.short(loop.intervalMinutes))
+                              + " · " + L("loop.round", loop.rounds),
+                          hoverSymbol: (loop.active && onChangeInterval != nil)
+                            ? "chevron.right" : nil,
+                          hint: loop.active ? L("loop.change") : nil,
+                          action: loop.active ? onChangeInterval.map { f in { f(loop.id) } } : nil)
+        if loop.active, let next = loop.nextRoundAt {
+            TimelineView(.periodic(from: .now, by: 1)) { context in
+                ResultMetadataRow(
+                    icon: LucideIcons.clock,
+                    title: L("loop.waiting",
+                             LoopInterval.countdown(next.timeIntervalSince(context.date))))
+            }
+        }
+        if loop.active, let onStopLoop {
+            ResultMetadataRow(icon: LucideIcons.circleStop, title: L("loop.stop"),
+                              hint: L("loop.stop"),
+                              action: { onStopLoop(loop.id) })
+        }
+        if !loop.active, let reason = loop.endReason {
+            ResultMetadataRow(icon: LucideIcons.circleStop, title: reason.cardText)
+        }
+        if !loop.active, let onContinueLoop {
+            ResultMetadataRow(icon: LucideIcons.play, title: L("loop.continue"),
+                              hint: L("loop.continue"),
+                              action: { onContinueLoop(loop.id) })
+        }
     }
 }
 
@@ -7686,7 +7793,7 @@ private struct RevealTailHeight: ViewModifier {
 
 /// The ⌘F query on one turn, for its text to highlight — nil unless the turn
 /// matches, so a new query redraws the matching turns only.
-private struct ThreadSearchMark: ViewModifier {
+struct ThreadSearchMark: ViewModifier {
     @ObservedObject var search: ThreadSearchState
     let turnID: UUID
 
@@ -7698,12 +7805,15 @@ private struct ThreadSearchMark: ViewModifier {
 
 /// The ⌘F bar over a conversation: the query, where the current match is in
 /// the count, steps up and down, and ×. The selection chip's glass capsule.
-private struct ThreadSearchBar: View {
+struct ThreadSearchBar: View {
     @ObservedObject var search: ThreadSearchState
     @ObservedObject var position: ThreadSearchState.Position
     let close: () -> Void
     @State private var text = ""
-    @FocusState private var focused: Bool
+    /// Raised once the bar is in the window. An AppKit field: the prompt is
+    /// an `NSTextView`, and SwiftUI's `@FocusState` cannot take first
+    /// responder from it, so ⌘F left the caret in the prompt.
+    @State private var focused = false
 
     var body: some View {
         let matches = search.matches
@@ -7711,14 +7821,13 @@ private struct ThreadSearchBar: View {
             Image(systemName: "magnifyingglass")
                 .sfFont(Tokens.TypeSize.badge, weight: .semibold)
                 .foregroundStyle(Tokens.text4)
-            TextField(L("threadSearch.placeholder"), text: $text)
-            .textFieldStyle(.plain)
-            .sfFont(Tokens.TypeSize.meta, weight: .medium)
-            .foregroundStyle(Tokens.text1)
-            .frame(width: 150)
-            .focused($focused)
+            HistorySearchField(text: $text,
+                               placeholder: L("threadSearch.placeholder"),
+                               fontSize: Tokens.TypeSize.meta,
+                               focusTrigger: focused,
+                               onSubmit: { search.step(1) })
+            .frame(width: 150, height: 16)
             .onChange(of: text) { _, text in search.type(text) }
-            .onSubmit { search.step(1); focused = true }
             if !search.query.isEmpty {
                 Text(matches.isEmpty ? "0/0" : "\(position.current + 1)/\(matches.count)")
                     .sfFont(Tokens.TypeSize.meta, weight: .medium)
@@ -7752,7 +7861,10 @@ private struct ThreadSearchBar: View {
         .padding(.trailing, 6)
         .frame(height: 26)
         .glassCapsule(in: Capsule(style: .continuous), brighter: true)
-        .onAppear { focused = true }
+        .onAppear {
+            // After SwiftUI has put the field in the window, like the Recent filter.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { focused = true }
+        }
     }
 }
 
@@ -8515,6 +8627,9 @@ struct UserQuestionBubble: View {
     /// The turn came in from Telegram (`Turn.fromTelegram`): a line under the
     /// text says so and opens the bot's chat.
     var fromTelegram: Bool = false
+    /// Sent with ⌘↵ (`Turn.savedOnly`): a line under the text says it got
+    /// no reply and stays in the context.
+    var savedOnly: Bool = false
     /// The quick-summon card: the question runs the card's full width as plain
     /// text, with no fill, border or glass behind it.
     var flat: Bool = false
@@ -8716,7 +8831,8 @@ struct UserQuestionBubble: View {
                 // dim real lines. A thin feather up top: one line leaving is all it
                 // has to swallow.
                 .scrollEdgeFade(top: expandedOverflows, bottom: expandedOverflows, topFade: 16, bottomFade: 28)
-            } else {
+            } else if !text.isEmpty {
+                // A ⌘↵ message can be pictures alone: no empty line above its note.
                 questionText
             }
 
@@ -8732,6 +8848,13 @@ struct UserQuestionBubble: View {
                         .foregroundStyle(Tokens.text4)
                 }
                 .buttonStyle(.plain).exemptsDoubleClickPin()
+            }
+
+            if savedOnly {
+                Text(L("bubble.savedOnly"))
+                    .sfFont(max(Tokens.TypeSize.meta, baseFont - 2))
+                    .foregroundStyle(Tokens.text3)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             if fromTelegram {

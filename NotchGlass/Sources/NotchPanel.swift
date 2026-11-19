@@ -237,6 +237,7 @@ enum SelectableTextCopy {
 
     /// Call from `sendEvent` for every event.
     static func note(_ event: NSEvent, in window: NSWindow) {
+        MainActor.assumeIsolated { SelectionQuote.note(event, in: window) }
         guard event.type == .leftMouseDown else { return }
         lastPressed = window.selectableTextView(at: event.locationInWindow)
     }
@@ -253,6 +254,135 @@ enum SelectableTextCopy {
         let before = NSPasteboard.general.changeCount
         NSApp.sendAction(#selector(NSText.copy(_:)), to: view, from: nil)
         return NSPasteboard.general.changeCount != before
+    }
+}
+
+// MARK: - Quote from a selection
+
+/// A window whose replies can carry a quote picked out of its selectable text.
+protocol SelectionQuoteTarget: AnyObject {
+    /// Nil when the window has nothing to reply into right now.
+    var onQuoteSelection: ((String) -> Void)? { get }
+}
+
+/// Right-click on selected answer text adds "Quote" to the top of the system
+/// text menu. The item sets the window's next reply to the selected text.
+@MainActor
+enum SelectionQuote {
+    private static weak var pressedView: NSView?
+    private static weak var pressedWindow: NSWindow?
+    private static var pressedAt = Date.distantPast
+    private static var installed = false
+    /// Used by windows that are not a `SelectionQuoteTarget` (the notch panel
+    /// and the menu bar card): replies into the live thread.
+    static var fallback: (() -> ((String) -> Void)?)?
+
+    /// Call from `sendEvent` for every event.
+    static func note(_ event: NSEvent, in window: NSWindow) {
+        let secondary = event.type == .rightMouseDown
+            || (event.type == .leftMouseDown && event.modifierFlags.contains(.control))
+        guard secondary else { return }
+        installIfNeeded()
+        pressedView = window.selectableTextView(at: event.locationInWindow)
+        pressedWindow = window
+        pressedAt = Date()
+    }
+
+    private static func installIfNeeded() {
+        guard !installed else { return }
+        installed = true
+        NotificationCenter.default.addObserver(
+            forName: NSMenu.didBeginTrackingNotification, object: nil, queue: .main
+        ) { note in
+            guard let menu = note.object as? NSMenu else { return }
+            MainActor.assumeIsolated { decorate(menu) }
+        }
+    }
+
+    /// The selection under the right-click that opened the menu on screen,
+    /// for the answer menu's own Quote item (`takeMenuSelection`).
+    private static var menuSelection: String?
+
+    /// The selected text the open menu was raised over, once.
+    static func takeMenuSelection() -> String? {
+        defer { menuSelection = nil }
+        return menuSelection
+    }
+
+    private static func decorate(_ menu: NSMenu) {
+        defer { pressedView = nil }
+        guard menu.supermenu == nil else { return }
+        menuSelection = nil
+        if let view = pressedView, Date().timeIntervalSince(pressedAt) < 1 {
+            menuSelection = selectedText(in: view)
+        }
+        // The answer bubble's menu has its own Quote.
+        guard !menu.items.contains(where: { $0.title == L("message.quote") }) else { return }
+        guard let view = pressedView, let window = pressedWindow,
+              Date().timeIntervalSince(pressedAt) < 1,
+              !menu.items.contains(where: { $0.representedObject as? String == itemTag })
+        else { return }
+        trimTextMenu(menu)
+        guard let handler = (window as? SelectionQuoteTarget)?.onQuoteSelection
+                ?? (window is SelectionQuoteTarget ? nil : fallback?()),
+              let text = selectedText(in: view) else { return }
+        let item = NSMenuItem(title: L("message.quote"),
+                              action: #selector(QuoteAction.run(_:)), keyEquivalent: "")
+        item.target = QuoteAction.shared
+        item.representedObject = itemTag
+        item.image = NSImage(systemSymbolName: "text.quote", accessibilityDescription: nil)
+        QuoteAction.shared.pending = { handler(text) }
+        menu.insertItem(item, at: 0)
+        if menu.items.count > 1 { menu.insertItem(.separator(), at: 1) }
+    }
+
+    /// The system text menu over answer text keeps Look Up, Translate and
+    /// Copy. Cut, Paste, Share, Font, Spelling, Services and the rest do
+    /// nothing useful on text that cannot be edited.
+    private static func trimTextMenu(_ menu: NSMenu) {
+        func keeps(_ item: NSMenuItem) -> Bool {
+            guard let action = item.action else { return false }
+            if action == #selector(NSText.copy(_:)) { return true }
+            let name = NSStringFromSelector(action).lowercased()
+            return name.contains("lookup") || name.contains("translat")
+        }
+        let lookups = menu.items.filter { keeps($0) && $0.action != #selector(NSText.copy(_:)) }
+        let copies = menu.items.filter { $0.action == #selector(NSText.copy(_:)) }
+        menu.removeAllItems()
+        lookups.forEach { menu.addItem($0) }
+        if !lookups.isEmpty, !copies.isEmpty { menu.addItem(.separator()) }
+        copies.forEach { menu.addItem($0) }
+    }
+
+    private static let itemTag = "notchi.quoteSelection"
+
+    /// The selection, read through the Services path the text view already
+    /// answers ("Search With Google"), into a private pasteboard so the user's
+    /// clipboard is left alone.
+    private static func selectedText(in view: NSView) -> String? {
+        let selector = #selector(NSServicesMenuRequestor.writeSelection(to:types:))
+        guard view.responds(to: selector),
+              let imp = view.method(for: selector) else { return nil }
+        typealias Write = @convention(c) (AnyObject, Selector, NSPasteboard, NSArray) -> Bool
+        let write = unsafeBitCast(imp, to: Write.self)
+        let board = NSPasteboard(name: NSPasteboard.Name("notchi.quoteSelection"))
+        board.clearContents()
+        guard write(view, selector, board, [NSPasteboard.PasteboardType.string] as NSArray),
+              let raw = board.string(forType: .string) else { return nil }
+        let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return nil }
+        let limit = NotchModel.replyQuoteLimit
+        return text.count > limit ? String(text.prefix(limit)) + "…" : text
+    }
+
+    private final class QuoteAction: NSObject {
+        static let shared = QuoteAction()
+        var pending: (() -> Void)?
+        @objc func run(_ sender: Any?) {
+            let action = pending
+            pending = nil
+            DispatchQueue.main.async { action?() }
+        }
     }
 }
 
@@ -340,3 +470,4 @@ extension NSWindow {
         return true
     }
 }
+

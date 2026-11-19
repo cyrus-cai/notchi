@@ -117,6 +117,31 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.9.41",
+            date: "2026-11-19",
+            features: [
+                "Right-click an answer and choose Quote to reply to it, or to the text you selected.",
+                "A thread can run several loops at once.",
+                "⌘↵ saves a message or photos to the thread without a reply. Later answers use them as context.",
+                "In Telegram, /note, /remind, /code, /loop, /actions and /issue work as in the notch.",
+                "The menu bar card can open at the right edge of the screen. Set it in Settings → Appearance.",
+                "Translate to your language replaces Translate to English and Translate to Chinese.",
+            ],
+            improvements: [
+                "Double-tapping Right Command opens the top-right card by default.",
+                "⌘F in the menu bar card opens Recent with the search field ready.",
+                "Agent runs no longer stop after 40 steps.",
+                "Notifications stay on screen long enough to read them.",
+                "Link previews show icons for more sites.",
+                "The cloud machine declines optional cookies on consent banners.",
+            ],
+            fixes: [
+                "Fixed links in Chinese text including the punctuation after them.",
+                "Fixed one unreadable loop erasing all saved loops.",
+                "Fixed ⌘F leaving the cursor in the prompt.",
+            ]
+        ),
+        Entry(
             version: "0.9.40",
             date: "2026-11-18",
             headline: "Introducing the menu bar mode.",

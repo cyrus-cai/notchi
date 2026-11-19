@@ -1,4 +1,5 @@
 import AppKit
+import SwiftUI
 import AVFoundation
 import Foundation
 import IOKit.pwr_mgt
@@ -76,6 +77,16 @@ final class TelegramBridge: ObservableObject {
     private var questionOptions: [UUID: [String]] = [:]
     /// The model rows each /model message offers, by the id in its buttons.
     private var modelOptions: [UUID: [AskModelMRU.Entry]] = [:]
+    /// A bare `/note`, `/remind`, `/code`, `/loop`, `/issue`, or a text action
+    /// picked with nothing to run on: the chat's next message goes there, as a
+    /// mode picked in the `/` menu holds the next line in the notch.
+    private var pendingModes: [Int64: Mode] = [:]
+    /// What the buttons under a command's reply or an answer do, by the id in
+    /// their callback data.
+    private var choices: [UUID: Choice] = [:]
+    /// Agent tasks started from the chat, by "chat:message" of the messages
+    /// reporting them. A reply to one continues that task.
+    private var agentReports: [String: UUID] = [:]
     /// Messages collect here per chat until no new one has come for a short
     /// wait, then go out as one round: people split one request over several
     /// messages. An album arrives as one message per item, sharing a
@@ -274,8 +285,10 @@ final class TelegramBridge: ObservableObject {
     /// The command menu next to the message field. Sent on every start so a
     /// bot paired by an older version also gets new commands.
     private func registerCommands() async {
-        await call("setMyCommands", ["commands": [["command": "model", "description": L("telegram.command.model")],
-                                                  ["command": "stop", "description": L("telegram.command.stop")]]])
+        let commands = ["note", "remind", "code", "loop", "actions", "model", "stop", "issue"]
+        await call("setMyCommands", ["commands": commands.map {
+            ["command": $0, "description": L("telegram.command." + $0)]
+        }])
     }
 
     private func poll() {
@@ -491,6 +504,15 @@ final class TelegramBridge: ObservableObject {
             flushAlbum(chatID: chatID)
             return
         }
+        // The `/` menu's modes, text actions and `@issue`.
+        if let text, let (command, argument) = Self.command(in: text), Mode(command: command) != nil {
+            flushAlbum(chatID: chatID)
+            let messageID = (message["message_id"] as? NSNumber)?.intValue ?? 0
+            let quote = Self.quotedText(of: message)
+            Task { await runCommand(command, argument: argument, quote: quote,
+                                    chatID: chatID, messageID: messageID) }
+            return
+        }
         let isCommand = text?.hasPrefix("/") == true
         // Trial ended: no round can run, so say so now instead of waiting out
         // the burst window and a round that fails.
@@ -526,6 +548,32 @@ final class TelegramBridge: ObservableObject {
     }
 
     private func enqueue(_ messages: [[String: Any]], chatID: Int64) {
+        let firstText = messages.first?["text"] as? String
+        if firstText?.hasPrefix("/") == true {
+            pendingModes.removeValue(forKey: chatID)
+        } else if let mode = pendingModes.removeValue(forKey: chatID) {
+            let lane = "\(chatID)"
+            let previous = chains[lane]
+            chains[lane] = Task { [weak self] in
+                await previous?.value
+                await self?.runMode(mode, messages: messages, chatID: chatID)
+            }
+            return
+        }
+        // A reply to an agent report continues that task.
+        if let replied = (messages.first?["reply_to_message"] as? [String: Any])?["message_id"] as? NSNumber,
+           let taskID = agentReports["\(chatID):\(replied.intValue)"],
+           AgentTaskManager.shared.tasks.contains(where: { $0.id == taskID }) {
+            let text = messages
+                .compactMap { (($0["text"] ?? $0["caption"]) as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+                .joined(separator: "\n")
+            if !text.isEmpty {
+                let messageID = (messages.first?["message_id"] as? NSNumber)?.intValue ?? 0
+                Task { await continueAgent(taskID: taskID, prompt: text, chatID: chatID, replyTo: messageID) }
+                return
+            }
+        }
         if steer(messages, chatID: chatID) { return }
         let lane = lane(for: messages, chatID: chatID)
         let previous = chains[lane]
@@ -585,14 +633,24 @@ final class TelegramBridge: ObservableObject {
 
     private func stop(chatID: Int64) async {
         let id = thread(for: chatID)
-        let stopped = id.map { model?.stopTelegramRound(threadID: $0) ?? false } ?? false
+        var stopped = id.map { model?.stopTelegramRound(threadID: $0) ?? false } ?? false
         if stopped, let id { stoppedThreads.insert(id) }
+        // Else the newest agent task started from this chat.
+        if !stopped {
+            let started = Set(agentReports.filter { $0.key.hasPrefix("\(chatID):") }.values)
+            if let task = AgentTaskManager.shared.tasks.last(where: { started.contains($0.id) && $0.isRunning }) {
+                stopped = AgentTaskManager.shared.cancel(taskID: task.id)
+            }
+        }
         await call("sendMessage", ["chat_id": chatID,
                                    "text": L(stopped ? "telegram.stopped" : "telegram.nothingToStop")])
     }
 
-    /// `messages` is one message, or the items of one album in order.
-    private func answer(_ messages: [[String: Any]], chatID: Int64) async {
+    /// `messages` is one message, or the items of one album in order. With a
+    /// text action, what they carry is the text the action runs on, in a
+    /// thread of its own, as in the notch.
+    private func answer(_ messages: [[String: Any]], chatID: Int64,
+                        action: PromptShortcut? = nil) async {
         guard let model, let message = messages.first else { return }
         let awake = Awake(.answering)
         defer { withExtendedLifetime(awake) {} }
@@ -643,6 +701,9 @@ final class TelegramBridge: ObservableObject {
         if let quoted = Self.quotedText(of: message) {
             question = NotchModel.replyEnvelope(line: question, quote: quoted)
         }
+        if let action {
+            question = Self.actionQuestion(action, input: question)
+        }
 
         // A reply to one of the bot's messages continues that message's thread.
         var threadID = thread(for: chatID)
@@ -652,6 +713,7 @@ final class TelegramBridge: ObservableObject {
         }
         // A thread deleted from Recent starts over.
         if let id = threadID, !model.history.contains(where: { $0.id == id }) { threadID = nil }
+        if action != nil { threadID = nil }
         // Another lane can still be answering this thread.
         while let id = threadID, model.liveThread(id) != nil {
             try? await Task.sleep(nanoseconds: 500_000_000)
@@ -659,7 +721,8 @@ final class TelegramBridge: ObservableObject {
         let seedIDs = Set(threadID.flatMap { id in model.history.first { $0.id == id }?.conversation.map(\.id) } ?? [])
 
         await call("sendChatAction", ["chat_id": chatID, "action": "typing"])
-        guard let landed = model.runTelegramRound(threadID: threadID, question: question, images: images) else {
+        guard let landed = model.runTelegramRound(threadID: threadID, question: question, images: images,
+                                                  pin: action?.pin) else {
             await call("sendMessage", ["chat_id": chatID, "text": L(LicenseLock.isLocked ? "service.error.licenseRequired" : "telegram.failed"),
                                        "reply_to_message_id": messageID])
             return
@@ -763,13 +826,22 @@ final class TelegramBridge: ObservableObject {
     /// Follows the round once a second (Telegram's edit rate for one chat) and
     /// mirrors the answer into one message, then writes the final text with
     /// formatting. Pending questions go out as inline buttons.
-    private func stream(thread: UUID, seedIDs: Set<UUID>, chatID: Int64, replyTo: Int) async {
+    private func stream(thread: UUID, seedIDs: Set<UUID>, chatID: Int64, replyTo firstReplyTo: Int) async {
         guard let model else { return }
+        var replyTo = firstReplyTo
         var sentID: Int?
         var lastShown = ""
         var sawLive = false
         var askedQuestions: Set<UUID> = []
+        var lastActivity = ""
         var ticks = 0
+        // A follow-up the round read mid-answer: the text before it stays in
+        // the message above it, the text after it goes into a new message
+        // replying to it. `base` is where the current message's text starts
+        // in the answer.
+        var base = 0
+        var handledTags: Set<Int> = []
+        var firstSegment = true
         while true {
             try? await Task.sleep(nanoseconds: 1_000_000_000)
             ticks += 1
@@ -788,8 +860,44 @@ final class TelegramBridge: ObservableObject {
                 askedQuestions.insert(question.id)
                 await ask(question, chatID: chatID)
             }
-            let shown = Self.plain(answer.text)
-            if shown.isEmpty {
+            let unread = model.unreadSteerTags(threadID: thread)
+            let read = Set(steered[thread]?.keys.map { $0 } ?? []).subtracting(unread).subtracting(handledTags)
+            if let newest = read.max() {
+                handledTags.formUnion(read)
+                let raw = answer.text
+                let segment = String(raw.dropFirst(min(base, raw.count)))
+                if Self.plain(segment).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    // Only a status line so far: drop it, the answer starts below the follow-up.
+                    if let sentID { await call("deleteMessage", ["chat_id": chatID, "message_id": sentID]) }
+                } else {
+                    let head = firstSegment ? Self.head(of: answer) : ("", "")
+                    _ = await deliver(body: Self.withoutVisualBlocks(segment).trimmingCharacters(in: .whitespacesAndNewlines),
+                                      head: head, tail: "", sentID: sentID,
+                                      replyTo: replyTo, chatID: chatID, thread: thread)
+                    firstSegment = false
+                }
+                base = raw.count
+                sentID = nil
+                lastShown = ""
+                lastActivity = ""
+                replyTo = newest
+                continue
+            }
+            let shown = Self.plain(String(answer.text.dropFirst(min(base, answer.text.count))))
+            if shown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                // The wait row's line, as the notch shows it over an empty answer.
+                let activity = (answer.toolActivity ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                if !activity.isEmpty, activity != lastActivity {
+                    lastActivity = activity
+                    if let sentID {
+                        await call("editMessageText", ["chat_id": chatID, "message_id": sentID, "text": activity])
+                    } else {
+                        let result = await call("sendMessage", ["chat_id": chatID, "text": activity,
+                                                                "reply_to_message_id": replyTo])
+                        sentID = Self.messageID(result)
+                        if let sentID { remember(messageID: sentID, chatID: chatID, thread: thread) }
+                    }
+                }
                 if ticks % 4 == 0 { await call("sendChatAction", ["chat_id": chatID, "action": "typing"]) }
                 continue
             }
@@ -806,14 +914,18 @@ final class TelegramBridge: ObservableObject {
             lastShown = shown
         }
 
-        let final = model.history.first(where: { $0.id == thread })?.conversation
-            .last(where: { $0.role == "assistant" && !seedIDs.contains($0.id) })?.text ?? ""
-        let (shownText, pictures) = Self.localImages(Self.withoutVisualBlocks(final))
+        let turn = model.history.first(where: { $0.id == thread })?.conversation
+            .last(where: { $0.role == "assistant" && !seedIDs.contains($0.id) })
+        let whole = turn?.text ?? ""
+        let final = String(whole.dropFirst(min(base, whole.count)))
+        let (withoutVisuals, charts) = Self.renderVisuals(final)
+        let (shownText, photos) = Self.localImages(withoutVisuals)
+        let pictures = photos + charts
         let body = shownText.trimmingCharacters(in: .whitespacesAndNewlines)
         defer {
             // After the text, so the picture lands under the line asking about it.
             if !pictures.isEmpty {
-                Task { [weak self] in
+                Task { [weak self, replyTo] in
                     for picture in pictures {
                         let result = await self?.sendPhoto(picture, chatID: chatID,
                                                            replyTo: body.isEmpty ? replyTo : nil)
@@ -821,12 +933,18 @@ final class TelegramBridge: ObservableObject {
                             self.remember(messageID: id, chatID: chatID, thread: thread)
                         }
                     }
+                    for chart in charts { try? FileManager.default.removeItem(at: chart) }
                 }
             }
         }
         let wasStopped = stoppedThreads.remove(thread) != nil
         guard !body.isEmpty || !pictures.isEmpty else {
             if wasStopped { return }
+            // The answer before a follow-up already went out; nothing came after it.
+            if !firstSegment {
+                if let sentID { await call("deleteMessage", ["chat_id": chatID, "message_id": sentID]) }
+                return
+            }
             if let sentID {
                 await call("editMessageText", ["chat_id": chatID, "message_id": sentID, "text": L(LicenseLock.isLocked ? "service.error.licenseRequired" : "telegram.failed")])
             } else {
@@ -834,15 +952,47 @@ final class TelegramBridge: ObservableObject {
             }
             return
         }
+        let head = firstSegment && turn != nil ? Self.head(of: turn!) : ("", "")
+        let tail = Self.sourcesHTML(turn?.sources ?? [])
+        let lastID = await deliver(body: body, head: head, tail: tail, sentID: sentID,
+                                   replyTo: replyTo, chatID: chatID, thread: thread)
+        if let turn, let lastID, !wasStopped {
+            offerButtons(after: turn, thread: thread, chatID: chatID, messageID: lastID)
+        }
+    }
+
+    /// The lines the notch shows above an answer: what it filed (HTML, plain).
+    private static func head(of turn: NotchModel.Turn) -> (String, String) {
+        let filed = uniqued(turn.captures.map(captureLabel))
+        return (filed.map { "<i>" + TelegramFormat.escape($0) + "</i>" }.joined(separator: "\n"),
+                filed.joined(separator: "\n"))
+    }
+
+    /// Sends `body` formatted, editing `sentID` into its first part when there
+    /// is one. `tail` (the pages read) goes under the last part. Returns the
+    /// last message's id.
+    private func deliver(body: String, head: (String, String), tail: String, sentID: Int?,
+                         replyTo: Int, chatID: Int64, thread: UUID) async -> Int? {
         let parts = body.isEmpty ? [] : Self.split(body)
+        var lastID = sentID
+        var tailSent = tail.isEmpty
         for (index, part) in parts.enumerated() {
-            let html = TelegramFormat.html(part)
+            var html = TelegramFormat.html(part)
+            var plainPart = part
+            if index == 0, !head.0.isEmpty {
+                html = head.0 + "\n\n" + html
+                plainPart = head.1 + "\n\n" + plainPart
+            }
+            if index == parts.count - 1, !tail.isEmpty, html.count + tail.count + 2 <= 4096 {
+                html += "\n\n" + tail
+                tailSent = true
+            }
             if index == 0, let sentID {
                 let result = await call("editMessageText", ["chat_id": chatID, "message_id": sentID,
                                                             "text": html, "parse_mode": "HTML",
                                                             "disable_web_page_preview": true])
                 if result["ok"] as? Bool != true {
-                    await call("editMessageText", ["chat_id": chatID, "message_id": sentID, "text": part])
+                    await call("editMessageText", ["chat_id": chatID, "message_id": sentID, "text": plainPart])
                 }
                 continue
             }
@@ -851,10 +1001,21 @@ final class TelegramBridge: ObservableObject {
             if index == 0 { params["reply_to_message_id"] = replyTo }
             var result = await call("sendMessage", params)
             if result["ok"] as? Bool != true {
-                result = await call("sendMessage", ["chat_id": chatID, "text": part])
+                result = await call("sendMessage", ["chat_id": chatID, "text": plainPart])
             }
+            if let id = Self.messageID(result) {
+                remember(messageID: id, chatID: chatID, thread: thread)
+                lastID = id
+            }
+        }
+        // Sources that did not fit under the last part go out on their own.
+        if !tailSent {
+            let result = await call("sendMessage", ["chat_id": chatID, "text": tail, "parse_mode": "HTML",
+                                                    "disable_web_page_preview": true,
+                                                    "disable_notification": true])
             if let id = Self.messageID(result) { remember(messageID: id, chatID: chatID, thread: thread) }
         }
+        return lastID
     }
 
     /// A round asked in Notchi itself (the panel, a window, a loop), sent to
@@ -862,7 +1023,9 @@ final class TelegramBridge: ObservableObject {
     /// continues that thread, and replying to the message does too.
     func mirror(threadID: UUID, question: String, answer: String) {
         guard case .connected = state, let owner else { return }
-        let (shownText, pictures) = Self.localImages(Self.withoutVisualBlocks(answer))
+        let (withoutVisuals, charts) = Self.renderVisuals(answer)
+        let (shownText, photos) = Self.localImages(withoutVisuals)
+        let pictures = photos + charts
         let body = shownText.trimmingCharacters(in: .whitespacesAndNewlines)
         let asked = String(question.trimmingCharacters(in: .whitespacesAndNewlines).prefix(500))
         guard !body.isEmpty || !pictures.isEmpty else { return }
@@ -890,6 +1053,7 @@ final class TelegramBridge: ObservableObject {
                 let result = await self.sendPhoto(picture, chatID: owner, silent: true)
                 if let id = Self.messageID(result) { self.remember(messageID: id, chatID: owner, thread: threadID) }
             }
+            for chart in charts { try? FileManager.default.removeItem(at: chart) }
         }
     }
 
@@ -963,6 +1127,10 @@ final class TelegramBridge: ObservableObject {
         guard let data = callback["data"] as? String else { return }
         if data.hasPrefix("model|") {
             await chooseModel(data.split(separator: "|"), message: callback["message"] as? [String: Any])
+            return
+        }
+        if data.hasPrefix("pick|") {
+            await choose(data.split(separator: "|"), message: callback["message"] as? [String: Any])
             return
         }
         let parts = data.split(separator: "|")
@@ -1444,5 +1612,499 @@ private final class Once: @unchecked Sendable {
         task = nil
         lock.unlock()
         if first { body() }
+    }
+}
+
+// MARK: - Commands
+
+/// The notch's `/` menu in the chat: `/note`, `/remind`, `/code` and `/loop`
+/// are its modes, `/actions` its text actions, `/issue` its `@issue`. Each
+/// takes the text after it, or the replied-to message; bare, it holds the
+/// chat's next message, as a picked mode holds the next line in the notch.
+extension TelegramBridge {
+    fileprivate enum Mode: Equatable {
+        case note, remind, code, loop, issue, actions
+        /// A text action picked with nothing to run on yet.
+        case action(UUID)
+
+        init?(command: String) {
+            switch command {
+            case "note", "notes", "capture": self = .note
+            case "remind", "reminder", "todo": self = .remind
+            case "code", "agent", "task": self = .code
+            case "loop", "repeat", "every": self = .loop
+            case "issue", "feedback", "bug": self = .issue
+            case "actions", "action", "shortcuts", "shortcut": self = .actions
+            default: return nil
+            }
+        }
+
+        /// The prompt's placeholder for the same mode in the notch.
+        var placeholderKey: String {
+            switch self {
+            case .note: return "note.placeholder"
+            case .remind: return "remind.placeholder"
+            case .code: return "agent.placeholder"
+            case .loop: return "loop.placeholder"
+            case .issue: return "issue.placeholder"
+            case .actions, .action: return "telegram.command.actions"
+            }
+        }
+    }
+
+    /// What one row of buttons does.
+    fileprivate enum Choice {
+        case folders(task: String, folders: [URL], replyTo: Int)
+        case intervals(prompt: String)
+        case actions(ids: [UUID], input: String?, replyTo: Int)
+        case followUp(question: String)
+        case resume(thread: UUID, turn: UUID)
+        case retry(thread: UUID)
+        case undo(NotchModel.Turn.Capture)
+    }
+
+    /// `/word@bot rest` → ("word", "rest").
+    fileprivate static func command(in text: String) -> (String, String)? {
+        guard text.hasPrefix("/") else { return nil }
+        let end = text.firstIndex(where: { $0.isWhitespace || $0.isNewline }) ?? text.endIndex
+        var word = String(text[text.index(after: text.startIndex)..<end])
+        if let at = word.firstIndex(of: "@") { word = String(word[..<at]) }
+        let rest = String(text[end...]).trimmingCharacters(in: .whitespacesAndNewlines)
+        return (word.lowercased(), rest)
+    }
+
+    fileprivate func runCommand(_ command: String, argument: String, quote: String?,
+                                chatID: Int64, messageID: Int) async {
+        guard let mode = Mode(command: command) else { return }
+        let input = argument.isEmpty ? (quote ?? "") : argument
+        if mode == .actions {
+            await offerActions(input: input.isEmpty ? nil : input, chatID: chatID, replyTo: messageID)
+            return
+        }
+        guard !input.isEmpty else {
+            pendingModes[chatID] = mode
+            await call("sendMessage", ["chat_id": chatID, "text": L(mode.placeholderKey),
+                                       "reply_to_message_id": messageID])
+            return
+        }
+        await perform(mode, text: input, chatID: chatID, replyTo: messageID)
+    }
+
+    /// The message that followed a bare command.
+    fileprivate func runMode(_ mode: Mode, messages: [[String: Any]], chatID: Int64) async {
+        if case .action(let id) = mode {
+            if let action = PromptShortcutStore.current.first(where: { $0.id == id }) {
+                await answer(messages, chatID: chatID, action: action)
+            } else {
+                await answer(messages, chatID: chatID)
+            }
+            return
+        }
+        let text = messages
+            .compactMap { (($0["text"] ?? $0["caption"]) as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n")
+        let messageID = (messages.first?["message_id"] as? NSNumber)?.intValue ?? 0
+        guard !text.isEmpty else {
+            await call("sendMessage", ["chat_id": chatID, "text": L("telegram.unsupported"),
+                                       "reply_to_message_id": messageID])
+            return
+        }
+        await perform(mode, text: text, chatID: chatID, replyTo: messageID)
+    }
+
+    private func perform(_ mode: Mode, text: String, chatID: Int64, replyTo: Int) async {
+        guard let model else { return }
+        switch mode {
+        case .note, .remind:
+            await call("sendChatAction", ["chat_id": chatID, "action": "typing"])
+            let reply = await model.captureFromTelegram(text, reminder: mode == .remind)
+            await call("sendMessage", ["chat_id": chatID, "text": reply, "reply_to_message_id": replyTo])
+        case .issue:
+            await call("sendChatAction", ["chat_id": chatID, "action": "typing"])
+            let reply = await model.submitIssueFromTelegram(text)
+            await call("sendMessage", ["chat_id": chatID, "text": reply, "reply_to_message_id": replyTo])
+        case .code:
+            await startAgentFlow(task: text, chatID: chatID, replyTo: replyTo)
+        case .loop:
+            await offerIntervals(prompt: text, chatID: chatID, replyTo: replyTo)
+        case .actions:
+            await offerActions(input: text, chatID: chatID, replyTo: replyTo)
+        case .action:
+            break
+        }
+    }
+
+    // MARK: Buttons
+
+    private func keyboard(_ id: UUID, _ titles: [String]) -> [String: Any] {
+        ["inline_keyboard": titles.enumerated().map { index, title in
+            [["text": title, "callback_data": "pick|\(id.uuidString)|\(index)"]]
+        }]
+    }
+
+    private func clearButtons(chatID: Int64, messageID: Int) async {
+        await call("editMessageReplyMarkup", ["chat_id": chatID, "message_id": messageID,
+                                              "reply_markup": ["inline_keyboard": []]])
+    }
+
+    fileprivate func choose(_ parts: [Substring], message: [String: Any]?) async {
+        guard parts.count == 3, let id = UUID(uuidString: String(parts[1])),
+              let index = Int(parts[2]), let choice = choices[id],
+              let message,
+              let chatID = ((message["chat"] as? [String: Any])?["id"] as? NSNumber)?.int64Value,
+              let messageID = (message["message_id"] as? NSNumber)?.intValue else { return }
+        switch choice {
+        case .folders(let task, let folders, let replyTo):
+            guard folders.indices.contains(index) else { return }
+            choices[id] = nil
+            await startAgent(task: task, folder: folders[index], chatID: chatID,
+                             replyTo: replyTo, statusID: messageID)
+        case .intervals(let prompt):
+            guard LoopInterval.presets.indices.contains(index) else { return }
+            choices[id] = nil
+            let minutes = LoopInterval.presets[index]
+            await call("editMessageText", ["chat_id": chatID, "message_id": messageID,
+                                           "text": L("loop.every", LoopInterval.short(minutes))])
+            model?.startTelegramLoop(prompt: prompt, minutes: minutes)
+        case .actions(let ids, let input, let replyTo):
+            guard ids.indices.contains(index),
+                  let action = PromptShortcutStore.current.first(where: { $0.id == ids[index] }) else { return }
+            choices[id] = nil
+            guard let input else {
+                pendingModes[chatID] = .action(action.id)
+                await call("editMessageText", ["chat_id": chatID, "message_id": messageID,
+                                               "text": L("telegram.action.armed", action.displayName)])
+                return
+            }
+            await call("editMessageText", ["chat_id": chatID, "message_id": messageID,
+                                           "text": action.displayName])
+            let lane = "\(chatID)"
+            let previous = chains[lane]
+            chains[lane] = Task { [weak self] in
+                await previous?.value
+                await self?.answer([["text": input, "message_id": replyTo]], chatID: chatID, action: action)
+            }
+        case .followUp(let question):
+            choices[id] = nil
+            await clearButtons(chatID: chatID, messageID: messageID)
+            // As if the user had replied to this answer with the question.
+            enqueue([["text": question, "message_id": messageID,
+                      "reply_to_message": ["message_id": messageID]]], chatID: chatID)
+        case .resume(let thread, let turn):
+            choices[id] = nil
+            await clearButtons(chatID: chatID, messageID: messageID)
+            let lane = "\(chatID)"
+            let previous = chains[lane]
+            chains[lane] = Task { [weak self] in
+                await previous?.value
+                guard let self, let model = self.model else { return }
+                let seed = Set(model.history.first { $0.id == thread }?.conversation.map(\.id) ?? [])
+                guard model.continueTelegramAnswer(threadID: thread, turnID: turn) != nil else { return }
+                let awake = Awake(.answering)
+                defer { withExtendedLifetime(awake) {} }
+                await self.stream(thread: thread, seedIDs: seed, chatID: chatID, replyTo: messageID)
+            }
+        case .retry(let thread):
+            choices[id] = nil
+            await clearButtons(chatID: chatID, messageID: messageID)
+            let lane = "\(chatID)"
+            let previous = chains[lane]
+            chains[lane] = Task { [weak self] in
+                await previous?.value
+                guard let self, let model = self.model,
+                      let (landed, seed) = model.retryTelegramRound(threadID: thread) else { return }
+                self.setThread(landed, chat: chatID)
+                let awake = Awake(.answering)
+                defer { withExtendedLifetime(awake) {} }
+                await self.call("sendChatAction", ["chat_id": chatID, "action": "typing"])
+                await self.stream(thread: landed, seedIDs: seed, chatID: chatID, replyTo: messageID)
+            }
+        case .undo(let capture):
+            choices[id] = nil
+            model?.undoTurnCapture(capture)
+            await clearButtons(chatID: chatID, messageID: messageID)
+        }
+    }
+
+    /// Under a settled answer: Continue on a cut-off one and Undo on a memory
+    /// change, as the notch shows them; then the suggested next question once
+    /// it is ready (`NotchModel.nextQuestions`), which the notch puts in the
+    /// follow-up field.
+    fileprivate func offerButtons(after turn: NotchModel.Turn, thread: UUID, chatID: Int64, messageID: Int) {
+        var rows: [(UUID, String)] = []
+        if turn.isError {
+            let id = UUID()
+            choices[id] = .retry(thread: thread)
+            rows.append((id, L("error.retry")))
+        }
+        if turn.interrupted {
+            let id = UUID()
+            choices[id] = .resume(thread: thread, turn: turn.id)
+            rows.append((id, L("result.continue")))
+        }
+        for capture in turn.captures where capture.kind == .memory {
+            let id = UUID()
+            choices[id] = .undo(capture)
+            rows.append((id, L("agent.process.undo")))
+        }
+        func markup(_ rows: [(UUID, String)]) -> [String: Any] {
+            ["inline_keyboard": rows.filter { choices[$0.0] != nil }.map { row in
+                [["text": row.1, "callback_data": "pick|\(row.0.uuidString)|0"]]
+            }]
+        }
+        Task { [weak self] in
+            guard let self else { return }
+            if !rows.isEmpty {
+                await self.call("editMessageReplyMarkup", ["chat_id": chatID, "message_id": messageID,
+                                                           "reply_markup": markup(rows)])
+            }
+            guard let model = self.model, model.suggestFollowUpEnabled,
+                  !turn.interrupted, !turn.isError else { return }
+            for _ in 0..<30 {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                // A newer round on the thread makes the suggestion stale.
+                if model.liveThread(thread) != nil { return }
+                guard let question = model.nextQuestions[turn.id] else { continue }
+                let id = UUID()
+                self.choices[id] = .followUp(question: question)
+                await self.call("editMessageReplyMarkup", ["chat_id": chatID, "message_id": messageID,
+                                                           "reply_markup": markup(rows + [(id, question)])])
+                return
+            }
+        }
+    }
+
+    private func offerIntervals(prompt: String, chatID: Int64, replyTo: Int) async {
+        let id = UUID()
+        choices[id] = .intervals(prompt: prompt)
+        await call("sendMessage", ["chat_id": chatID, "text": L("loop.chip.help"),
+                                   "reply_to_message_id": replyTo,
+                                   "reply_markup": keyboard(id, LoopInterval.presets.map {
+                                       L("loop.every", LoopInterval.short($0))
+                                   })])
+    }
+
+    private func offerActions(input: String?, chatID: Int64, replyTo: Int) async {
+        let actions = PromptShortcutStore.current.filter(\.isReady)
+        guard !actions.isEmpty else {
+            await call("sendMessage", ["chat_id": chatID, "text": L("telegram.actions.empty"),
+                                       "reply_to_message_id": replyTo])
+            return
+        }
+        let id = UUID()
+        choices[id] = .actions(ids: actions.map(\.id), input: input, replyTo: replyTo)
+        await call("sendMessage", ["chat_id": chatID, "text": L("shortcuts.promptAction"),
+                                   "reply_to_message_id": replyTo,
+                                   "reply_markup": keyboard(id, actions.map(\.displayName))])
+    }
+
+    /// A text action's request, built as the notch builds it for a line
+    /// typed under a `/`-picked action.
+    fileprivate static func actionQuestion(_ action: PromptShortcut, input: String) -> String {
+        """
+        \(action.prompt.trimmingCharacters(in: .whitespacesAndNewlines))
+
+        <selected_text>
+        \(input)
+        </selected_text>
+        """
+    }
+
+    // MARK: Agent
+
+    /// `/code`: the task runs on the agent the Agent pill has armed, in its
+    /// folder; with no folder set yet, the recent ones are offered.
+    private func startAgentFlow(task: String, chatID: Int64, replyTo: Int) async {
+        guard let model else { return }
+        guard model.telegramAgentArming != nil else {
+            await call("sendMessage", ["chat_id": chatID, "text": L("telegram.agent.none"),
+                                       "reply_to_message_id": replyTo])
+            return
+        }
+        if let folder = model.telegramArmedAgentFolder {
+            await startAgent(task: task, folder: folder, chatID: chatID, replyTo: replyTo, statusID: nil)
+            return
+        }
+        let folders = model.telegramAgentFolders
+        guard !folders.isEmpty else {
+            await call("sendMessage", ["chat_id": chatID, "text": L("telegram.agent.noFolder"),
+                                       "reply_to_message_id": replyTo])
+            return
+        }
+        let id = UUID()
+        choices[id] = .folders(task: task, folders: folders, replyTo: replyTo)
+        await call("sendMessage", ["chat_id": chatID, "text": L("agent.folder.choose"),
+                                   "reply_to_message_id": replyTo,
+                                   "reply_markup": keyboard(id, folders.map(\.lastPathComponent))])
+    }
+
+    private func startAgent(task: String, folder: URL, chatID: Int64, replyTo: Int, statusID: Int?) async {
+        guard let arming = model?.telegramAgentArming else { return }
+        AgentModelMRU.record(engine: arming.engine, model: arming.model)
+        AgentFolderMRU.record(folder)
+        guard let taskID = AgentTaskManager.shared.start(folder: folder, prompt: task, engine: arming.engine,
+                                                         model: arming.model, effort: arming.effort) else {
+            await call("sendMessage", ["chat_id": chatID, "text": L("telegram.failed"),
+                                       "reply_to_message_id": replyTo])
+            return
+        }
+        let header = L("telegram.agent.working", arming.engine.displayName, folder.lastPathComponent)
+        await followAgent(taskID: taskID, header: header, chatID: chatID, replyTo: replyTo, statusID: statusID)
+    }
+
+    /// A reply to an agent report: the next round of the same session.
+    fileprivate func continueAgent(taskID: UUID, prompt: String, chatID: Int64, replyTo: Int) async {
+        guard let task = AgentTaskManager.shared.tasks.first(where: { $0.id == taskID }) else { return }
+        AgentTaskManager.shared.followUp(taskID: taskID, prompt: prompt)
+        let header = L("telegram.agent.working", task.engine.displayName, task.folder.lastPathComponent)
+        await followAgent(taskID: taskID, header: header, chatID: chatID, replyTo: replyTo, statusID: nil)
+    }
+
+    /// One status message showing the run's latest activity line, as the
+    /// task card does, then the report as the answer.
+    private func followAgent(taskID: UUID, header: String, chatID: Int64, replyTo: Int, statusID: Int?) async {
+        let awake = Awake(.answering)
+        defer { withExtendedLifetime(awake) {} }
+        var status = statusID
+        if let status {
+            await call("editMessageText", ["chat_id": chatID, "message_id": status, "text": header])
+        } else {
+            status = Self.messageID(await call("sendMessage", ["chat_id": chatID, "text": header,
+                                                               "reply_to_message_id": replyTo]))
+        }
+        if let status { agentReports["\(chatID):\(status)"] = taskID }
+        var shown = ""
+        var ticks = 0
+        while true {
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+            ticks += 1
+            guard let task = AgentTaskManager.shared.tasks.first(where: { $0.id == taskID }),
+                  task.isRunning else { break }
+            let line = (task.activity ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            if ticks % 3 == 0, line != shown, let status {
+                shown = line
+                await call("editMessageText", ["chat_id": chatID, "message_id": status,
+                                               "text": line.isEmpty ? header : header + "\n" + line])
+            }
+            if ticks % 4 == 0 { await call("sendChatAction", ["chat_id": chatID, "action": "typing"]) }
+        }
+        if let status, !shown.isEmpty {
+            await call("editMessageText", ["chat_id": chatID, "message_id": status, "text": header])
+        }
+        let task = AgentTaskManager.shared.tasks.first(where: { $0.id == taskID })
+        let report: String
+        switch task?.outcome {
+        case .cancelled?:
+            return
+        case .success?:
+            report = task?.result ?? ""
+        case .failure?:
+            report = task?.failureReason ?? ""
+        case nil:
+            // Dismissed already: the record it left in Recent.
+            report = model?.history.first(where: { $0.id == taskID })?.conversation
+                .last(where: { $0.role == "assistant" })?.text ?? ""
+        }
+        let (withoutVisuals, charts) = Self.renderVisuals(report)
+        let (text, photos) = Self.localImages(withoutVisuals)
+        let body = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !body.isEmpty || !(photos + charts).isEmpty else {
+            await call("sendMessage", ["chat_id": chatID, "text": L("telegram.failed"),
+                                       "reply_to_message_id": status ?? replyTo])
+            return
+        }
+        for part in body.isEmpty ? [] : Self.split(body) {
+            var result = await call("sendMessage", ["chat_id": chatID, "text": TelegramFormat.html(part),
+                                                    "parse_mode": "HTML", "disable_web_page_preview": true,
+                                                    "reply_to_message_id": status ?? replyTo])
+            if result["ok"] as? Bool != true {
+                result = await call("sendMessage", ["chat_id": chatID, "text": part])
+            }
+            if let id = Self.messageID(result) { agentReports["\(chatID):\(id)"] = taskID }
+        }
+        for picture in photos + charts {
+            let result = await sendPhoto(picture, chatID: chatID)
+            if let id = Self.messageID(result) { agentReports["\(chatID):\(id)"] = taskID }
+        }
+        for chart in charts { try? FileManager.default.removeItem(at: chart) }
+    }
+
+    // MARK: Answer extras
+
+    fileprivate static func captureLabel(_ capture: NotchModel.Turn.Capture) -> String {
+        CaptureLineLink.label(for: capture.kind)
+    }
+
+    fileprivate static func uniqued(_ lines: [String]) -> [String] {
+        var seen = Set<String>()
+        return lines.filter { seen.insert($0).inserted }
+    }
+
+    /// The pages an answer read, one per site as the notch's reading list
+    /// shows them, folded under a heading.
+    fileprivate static func sourcesHTML(_ sources: [WebSource]) -> String {
+        var seen = Set<String>()
+        let rows = sources.filter { seen.insert($0.host).inserted }.prefix(10).map { source -> String in
+            let title = source.title.trimmingCharacters(in: .whitespacesAndNewlines)
+            return "<a href=\"\(TelegramFormat.escape(source.url))\">"
+                + TelegramFormat.escape(title.isEmpty ? source.host : title) + "</a>"
+        }
+        guard !rows.isEmpty else { return "" }
+        return "<blockquote expandable><b>" + TelegramFormat.escape(L("telegram.sources")) + "</b>\n"
+            + rows.joined(separator: "\n") + "</blockquote>"
+    }
+
+    /// Charts and cards (`VisualBlocks`) drawn as the notch draws them, as PNG
+    /// files to send as photos. A block that does not parse keeps the line
+    /// saying where to see it.
+    static func renderVisuals(_ text: String) -> (text: String, files: [URL]) {
+        var out: [String] = []
+        var files: [URL] = []
+        var language: String?
+        var body: [String] = []
+        for line in text.components(separatedBy: "\n") {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if language == nil, trimmed.hasPrefix("```") {
+                let tag = String(trimmed.dropFirst(3)).trimmingCharacters(in: .whitespaces).lowercased()
+                if VisualSpecParser.languages.contains(tag) {
+                    language = tag
+                    body = []
+                    continue
+                }
+            }
+            if let tag = language {
+                if trimmed == "```" {
+                    language = nil
+                    if let spec = VisualSpecParser.parse(body.joined(separator: "\n"), language: tag),
+                       let file = png(of: spec) {
+                        files.append(file)
+                    } else {
+                        out.append(L("telegram.visual"))
+                    }
+                } else {
+                    body.append(line)
+                }
+                continue
+            }
+            out.append(line)
+        }
+        return (out.joined(separator: "\n"), files)
+    }
+
+    private static func png(of spec: VisualSpec) -> URL? {
+        let view = VisualBlockView(spec: spec)
+            .frame(width: 340, alignment: .leading)
+            .padding(16)
+            .background(Color(nsColor: NSColor(white: 0.1, alpha: 1)))
+            .environment(\.colorScheme, .dark)
+        let renderer = ImageRenderer(content: view)
+        renderer.scale = 3
+        guard let cg = renderer.cgImage,
+              let data = NSBitmapImageRep(cgImage: cg).representation(using: .png, properties: [:]) else { return nil }
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("notchi-chart-\(UUID().uuidString).png")
+        guard (try? data.write(to: url)) != nil else { return nil }
+        return url
     }
 }

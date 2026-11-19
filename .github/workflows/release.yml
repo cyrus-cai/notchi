@@ -154,3 +154,38 @@ jobs:
 
             > The app is not notarized. The installer clears the quarantine flag for you;
             > if you install manually, run `xattr -dr com.apple.quarantine /Applications/Notchi.app`.
+
+  # Publish the `npx notchi` installer (npm/) to npm with the tag's version.
+  # Uses npm Trusted Publishing: GitHub's OIDC token authenticates the publish,
+  # so there is no NPM_TOKEN secret and no 2FA prompt. Requires the trusted
+  # publisher (cyrus-cai/notchi, workflow release.yml) to be set on npmjs.com.
+  npm:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write   # OIDC token for npm Trusted Publishing
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+
+      # Trusted Publishing needs npm CLI 11.5.1 or newer.
+      - name: Update npm
+        run: npm install -g npm@latest && npm --version
+
+      - name: Publish notchi to npm
+        working-directory: npm
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          if npm view "notchi@$v" version >/dev/null 2>&1; then
+            echo "notchi@$v is already on npm. Nothing to publish."
+            exit 0
+          fi
+          npm version "$v" --no-git-tag-version --allow-same-version
+          npm publish --access public

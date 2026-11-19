@@ -1205,7 +1205,8 @@ struct ManageLoopTool: NotchTool {
     A plain alert at a set time, with no work to do, is a reminder instead. \
     action=list returns the user's loops with \
     ids; stop, delete and set_interval take loop_id from list. delete removes a loop, \
-    stopped or not.
+    stopped or not. A thread can hold several loops; starting one never stops \
+    or replaces another.
     """
     let schema: [String: Any] = [
         "type": "object",

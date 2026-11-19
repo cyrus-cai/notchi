@@ -571,7 +571,7 @@ final class LinkCardStore {
 
     private var metadata: [String: LPLinkMetadata] = [:]
     private var inflight: [String: Task<LPLinkMetadata?, Never>] = [:]
-    private var drawing: [String: Task<NSImage?, Never>] = [:]
+    private var drawing: [String: Task<(image: NSImage?, complete: Bool), Never>] = [:]
 
     /// Longest side of the preview image a large card shows, as a multiple of
     /// its width. A portrait photo is cut to a square from near its top, where
@@ -617,8 +617,8 @@ final class LinkCardStore {
         let key = Self.key(url, title, large)
         if let hit = Self.stills.object(forKey: key) { return hit }
         if let at = failed[key as String], Date().timeIntervalSince(at) < Self.retryAfter { return nil }
-        if let running = drawing[key as String] { return await running.value }
-        let task = Task { () -> NSImage? in
+        if let running = drawing[key as String] { return await running.value.image }
+        let task = Task { () -> (image: NSImage?, complete: Bool) in
             let local = Self.mapsDetails(url)
             // Drawn while the page is read: reading a Maps link runs to the
             // provider's timeout.
@@ -643,14 +643,17 @@ final class LinkCardStore {
                 card.iconProvider = fetched?.iconProvider ?? fetched?.imageProvider
                     ?? local?.icon
             }
-            return await self.draw(card)
+            return (await self.draw(card), card.iconProvider != nil)
         }
         drawing[key as String] = task
-        let image = await task.value
+        let (image, complete) = await task.value
         drawing[key as String] = nil
         if let image {
             Self.stills.setObject(image, forKey: key)
-            saveStill(image, key: key)
+            // A card drawn without the page's icon (the page could not be
+            // read) is kept for this session only; the next launch reads the
+            // page again.
+            if complete { saveStill(image, key: key) } else { remember(size: image.size, key: key) }
         } else {
             failed[key as String] = Date()
             if let loading = Self.stills.object(forKey: Self.loadingKey(url, title)) {
@@ -667,8 +670,12 @@ final class LinkCardStore {
         // "Stills" held cards drawn before a card without a page title took
         // the name in its link's path; they showed the host alone.
         Self.diskQueue.async {
-            try? FileManager.default.removeItem(
-                at: Self.directory.appendingPathComponent("Stills", isDirectory: true))
+            // "Stills2" held cards drawn when the page could not be read
+            // (kimi.com showed its host and a compass).
+            for old in ["Stills", "Stills2"] {
+                try? FileManager.default.removeItem(
+                    at: Self.directory.appendingPathComponent(old, isDirectory: true))
+            }
         }
         guard let data = try? Data(contentsOf: Self.sizesURL),
               let pairs = try? JSONDecoder().decode([String: [CGFloat]].self, from: data)
@@ -679,7 +686,7 @@ final class LinkCardStore {
     private static let diskQueue = DispatchQueue(label: "LinkCardStore.disk", qos: .utility)
 
     private nonisolated static var stillsDirectory: URL {
-        directory.appendingPathComponent("Stills2", isDirectory: true)
+        directory.appendingPathComponent("Stills3", isDirectory: true)
     }
 
     private nonisolated static var sizesURL: URL {
@@ -950,7 +957,33 @@ final class LinkCardStore {
     /// timeout after its title, icon and image are already in; the provider
     /// then hands back that metadata together with the timeout error, which
     /// the `async` form throws away. Keep it when it has a title.
+    ///
+    /// When the provider comes back without an icon, the page's head is read
+    /// directly. `LPMetadataProvider` fails some redirects outright
+    /// (kimi.com → www.kimi.com: LPError 2), so it is tried once more at the
+    /// address the page ended up at; failing that, the card is built from the
+    /// head's title, preview image and icon links, then `/favicon.ico`.
     private static func fetch(_ url: URL) async -> LPLinkMetadata? {
+        let first = await provide(url)
+        if first?.iconProvider != nil { return first }
+        let head = await PageHead.read(url)
+        if let final = head?.url, final.absoluteString != url.absoluteString,
+           let second = await provide(final), second.iconProvider != nil {
+            second.originalURL = url
+            return second
+        }
+        let icon = await head?.icon()
+        guard first?.title != nil || head?.title != nil || icon != nil else { return first }
+        let card = LPLinkMetadata()
+        card.originalURL = url
+        card.url = first?.url ?? head?.url ?? url
+        card.title = first?.title ?? head?.title
+        card.iconProvider = icon.map { NSItemProvider(item: $0 as NSData, typeIdentifier: "public.png") }
+        card.imageProvider = first?.imageProvider ?? head?.imageProvider()
+        return card
+    }
+
+    private static func provide(_ url: URL) async -> LPLinkMetadata? {
         await withCheckedContinuation { done in
             let provider = LPMetadataProvider()
             provider.timeout = 10
@@ -1189,6 +1222,242 @@ final class LinkCardStore {
 }
 
 /// Resumes its continuation with the first value it is given.
+/// A page's `<head>`, read without `LPMetadataProvider`: where the page ended
+/// up after redirects, its title, its preview image and its icon links.
+struct PageHead: Sendable {
+    var url: URL
+    var title: String?
+    var image: URL?
+    /// Icon candidates, best first.
+    var icons: [URL]
+
+    private static let session: URLSession = {
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = 8
+        config.timeoutIntervalForResource = 10
+        config.httpAdditionalHeaders = [
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15",
+            "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
+            "Accept-Language": Locale.preferredLanguages.prefix(3).joined(separator: ","),
+        ]
+        return URLSession(configuration: config)
+    }()
+
+    /// Bytes read at most; the head is almost always within the first 100 KB.
+    private static let maxBytes = 512 * 1024
+
+    static func read(_ url: URL) async -> PageHead? {
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        guard let (bytes, response) = try? await session.bytes(for: request),
+              let http = response as? HTTPURLResponse
+        else { return nil }
+        let final = http.url ?? url
+        var data = Data()
+        data.reserveCapacity(64 * 1024)
+        let end = Data("</head>".utf8)
+        var checked = 0
+        do {
+            for try await byte in bytes {
+                data.append(byte)
+                if data.count >= maxBytes { break }
+                if data.count - checked >= 8 * 1024 {
+                    if data.range(of: end, in: max(0, checked - end.count)..<data.count) != nil { break }
+                    checked = data.count
+                }
+            }
+        } catch {
+            if data.isEmpty { return nil }
+        }
+        let html = decode(data, contentType: http.value(forHTTPHeaderField: "Content-Type"))
+        return parse(html, base: final)
+    }
+
+    private static func decode(_ data: Data, contentType: String?) -> String {
+        func charset(_ s: String) -> String? {
+            guard let r = s.range(of: #"charset\s*=\s*["']?([A-Za-z0-9_\-]+)"#,
+                                  options: [.regularExpression, .caseInsensitive])
+            else { return nil }
+            return String(s[r]).components(separatedBy: "=").last?
+                .trimmingCharacters(in: CharacterSet(charactersIn: "\"' "))
+        }
+        let sniff = String(decoding: data.prefix(4096), as: UTF8.self)
+        if let name = charset(contentType ?? "") ?? charset(sniff), name.lowercased() != "utf-8" {
+            let cf = CFStringConvertIANACharSetNameToEncoding(name as CFString)
+            if cf != kCFStringEncodingInvalidId,
+               let s = String(data: data, encoding: String.Encoding(
+                rawValue: CFStringConvertEncodingToNSStringEncoding(cf))) {
+                return s
+            }
+        }
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    static func parse(_ html: String, base: URL) -> PageHead {
+        let head: Substring = html.range(of: "</head>", options: .caseInsensitive)
+            .map { html[..<$0.lowerBound] } ?? Substring(html)
+        let text = String(head)
+
+        var metas: [String: String] = [:]
+        var links: [(rel: String, href: String, sizes: String?, type: String?)] = []
+        for tag in matches(#"<(meta|link)\b[^>]*>"#, in: text) {
+            let attrs = attributes(tag)
+            if tag.lowercased().hasPrefix("<meta") {
+                if let key = (attrs["property"] ?? attrs["name"])?.lowercased(),
+                   let content = attrs["content"], metas[key] == nil {
+                    metas[key] = content
+                }
+            } else if let rel = attrs["rel"]?.lowercased(), let href = attrs["href"] {
+                links.append((rel, href, attrs["sizes"], attrs["type"]))
+            }
+        }
+
+        var title = metas["og:title"] ?? metas["twitter:title"]
+        if title == nil, let r = text.range(of: #"<title[^>]*>[\s\S]*?</title>"#,
+                                           options: [.regularExpression, .caseInsensitive]) {
+            title = String(text[r])
+                .replacingOccurrences(of: #"<[^>]+>"#, with: "", options: .regularExpression)
+        }
+        title = title.map(entities)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if title?.isEmpty == true { title = nil }
+
+        let image = (metas["og:image"] ?? metas["og:image:url"] ?? metas["twitter:image"])
+            .flatMap { URL(string: entities($0), relativeTo: base)?.absoluteURL }
+
+        func side(_ sizes: String?) -> Int {
+            guard let sizes else { return 0 }
+            return sizes.split(separator: " ").compactMap {
+                $0.lowercased().split(separator: "x").first.flatMap { Int($0) }
+            }.max() ?? 0
+        }
+        let ranked = links
+            .filter { $0.rel.split(separator: " ").contains { $0.contains("icon") } }
+            .filter { $0.rel != "mask-icon" }
+            .map { link -> (URL?, Int) in
+                // apple-touch-icon is 180 px when it gives no size.
+                let touch = link.rel.contains("apple-touch-icon")
+                let size = max(side(link.sizes), touch ? 180 : 0)
+                return (URL(string: entities(link.href), relativeTo: base)?.absoluteURL, size)
+            }
+            .sorted { $0.1 > $1.1 }
+            .compactMap(\.0)
+        var icons: [URL] = []
+        let fallbacks = ["/apple-touch-icon.png", "/favicon.ico"]
+            .compactMap { URL(string: $0, relativeTo: base)?.absoluteURL }
+        for u in ranked + fallbacks where !icons.contains(u) { icons.append(u) }
+        return PageHead(url: base, title: title, image: image, icons: icons)
+    }
+
+    /// The first icon that loads and decodes, as a PNG at most 128 px a side.
+    func icon() async -> Data? {
+        for candidate in icons.prefix(5) {
+            guard let (data, response) = try? await Self.session.data(from: candidate),
+                  (response as? HTTPURLResponse).map({ (200..<300).contains($0.statusCode) }) ?? true,
+                  let png = Self.png(data, maxSide: 128)
+            else { continue }
+            return png
+        }
+        return nil
+    }
+
+    /// The preview image, loaded only when the card asks for it.
+    func imageProvider() -> NSItemProvider? {
+        guard let image else { return nil }
+        let provider = NSItemProvider()
+        provider.registerDataRepresentation(forTypeIdentifier: "public.png", visibility: .all) { done in
+            Task {
+                let data = try? await Self.session.data(from: image).0
+                done(data.flatMap { Self.png($0, maxSide: 1200) }, nil)
+            }
+            return nil
+        }
+        return provider
+    }
+
+    /// Any image NSImage reads (PNG, JPEG, ICO, WebP, SVG), redrawn as PNG.
+    static func png(_ data: Data, maxSide: CGFloat) -> Data? {
+        guard let image = NSImage(data: data) else { return nil }
+        var pixels = CGSize(width: image.representations.map(\.pixelsWide).max() ?? 0,
+                            height: image.representations.map(\.pixelsHigh).max() ?? 0)
+        // SVG and PDF reps report no pixels; draw them at the largest size.
+        if pixels.width <= 0 || pixels.height <= 0 {
+            guard image.size.width > 0, image.size.height > 0 else { return nil }
+            let scale = maxSide / max(image.size.width, image.size.height)
+            pixels = CGSize(width: image.size.width * scale, height: image.size.height * scale)
+        }
+        guard pixels.width >= 16, pixels.height >= 16 else { return nil }
+        let scale = min(1, maxSide / max(pixels.width, pixels.height))
+        let w = max(1, Int((pixels.width * scale).rounded()))
+        let h = max(1, Int((pixels.height * scale).rounded()))
+        guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: w, pixelsHigh: h,
+                                         bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
+                                         isPlanar: false, colorSpaceName: .deviceRGB,
+                                         bytesPerRow: 0, bitsPerPixel: 0),
+              let context = NSGraphicsContext(bitmapImageRep: rep)
+        else { return nil }
+        rep.size = CGSize(width: w, height: h)
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = context
+        context.imageInterpolation = .high
+        image.draw(in: NSRect(x: 0, y: 0, width: w, height: h))
+        NSGraphicsContext.restoreGraphicsState()
+        return rep.representation(using: .png, properties: [:])
+    }
+
+    private static func matches(_ pattern: String, in text: String) -> [String] {
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive])
+        else { return [] }
+        let ns = text as NSString
+        return regex.matches(in: text, range: NSRange(location: 0, length: ns.length))
+            .map { ns.substring(with: $0.range) }
+    }
+
+    private static let attributeRegex = try? NSRegularExpression(
+        pattern: #"([A-Za-z_:][-A-Za-z0-9_:.]*)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))"#)
+
+    private static func attributes(_ tag: String) -> [String: String] {
+        guard let regex = attributeRegex else { return [:] }
+        let ns = tag as NSString
+        var out: [String: String] = [:]
+        for m in regex.matches(in: tag, range: NSRange(location: 0, length: ns.length)) {
+            let name = ns.substring(with: m.range(at: 1)).lowercased()
+            for i in 2...4 where m.range(at: i).location != NSNotFound {
+                out[name] = ns.substring(with: m.range(at: i))
+                break
+            }
+        }
+        return out
+    }
+
+    private static func entities(_ s: String) -> String {
+        guard s.contains("&") else { return s }
+        var out = s
+        for (k, v) in [("&quot;", "\""), ("&#39;", "'"), ("&apos;", "'"), ("&lt;", "<"),
+                       ("&gt;", ">"), ("&nbsp;", " ")] {
+            out = out.replacingOccurrences(of: k, with: v)
+        }
+        if let regex = try? NSRegularExpression(pattern: #"&#(x?)([0-9A-Fa-f]+);"#) {
+            let ns = out as NSString
+            var result = ""
+            var last = 0
+            for m in regex.matches(in: out, range: NSRange(location: 0, length: ns.length)) {
+                result += ns.substring(with: NSRange(location: last, length: m.range.location - last))
+                let hex = ns.substring(with: m.range(at: 1)) == "x"
+                let digits = ns.substring(with: m.range(at: 2))
+                if let code = UInt32(digits, radix: hex ? 16 : 10), let scalar = Unicode.Scalar(code) {
+                    result.unicodeScalars.append(scalar)
+                } else {
+                    result += ns.substring(with: m.range)
+                }
+                last = m.range.location + m.range.length
+            }
+            result += ns.substring(from: last)
+            out = result
+        }
+        return out.replacingOccurrences(of: "&amp;", with: "&")
+    }
+}
+
 private final class ResumeOnce<T>: @unchecked Sendable {
     private let lock = NSLock()
     private var continuation: CheckedContinuation<T?, Never>?

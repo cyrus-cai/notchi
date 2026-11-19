@@ -139,13 +139,14 @@ extension View {
     /// Route this surface's link clicks through `LinkGate` and show its
     /// confirmation card here. `active` is false while the surface is not on
     /// screen (a closed island); a flagged link then asks in an alert.
-    func linkGateHost(active: Bool = true) -> some View {
-        modifier(LinkGateHost(active: active))
+    func linkGateHost(active: Bool = true, floating: Bool = false) -> some View {
+        modifier(LinkGateHost(active: active, floating: floating))
     }
 }
 
 private struct LinkGateHost: ViewModifier {
     var active: Bool
+    var floating: Bool
     @ObservedObject private var gate = LinkGate.shared
     @State private var window: ObjectIdentifier?
 
@@ -169,6 +170,7 @@ private struct LinkGateHost: ViewModifier {
                 if let pending = mine, active {
                     LinkWarningConfirm(
                         host: pending.url.host ?? pending.url.absoluteString,
+                        floating: floating,
                         onCancel: { gate.cancel() },
                         onConfirm: { gate.confirm() }
                     )

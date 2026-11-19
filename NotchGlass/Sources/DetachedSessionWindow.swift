@@ -164,7 +164,7 @@ final class DetachedThreadStore: ObservableObject {
 /// corner mask doesn't apply to transparent windows), but still key/main so
 /// the follow-up field and shortcuts work. `.resizable` in the mask keeps
 /// AppKit's edge-resize on a borderless window.
-private final class DetachedWindow: NSPanel {
+private final class DetachedWindow: NSPanel, SelectionQuoteTarget {
     var closesOnEscape = false
     /// The app's editable chords (⌘P pin, ⌘R regenerate — see
     /// `DetachedSessionWindowController.handleAppShortcut`). A detached window is
@@ -178,6 +178,10 @@ private final class DetachedWindow: NSPanel {
     /// Dismisses the topmost layer the controller has open over the window's
     /// content. Returns false when there is none.
     var onEscapeLayer: (() -> Bool)?
+    /// Where right-click → Quote on selected text goes; nil when the window
+    /// has no thread to reply into.
+    var quoteHandler: (() -> ((String) -> Void)?)?
+    var onQuoteSelection: ((String) -> Void)? { quoteHandler?() }
 
     override var canBecomeKey: Bool { true }
     /// A non-activating panel is never main, like the notch panel. A window that
@@ -1546,6 +1550,12 @@ final class DetachedSessionWindowController: NSObject, NSWindowDelegate {
         w.onEscapeLayer = { [weak self] in
             self?.dismissTopLayer() ?? false
         }
+        w.quoteHandler = { [weak self] in
+            guard let self, !self.compactShortcut, self.state.threadStore != nil else { return nil }
+            return { [weak self] text in
+                self?.state.quoteRequest = .init(text: text)
+            }
+        }
         w.onDoubleClickBareGlass = { [weak self] in
             guard let self, self.state.phase == .settled else { return }
             self.togglePin()
@@ -2338,6 +2348,12 @@ final class DetachedSessionWindowController: NSObject, NSWindowDelegate {
 @MainActor
 final class DetachedWindowState: ObservableObject {
     enum Phase { case riding, settled, merging }
+    /// Right-click → Quote on selected text in this window.
+    struct QuoteRequest: Equatable {
+        let id = UUID()
+        let text: String
+    }
+    @Published var quoteRequest: QuoteRequest?
     @Published var phase: Phase = .riding
     @Published var tilt: Double = 0
     @Published var pinned = true
@@ -2897,6 +2913,7 @@ struct DetachedSessionRootView: View {
                                onFollowUp: onFollowUp,
                                onChooseOption: onChooseOption,
                                compactShortcut: compactShortcut,
+                               quoteRequest: state.quoteRequest,
                                onDesiredHeight: liveHeight(from: state.session))
         }
     }
@@ -4189,14 +4206,20 @@ struct DetachedThreadView: View {
     var onFollowUp: (String, [NSImage]) -> Void
     var onChooseOption: (UUID, String) -> Void
     var compactShortcut = false
+    var quoteRequest: DetachedWindowState.QuoteRequest? = nil
     var onDesiredHeight: (CGFloat) -> Void = { _ in }
 
     @State private var followUp = ""
+    /// Files from the + chip, sent with the next follow-up.
+    @State private var followUpFiles: [NotchModel.DroppedFile] = []
+    @State private var attachMenuOpen = false
     @State private var followUpImages: [NSImage] = []
     /// The message this window's next follow-up replies to (right-click → Reply).
     @State private var replyTarget: (turnID: UUID, quote: String)?
     @State private var metadataMenuOpen = false
     @State private var intervalPickerOpen = false
+    /// The loop whose interval the picker changes.
+    @State private var intervalLoopID: UUID? = nil
     @ObservedObject private var chatLoops = ChatLoopManager.shared
     @ObservedObject private var agentManager = AgentTaskManager.shared
     /// The WHOLE thread's laid-out height, mirrored out of the content probe
@@ -4224,20 +4247,27 @@ struct DetachedThreadView: View {
     }
     private var hasAgentMetadata: Bool {
         agentRunCaption != nil || store.agentFolderPath != nil || store.completedAt != nil
-            || (threadLoopInfo != nil && loopStartedThread)
+            || (!threadLoops.isEmpty && loopStartedThread)
     }
     /// The loop started this thread. A loop running in a conversation keeps
     /// the conversation's own placeholder and has no ⌘ card here.
     private var loopStartedThread: Bool { store.turns.first?.loopRound != nil }
-    private var threadLoopInfo: LoopMenuInfo? {
+    private var threadLoops: [LoopMenuInfo] {
         let id = store.threadID
-        if let loop = agentManager.tasks.first(where: { $0.id == id })?.loop {
-            return LoopMenuInfo(intervalMinutes: loop.intervalMinutes, rounds: loop.rounds,
-                                nextRoundAt: loop.nextRoundAt, active: loop.active,
-                                endReason: loop.active ? nil : loop.endReason)
+        if let task = agentManager.tasks.first(where: { $0.id == id }), let loop = task.loop {
+            return [LoopMenuInfo(id: id, prompt: task.prompt,
+                                 intervalMinutes: loop.intervalMinutes, rounds: loop.rounds,
+                                 nextRoundAt: loop.nextRoundAt, active: loop.active,
+                                 endReason: loop.active ? nil : loop.endReason)]
         }
-        if let info = model?.dismissedAgentLoopInfo(id) { return info }
-        return chatLoops.menuInfo(for: id, turns: chatLoopTurns)
+        if let info = model?.dismissedAgentLoopInfo(id) { return [info] }
+        return chatLoops.menuInfo(forThread: id, turns: chatLoopTurns)
+    }
+    /// The running loop whose next round comes first.
+    private var headlineLoop: LoopMenuInfo? {
+        threadLoops.filter(\.active).min {
+            ($0.nextRoundAt ?? .distantFuture) < ($1.nextRoundAt ?? .distantFuture)
+        }
     }
     /// The thread's turns when it is an Ask thread — what a chat loop with no
     /// record is rebuilt from. Empty for an agent thread.
@@ -4246,7 +4276,7 @@ struct DetachedThreadView: View {
     }
     private var threadLoopActive: Bool {
         let id = store.threadID
-        return chatLoops.isActive(id)
+        return chatLoops.hasActiveLoop(onThread: id)
             || agentManager.tasks.contains { $0.id == id && $0.loopActive }
     }
     /// ONE rhythm for every detached thread — a pointer-side prompt-shortcut
@@ -4710,7 +4740,23 @@ struct DetachedThreadView: View {
                     }
                 }
             }
+            if !followUpFiles.isEmpty {
+                HStack(spacing: 6) {
+                    ForEach(Array(followUpFiles.enumerated()), id: \.offset) { index, file in
+                        SelectionContextChip(selection: file.text,
+                                             icon: file.isFolder ? "folder" : "doc.text",
+                                             label: file.name) {
+                            guard followUpFiles.indices.contains(index) else { return }
+                            withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
+                                _ = followUpFiles.remove(at: index)
+                            }
+                        }
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
             HStack(alignment: .bottom, spacing: 6) {
+                followUpAttachChip
                 ComposerBox(
                     text: $followUp,
                     glass: true,
@@ -4721,7 +4767,7 @@ struct DetachedThreadView: View {
                     onSubmit: sendFollowUp,
                     onPasteImage: pasteFollowUpImage,
                     placeholder: {
-                        if threadLoopActive, loopStartedThread, let next = threadLoopInfo?.nextRoundAt {
+                        if threadLoopActive, loopStartedThread, let next = headlineLoop?.nextRoundAt {
                             TimelineView(.periodic(from: .now, by: 1)) { context in
                                 Text(L("loop.waiting",
                                        LoopInterval.countdown(next.timeIntervalSince(context.date))))
@@ -4753,17 +4799,20 @@ struct DetachedThreadView: View {
                         onDismiss: { _ in
                             metadataMenuOpen = false
                             intervalPickerOpen = false
+                            intervalLoopID = nil
                         },
                         card: {
                             AnyView(Group {
                                 if intervalPickerOpen {
                                     LoopIntervalMenuCard(
-                                        selected: threadLoopInfo?.intervalMinutes
-                                            ?? LoopInterval.lastMinutes,
+                                        selected: threadLoops.first(where: { $0.id == intervalLoopID })?
+                                            .intervalMinutes ?? LoopInterval.lastMinutes,
                                         onSelect: { minutes in
-                                            chatLoops.setInterval(store.threadID, minutes: minutes)
-                                            agentManager.setLoopInterval(taskID: store.threadID,
-                                                                         minutes: minutes)
+                                            if let id = intervalLoopID {
+                                                chatLoops.setInterval(id, minutes: minutes)
+                                                agentManager.setLoopInterval(taskID: id,
+                                                                             minutes: minutes)
+                                            }
                                             metadataMenuOpen = false
                                             intervalPickerOpen = false
                                         },
@@ -4782,21 +4831,25 @@ struct DetachedThreadView: View {
                                                 NSWorkspace.shared.open(URL(fileURLWithPath: path))
                                             }
                                         },
-                                        loop: threadLoopInfo,
-                                        onStopLoop: {
+                                        loops: threadLoops,
+                                        onStopLoop: { loopID in
                                             metadataMenuOpen = false
-                                            chatLoops.stop(store.threadID)
-                                            agentManager.stopLoop(taskID: store.threadID)
-                                        },
-                                        onContinueLoop: {
-                                            metadataMenuOpen = false
-                                            if agentManager.tasks.first(where: { $0.id == store.threadID })?.loop != nil {
-                                                agentManager.resumeLoop(taskID: store.threadID)
-                                            } else if model?.reviveAgentLoop(store.threadID) != true {
-                                                chatLoops.resume(store.threadID, turns: chatLoopTurns)
+                                            chatLoops.stop(loopID)
+                                            if loopID == store.threadID {
+                                                agentManager.stopLoop(taskID: store.threadID)
                                             }
                                         },
-                                        onChangeInterval: {
+                                        onContinueLoop: { loopID in
+                                            metadataMenuOpen = false
+                                            let id = store.threadID
+                                            if agentManager.tasks.first(where: { $0.id == id })?.loop != nil {
+                                                agentManager.resumeLoop(taskID: id)
+                                            } else if !(loopID == id && model?.reviveAgentLoop(id) == true) {
+                                                chatLoops.resume(loopID, threadID: id, turns: chatLoopTurns)
+                                            }
+                                        },
+                                        onChangeInterval: { loopID in
+                                            intervalLoopID = loopID
                                             intervalPickerOpen = true
                                         })
                                         .manageMenuCardBackground()
@@ -4810,23 +4863,71 @@ struct DetachedThreadView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .animation(.spring(response: 0.3, dampingFraction: 0.78),
                    value: hasAgentMetadata)
+        .onChange(of: quoteRequest) { _, request in
+            if let request { quoteInReply(request.text) }
+        }
+    }
+
+    /// + left of the follow-up line: files or photos, or a folder, for the
+    /// next follow-up (the prompt's own + menu, on this window's line).
+    private var followUpAttachChip: some View {
+        AttachPlusChip(flat: false, action: { attachMenuOpen.toggle() },
+                       chipSize: Tokens.Control.rail)
+            .modifier(MenuCardWindow(
+                open: attachMenuOpen,
+                upperLeading: true,
+                onDismiss: { _ in attachMenuOpen = false },
+                card: {
+                    AnyView(AttachMenuCard(
+                        filesTitle: L("attach.files"),
+                        onFiles: { pickFollowUpAttachments(folder: false) },
+                        onFolder: { pickFollowUpAttachments(folder: true) })
+                        .menuCardBackground())
+                }))
+    }
+
+    private func pickFollowUpAttachments(folder: Bool) {
+        attachMenuOpen = false
+        model?.pickAttachments(folder: folder,
+                               takesImages: store.followUpSupportsImages) { images, files in
+            withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
+                let room = max(0, NotchModel.composeImageLimit - followUpImages.count)
+                followUpImages.append(contentsOf: images.prefix(room))
+                followUpFiles.append(contentsOf: files)
+            }
+        }
     }
 
     private func sendFollowUp() {
         var line = followUp.trimmingCharacters(in: .whitespacesAndNewlines)
         let images = followUpImages
+        let files = followUpFiles
         guard !streaming else { return }
         if line.isEmpty {
-            guard !images.isEmpty else { return }
-            line = NotchModel.agentImageOnlyPrompt(count: images.count)
+            guard !images.isEmpty || !files.isEmpty else { return }
+            if !images.isEmpty { line = NotchModel.agentImageOnlyPrompt(count: images.count) }
+        }
+        if !files.isEmpty {
+            line = NotchModel.fileEnvelope(line: line, files: files)
         }
         if let quote = replyTarget?.quote {
             line = NotchModel.replyEnvelope(line: line, quote: quote)
         }
         followUp = ""
         followUpImages = []
+        followUpFiles = []
         replyTarget = nil
         onFollowUp(line, images)
+    }
+
+    /// A reply quoting a piece of a message: selected text (right-click →
+    /// Quote) or a link card.
+    private func quoteInReply(_ quote: String) {
+        let quote = quote.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !quote.isEmpty, let last = store.turns.last else { return }
+        withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
+            replyTarget = (last.id, quote)
+        }
     }
 
     private func replyAction(for turn: NotchModel.Turn) -> (() -> Void)? {
@@ -4856,7 +4957,7 @@ struct DetachedThreadView: View {
 
     private var hasFollowUpInput: Bool {
         !followUp.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            || !followUpImages.isEmpty
+            || !followUpImages.isEmpty || !followUpFiles.isEmpty
     }
 
     private func pasteFollowUpImage() -> Bool {
@@ -4918,7 +5019,7 @@ struct DetachedThreadView: View {
                         .padding(.leading, 12)
                 }
                 UserQuestionBubble(text: turn.text, isAgent: turn.isAgent, reaction: turn.reaction,
-                                   fromTelegram: turn.fromTelegram, flat: compactShortcut)
+                                   fromTelegram: turn.fromTelegram, savedOnly: turn.savedOnly, flat: compactShortcut)
                     .contextMenu {
                         QuestionTurnMenu(onReply: replyAction(for: turn),
                                          onDelete: deleteAction(for: turn))
@@ -4946,6 +5047,7 @@ struct DetachedThreadView: View {
             showsFooterMetadata: !turn.isAgent,
             onInAppCopy: onInAppCopy,
             onReply: replyAction(for: turn),
+            onQuote: { quote in quoteInReply(quote) },
             onDelete: deleteAction(for: turn),
             regenModel: turn.regenModel,
             answerModel: turn.answerModel,

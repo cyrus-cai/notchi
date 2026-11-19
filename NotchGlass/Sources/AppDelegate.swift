@@ -16,6 +16,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var panels: [CGDirectDisplayID: NotchPanel] = [:]
     private let model = NotchModel(ai: AppDelegate.makeService())
     private var openObserver: AnyCancellable?
+    private var pageRepaintObserver: AnyCancellable?
     /// Watches the Force Touch pause so it can end itself when the window lapses.
     private var forceTouchPauseObserver: AnyCancellable?
     private var menuBarWorkObserver: AnyCancellable?
@@ -300,6 +301,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         _ = FrontAppTracker.shared
         // Register the message tones before the first send needs them.
         DispatchQueue.main.async { MessageTone.prepare() }
+        // Right-click → Quote on selected answer text in the notch and the
+        // menu bar card replies into the thread on screen.
+        SelectionQuote.fallback = { [weak model] in
+            guard let model, !model.turns.isEmpty else { return nil }
+            return { quote in
+                withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
+                    model.beginReply(quote: quote)
+                }
+            }
+        }
         // Single-instance guard — must run before anything else builds state.
         // Duplicate instances are real here: the relaunch in
         // `scripts/reinstall.sh` races LaunchServices (an `open` that reported
@@ -545,7 +556,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         CardToasts.shared.openThread = { [weak self] id in
             self?.openMenuBarCard { $0.openCardThread(id: id) }
         }
+        model.unfoldCardOnThread = { [weak self] id, live in
+            guard let self else { return false }
+            self.openWithoutKey = true
+            self.openMenuBarCard { live ? $0.openLoopThread(id: id) : $0.openCardThread(id: id) }
+            self.openWithoutKey = false
+            return self.model.open
+        }
         CardToasts.shared.cardBottom = { [weak self] in self?.model.cornerCardBottom() }
+        CardToasts.shared.sequenceMayContinue = { [weak self] in self?.model.open != true }
         model.onCardFlight = { [weak self] flying in
             guard let self else { return }
             if flying {
@@ -559,6 +578,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
         }
+        // macOS 26 draws `glassEffect` in the window server. When a page with
+        // glass leaves (Settings, History, What's New, a result, routines, an
+        // agent's detail), the server sometimes does not clear the area it
+        // covered, and its old pixels stay on the display until something else
+        // redraws there. A screenshot re-composites every window, so the residue
+        // never shows in one. Once the switch has settled, recomposite the
+        // whole panel.
+        // Any model change can swap a page, a header or a menu, including the
+        // card's own pages while it is pinned open, so the trigger is every
+        // change, once the model has been quiet for a moment.
+        pageRepaintObserver = model.objectWillChange
+            .debounce(for: .milliseconds(450), scheduler: DispatchQueue.main)
+            .sink { [weak self] _ in self?.recompositePanels() }
         openObserver = model.$open
             .combineLatest(model.$activeDisplay)
             .removeDuplicates(by: ==)
@@ -572,11 +604,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     CardToasts.shared.relayout()
                 }
                 if isOpen {
+                    // An open for a reply leaves the keyboard with the app
+                    // the user is in.
+                    let takesKey = !self.openWithoutKey
                     // Read the outside selection HERE, on the synchronous open
                     // edge — before the activation below makes Notchi's own
                     // prompt the focused element and the app that owned the
                     // selection stops being frontmost.
-                    self.carryInOutsideSelection()
+                    if takesKey { self.carryInOutsideSelection() }
                     // This fires synchronously inside the hover handler ($open
                     // publishes on willSet) — BEFORE SwiftUI commits the open
                     // animation's first frame. The key-window dance does
@@ -586,7 +621,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     // right after (still well ahead of NotchBody raising
                     // focus at +0.08s).
                     DispatchQueue.main.async {
-                        guard self.model.open else { return }
+                        guard self.model.open, takesKey else { return }
                         // Debug paths set `open` without claiming a display; fall
                         // back to the preferred screen's panel so they still key.
                         let target = active.flatMap { self.panels[$0] }
@@ -1044,6 +1079,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             ) { [weak self] _ in
                 Task { @MainActor in
                     self?.applyAppIconStyle()
+                    self?.menuBar?.apply()
                 }
             }
             appIconAppearanceObservation = NSApp.observe(
@@ -1579,6 +1615,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // takes it off screen (`ForceClickHerald.handOff()`). Here the cue
                 // has to let go itself, or it stays standing where the press was.
                 ForceClickHerald.shared.abort()
+                // With the menu bar icon installed, the composer opens in its
+                // card instead of the notch.
+                if self.menuBar?.statusItemFrame != nil {
+                    self.openMenuBarCard { model in
+                        model.openPromptShortcutComposer(
+                            selectedText: selectedText,
+                            on: model.activeDisplay,
+                            keepsThread: true)
+                    }
+                    return
+                }
                 withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
                     self.model.openPromptShortcutComposer(
                         selectedText: selectedText,
@@ -1897,6 +1944,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// Set while the card opens for a reply (`NotchModel.unfoldCardOnThread`).
+    private var openWithoutKey = false
+
     /// Open the card on the screen the mouse is on, then run `body` on the model.
     private func openMenuBarCard(_ body: (NotchModel) -> Void) {
         var target = displayForSummon()
@@ -2204,6 +2254,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return nil
     }
 
+    /// Make the window server redraw every visible panel in full. A change of
+    /// window alpha is applied to the whole window surface, so the server
+    /// recomposites all of it, including areas its own damage tracking missed.
+    /// The dip has to survive 8-bit quantization (0.99, not 0.999) and has to
+    /// reach the server as its own frame: restored in the same run loop pass,
+    /// the two changes merge into none.
+    private func recompositePanels() {
+        for panel in panels.values where panel.isVisible {
+            let alpha = panel.alphaValue
+            guard alpha > 0.5 else { continue }
+            let dipped = alpha - 0.01
+            panel.alphaValue = dipped
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak panel] in
+                guard let panel, abs(panel.alphaValue - dipped) < 0.0001 else { return }
+                panel.alphaValue = alpha
+            }
+        }
+    }
+
     /// Build the transparent canvas panel for one screen, injecting per-screen
     /// metrics so the SwiftUI tree knows which display it's on, how tall its
     /// resting notch is, and whether to draw the camera dot.
@@ -2376,7 +2445,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         var top = corner
             ? full.maxY - Self.menuBarHeight(of: screen) - Self.cornerInset
             : full.maxY
-        let anchor = corner ? statusItemAnchor(on: screen) : nil
+        let anchor = corner && MenuBarCardPlacement.current == .underIcon
+            ? statusItemAnchor(on: screen) : nil
         if let anchor {
             // Under the menu bar icon: the chat's column centred on it, kept
             // `cornerInset` inside the screen's sides. The card is pinned
@@ -2389,7 +2459,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             anchoredCorners.insert(id)
         } else if corner, id == NotchModel.menuBarCardDisplay, cardOffset == .zero {
             // The icon is not on screen (hidden by the system, or behind the
-            // notch with a full menu bar). The card still hangs right under
+            // notch with a full menu bar), or the user put the card on the
+            // right (`MenuBarCardPlacement.right`). The card still hangs right under
             // the menu bar at the right and unfolds down, the same as under
             // the icon, instead of flying in from the screen's edge.
             top = full.maxY - Self.menuBarHeight(of: screen)

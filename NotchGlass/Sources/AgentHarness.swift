@@ -670,12 +670,12 @@ enum AgentHarnessError: LocalizedError {
 struct AgentHarness {
     let service: AgentCapableService
     let registry: ToolRegistry
-    /// Hard ceiling on tool-call rounds. Most turns finish in 1–3; a task across
-    /// several apps or a shell job can take dozens. The cap is a runaway-loop
-    /// backstop, after which we force a final no-tools turn so the user still gets
-    /// a closing answer instead of a dangling tool request. Old results are cut
-    /// down as the run goes (`pruneOldResults`), so a long run stays affordable.
-    var maxIterations: Int = 40
+    /// Ceiling on tool-call rounds, after which a final no-tools turn is forced.
+    /// None by default: a coding task can take many rounds, and a round that
+    /// stopped at a cap left the work undone. The user stops a run by hand. Old
+    /// results are cut down as the run goes (`pruneOldResults`), so a long run
+    /// stays affordable.
+    var maxIterations: Int = .max
 
     /// Ceiling on *search* rounds specifically, hit well before `maxIterations`.
     ///

@@ -1,0 +1,30 @@
+{
+  "name": "notchi",
+  "version": "0.9.41",
+  "description": "Install Notchi, the macOS notch AI app, with one command: npx notchi",
+  "bin": {
+    "notchi": "bin/notchi.js"
+  },
+  "files": [
+    "bin"
+  ],
+  "os": [
+    "darwin"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "homepage": "https://notch.website",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cyrus-cai/notchi.git"
+  },
+  "license": "MIT",
+  "keywords": [
+    "notchi",
+    "macos",
+    "notch",
+    "ai",
+    "installer"
+  ]
+}

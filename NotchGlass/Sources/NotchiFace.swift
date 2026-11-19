@@ -8,8 +8,8 @@ import SwiftUI
 /// sense). With the panel open the panel's own content says what is happening,
 /// so there is no face.
 ///
-/// Redraws only on expression changes, gaze steps and blinks. Nothing runs
-/// per frame.
+/// Redraws only on expression changes, gaze steps and blinks; each of those
+/// is a SwiftUI animation, drawn at the display's refresh rate.
 struct NotchiFace: View {
     enum Expression: Equatable {
         /// Looking toward the offer in the right ear ("⌘C").
@@ -58,16 +58,21 @@ struct NotchiFace: View {
             await blinkLoop()
         case .think:
             // Fast saccade to a spot, hold, then the next: how eyes move, not a
-            // continuous drift.
-            let spots: [CGFloat] = [0.9, 1.1, 0.9, 0.7]
-            var i = 0
+            // continuous drift. Spots and holds are random, so no two runs of
+            // the loop match; each spot is at least a small step from the last.
+            var x: CGFloat = 0.9, y: CGFloat = -0.9
             async let blinking: Void = blinkLoop()
             while !Task.isCancelled {
-                set(NotchiMarkPose(lookX: spots[i % spots.count], lookY: -0.9),
+                set(NotchiMarkPose(lookX: x, lookY: y),
                     .spring(response: 0.16, dampingFraction: 0.95))
-                i += 1
-                try? await Task.sleep(for: .seconds(1.8))
+                try? await Task.sleep(for: .seconds(Double.random(in: 0.9...2.4)))
                 if reduceMotion { break }
+                var nx = x, ny = y
+                while hypot(nx - x, ny - y) < 0.25 {
+                    nx = .random(in: 0.5...1.25)
+                    ny = .random(in: -1.0 ... -0.5)
+                }
+                x = nx; y = ny
             }
             await blinking
         case .saved:

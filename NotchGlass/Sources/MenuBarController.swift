@@ -1,4 +1,5 @@
 import AppKit
+import QuartzCore
 import SwiftUI
 
 /// The menu bar item — the app's only always-visible affordance besides the
@@ -51,7 +52,10 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     /// The mood of the work running now, nil when idle. With the face style
     /// the eyes play it, the same forms the resting notch's NotchiMark plays.
     private var workMood: NotchiMark.Mood?
-    private var frameTimer: Timer?
+    /// Ticks at the display's refresh rate while the eyes move.
+    private var displayLink: CADisplayLink?
+    /// Carries the eyes from their last frame back to rest when the work ends.
+    private let outro = NotchiOutro()
     /// When the last left click landed, to tell a double-click from a single one.
     private var lastClickAt: TimeInterval?
 
@@ -93,28 +97,37 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     }
 
     private func updateAnimation() {
-        let animate = workMood != nil && statusItem != nil
+        let canAnimate = statusItem != nil
             && MenuBarIconStyle.current == .face
             && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-        if animate {
-            guard frameTimer == nil else { return }
-            let timer = Timer(timeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
-                MainActor.assumeIsolated { self?.drawFrame() }
-            }
+        if canAnimate && workMood != nil {
+            guard displayLink == nil, let button = statusItem?.button else { return }
+            let link = button.displayLink(target: self, selector: #selector(tick))
             // .common keeps it running while the menu is open.
-            RunLoop.main.add(timer, forMode: .common)
-            frameTimer = timer
-        } else if let timer = frameTimer {
-            timer.invalidate()
-            frameTimer = nil
-            statusItem?.button?.image = Self.statusIcon(MenuBarIconStyle.current)
+            link.add(to: .main, forMode: .common)
+            displayLink = link
+        } else if !canAnimate {
+            stopAnimation()
         }
+        // Work ended with the eyes moving: the link keeps running until the
+        // eyes have settled back to rest (`tick`).
     }
 
-    private func drawFrame() {
-        guard let mood = workMood else { return }
-        let blobs = NotchiDirector.work.blobs(at: Date.timeIntervalSinceReferenceDate, mood: mood)
+    private func stopAnimation() {
+        guard let link = displayLink else { return }
+        link.invalidate()
+        displayLink = nil
+        statusItem?.button?.image = Self.statusIcon(MenuBarIconStyle.current)
+    }
+
+    @objc private func tick() {
+        let t = Date.timeIntervalSinceReferenceDate
+        let mood = workMood
+        let blobs = outro.blobs(at: t, finale: mood == nil ? .rest : nil) {
+            NotchiDirector.work.blobs(at: t, mood: mood ?? .composing)
+        }
         statusItem?.button?.image = Self.faceIcon(blobs)
+        if mood == nil && outro.isSettled { stopAnimation() }
     }
 
     private func install() {
@@ -202,14 +215,8 @@ final class MenuBarController: NSObject, NSMenuDelegate {
             let c = CGPoint(x: rect.midX, y: rect.midY)
             for b in blobs.sorted(by: { $0.z < $1.z }) {
                 let w = CGFloat(b.w) * unit, h = CGFloat(b.h) * unit
-                guard w > 0.05, h > 0.05, b.alpha > 0.01 else { continue }
-                let cap = min(w, h) / 2
-                func r(_ v: Double) -> CGFloat { min(CGFloat(v) * unit, cap) }
-                let shape = UnevenRoundedRectangle(
-                    cornerRadii: .init(topLeading: r(b.tl), bottomLeading: r(b.bl),
-                                       bottomTrailing: r(b.br), topTrailing: r(b.tr)),
-                    style: .continuous
-                ).path(in: CGRect(x: -w / 2, y: -h / 2, width: w, height: h))
+                guard w > 0.05, h * CGFloat(b.squash) > 0.05, b.alpha > 0.01 else { continue }
+                let shape = b.path(unit: unit)
                 let move = CGAffineTransform(translationX: c.x + CGFloat(b.x) * unit,
                                              y: c.y + CGFloat(b.y) * unit)
                     .rotated(by: CGFloat(b.rot))
@@ -434,25 +441,37 @@ enum MenuBarIconVisibility: String, CaseIterable, Identifiable {
     }
 }
 
-/// What the menu bar icon draws: the app icon's mark, or the face's two eyes.
-enum MenuBarIconStyle: String, CaseIterable, Identifiable {
+/// What the menu bar icon draws. It follows the app icon (`AppIconStyle`):
+/// the face's two eyes for Eyes, the mark for the others.
+enum MenuBarIconStyle {
     case mark
     case face
+
+    static var current: MenuBarIconStyle {
+        AppIconStyle.current == .eyes ? .face : .mark
+    }
+}
+
+/// Where the menu bar card opens: centred under the menu bar icon, or against
+/// the screen's right edge.
+enum MenuBarCardPlacement: String, CaseIterable, Identifiable {
+    case underIcon
+    case right
 
     var id: String { rawValue }
 
     var label: String {
         switch self {
-        case .mark: return L("menuBarIcon.style.mark")
-        case .face: return L("menuBarIcon.style.face")
+        case .underIcon: return L("menuBarCard.underIcon")
+        case .right:     return L("menuBarCard.right")
         }
     }
 
-    private static let key = "menuBarIconStyle"
-    static var current: MenuBarIconStyle {
+    private static let key = "menuBarCardPlacement"
+    static var current: MenuBarCardPlacement {
         get {
             UserDefaults.standard.string(forKey: key)
-                .flatMap(MenuBarIconStyle.init) ?? .face
+                .flatMap(MenuBarCardPlacement.init) ?? .underIcon
         }
         set {
             UserDefaults.standard.set(newValue.rawValue, forKey: key)

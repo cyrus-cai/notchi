@@ -444,13 +444,16 @@ extension View {
     /// clear of — on the panel, the island's black hardware zone, which sits under
     /// the physical notch and would eat the top of the image. The backdrop still
     /// covers it; only the picture steps down.
-    func imageLightboxHost(topInset: CGFloat = 0) -> some View {
-        modifier(ImageLightboxHost(topInset: topInset))
+    /// `floating`: the top-right card, which has no panel; the backdrop gets
+    /// the card's corner radius instead of a square grey box over the screen.
+    func imageLightboxHost(topInset: CGFloat = 0, floating: Bool = false) -> some View {
+        modifier(ImageLightboxHost(topInset: topInset, floating: floating))
     }
 }
 
 private struct ImageLightboxHost: ViewModifier {
     let topInset: CGFloat
+    let floating: Bool
 
     @ObservedObject private var center = ImageLightboxCenter.shared
     @State private var id = UUID()
@@ -460,7 +463,7 @@ private struct ImageLightboxHost: ViewModifier {
             .environment(\.imageLightboxHostID, id)
             .overlay {
                 if let item = center.item, item.host == id {
-                    ImageLightbox(item: item, topInset: topInset)
+                    ImageLightbox(item: item, topInset: topInset, floating: floating)
                         .transition(.opacity)
                 }
             }
@@ -477,6 +480,7 @@ private struct ImageLightbox: View {
     let item: ImageLightboxCenter.Item
     /// Headroom the picture keeps clear — the notch's black zone on the panel.
     var topInset: CGFloat = 0
+    var floating: Bool = false
 
     /// Interaction Kit's drag numbers.
     private static let constraint: CGFloat = 90
@@ -572,9 +576,12 @@ private struct ImageLightbox: View {
 
     var body: some View {
         ZStack {
-            Rectangle()
+            RoundedRectangle(cornerRadius: floating ? Tokens.Radius.shell : 0,
+                             style: .continuous)
                 .fill(.ultraThinMaterial)
-                .overlay(Color.black.opacity(0.4))
+                .overlay(Color.black.opacity(floating ? 0.55 : 0.4))
+                .clipShape(RoundedRectangle(cornerRadius: floating ? Tokens.Radius.shell : 0,
+                                            style: .continuous))
                 .contentShape(Rectangle())
                 .onTapGesture { ImageLightboxCenter.shared.dismiss() }
                 .exemptsDoubleClickPin()

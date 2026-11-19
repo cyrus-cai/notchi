@@ -876,6 +876,8 @@ struct HistorySearchField: NSViewRepresentable {
     /// When this flips true the field grabs first-responder once, so the filter
     /// icon can deposit the caret straight into the expanded field.
     var focusTrigger: Bool = false
+    /// Return in the field. Nil leaves Return to the field.
+    var onSubmit: (() -> Void)? = nil
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -967,6 +969,14 @@ struct HistorySearchField: NSViewRepresentable {
             guard let field = note.object as? NSTextField else { return }
             parent.text = field.stringValue
             syncCompositionLevel(field)
+        }
+
+        func control(_ control: NSControl, textView: NSTextView,
+                     doCommandBy commandSelector: Selector) -> Bool {
+            guard commandSelector == #selector(NSResponder.insertNewline(_:)),
+                  !textView.hasMarkedText(), let submit = parent.onSubmit else { return false }
+            submit()
+            return true
         }
 
         func controlTextDidBeginEditing(_ note: Notification) {
@@ -2067,8 +2077,11 @@ struct CaptureLineLink: View {
     let action: (() -> Void)?
     @State private var hovering = false
 
-    private var label: String {
-        switch capture.kind {
+    private var label: String { Self.label(for: capture.kind) }
+
+    /// The line's words, also sent above an answer in Telegram.
+    static func label(for kind: CaptureRequest.Kind) -> String {
+        switch kind {
         case .note:     return L("agent.process.savedNote")
         case .reminder: return L("agent.process.createdReminder")
         case .event:    return L("agent.process.addedEvent")
@@ -2382,6 +2395,10 @@ struct ConfirmationDialogOverlay<Content: View>: View {
     /// Off for the destructive confirmations — a card asking whether to throw work
     /// away should not be the prettiest thing on screen.
     var edgeGlow: Bool = false
+    /// Over the top-right card, which has no panel of its own: no scrim (it
+    /// would be a grey box over the user's screen) and a denser slab, since
+    /// light chat bubbles behind it would show through the glass.
+    var floating: Bool = false
     let content: Content
     /// Lighter in the Settings window, where the dim covers the whole window
     /// rather than the notch panel (`SettingsMetrics.scrimOpacity`).
@@ -2391,17 +2408,19 @@ struct ConfirmationDialogOverlay<Content: View>: View {
          outerPadding: CGFloat = 24,
          cornerRadius: CGFloat = Tokens.Radius.modal,
          edgeGlow: Bool = false,
+         floating: Bool = false,
          @ViewBuilder content: () -> Content) {
         self.onDismiss = onDismiss
         self.outerPadding = outerPadding
         self.cornerRadius = cornerRadius
         self.edgeGlow = edgeGlow
+        self.floating = floating
         self.content = content()
     }
 
     var body: some View {
         ZStack {
-            Color.black.opacity(settingsMetrics.scrimOpacity)
+            Color.black.opacity(floating ? 0.001 : settingsMetrics.scrimOpacity)
                 .contentShape(Rectangle())
                 .onTapGesture(perform: onDismiss)
                 .exemptsDoubleClickPin()
@@ -2411,8 +2430,10 @@ struct ConfirmationDialogOverlay<Content: View>: View {
                 .environment(\.colorScheme, .dark)
                 .background {
                     ConfirmationDialogGlass(cornerRadius: cornerRadius,
-                                            edgeGlow: edgeGlow)
+                                            edgeGlow: edgeGlow,
+                                            dense: floating)
                 }
+                .shadow(color: .black.opacity(floating ? 0.28 : 0), radius: 18, y: 6)
                 .padding(outerPadding)
         }
     }
@@ -2421,13 +2442,14 @@ struct ConfirmationDialogOverlay<Content: View>: View {
 private struct ConfirmationDialogGlass: View {
     var cornerRadius: CGFloat = Tokens.Radius.modal
     var edgeGlow: Bool = false
+    var dense: Bool = false
 
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
         ZStack {
             shape.fill(.clear)
                 .nativeGlass(in: shape)
-                .overlay(shape.fill(Color.black.opacity(0.16)))
+                .overlay(shape.fill(Color.black.opacity(dense ? 0.72 : 0.16)))
             shape
                 .fill(LinearGradient(colors: [.white.opacity(0.12), .clear],
                                      startPoint: .top, endPoint: .center))
@@ -2587,11 +2609,13 @@ struct ForceTouchDisableConfirm: View {
 struct LinkWarningConfirm: View {
     /// The host of the flagged link, shown in the body.
     var host: String
+    /// Shown over the top-right card (see `ConfirmationDialogOverlay.floating`).
+    var floating: Bool = false
     var onCancel: () -> Void
     var onConfirm: () -> Void
 
     var body: some View {
-        ConfirmationDialogOverlay(onDismiss: onCancel) {
+        ConfirmationDialogOverlay(onDismiss: onCancel, floating: floating) {
             VStack(spacing: 14) {
                 VStack(spacing: 6) {
                     Text(L("linkCheck.warn.title"))
@@ -3207,6 +3231,7 @@ private struct ReadingSourceList: View {
 /// momentarily empty (the "空白帧" between questions).
 struct AssistantTurnView: View {
     @Environment(\.cardWidthFraction) private var cardWidthFraction
+    @Environment(\.bubblesGone) private var bubblesGone
     let text: String
     /// Still in flight. Gates the wait overlay until real answer text lands.
     var streaming: Bool = false
@@ -3239,6 +3264,8 @@ struct AssistantTurnView: View {
     var onInAppCopy: (() -> Void)? = nil
     /// Quote this answer in the next follow-up. Nil leaves Reply off the menu.
     var onReply: (() -> Void)? = nil
+    /// Quote a piece of this answer (a link card) in the next follow-up.
+    var onQuote: ((String) -> Void)? = nil
     /// Remove this answer from the thread. Nil leaves Delete off the menu.
     var onDelete: (() -> Void)? = nil
     /// The model this answer was regenerated with, when it wasn't the default
@@ -3760,7 +3787,7 @@ struct AssistantTurnView: View {
                spacing: pendingQuestion != nil && !hasText ? 0 : 6) {
             // An answer that opens with a card has no first bubble unless the
             // reading block or the work trail needs one.
-            if cardHasContent || !layout.hasMore {
+            if (cardHasContent || !layout.hasMore) && bubblesGone == 0 {
                 AnswerCard(visible: cardHasContent,
                            idealAtLeast: FractionWidthLayout.minimumLineWidth(layout.lead, fontSize: cardFont),
                            chrome: !toolWaitOnly && !readingWaitOnly && !dotsWaitOnly,
@@ -3769,16 +3796,29 @@ struct AssistantTurnView: View {
                     cardContent
                 }
                     .contextMenu { answerTurnMenu }
+                    .transition(Self.leaving)
             }
 
             // Each later message and each page handed over on its own line is
             // its own bubble. They land one at a time (`BubblePacer`).
             // Keyed by page, not position: a card kept at a position another
             // page moved into would show the other page until its own is drawn.
-            ForEach(Self.keyed(Array(layout.rest.prefix(landed))), id: \.id) { item in
+            ForEach(Self.keyed(Array(layout.rest.prefix(landed).dropFirst(max(0, bubblesGone - 1)))),
+                    id: \.id) { item in
                 switch item.segment {
                 case .link(let url, let label):
-                    LinkCardView(url: url, title: cardTitle(url, label: label))
+                    let title = cardTitle(url, label: label)
+                    LinkCardView(url: url, title: title)
+                        .contextMenu {
+                            if let onQuote {
+                                Button {
+                                    onQuote([title, url.absoluteString]
+                                        .compactMap { $0 }.joined(separator: "\n"))
+                                } label: {
+                                    Label(L("message.reply"), systemImage: "arrowshape.turn.up.left")
+                                }
+                            }
+                        }
                         .transition(Self.landing)
                 case .text(let body):
                     AnswerCard(idealAtLeast: FractionWidthLayout.minimumLineWidth(body, fontSize: cardFont),
@@ -3840,6 +3880,10 @@ struct AssistantTurnView: View {
 
     /// A bubble after the first arrives the way a message does: it grows out of
     /// its corner by the previous bubble.
+    /// A bubble leaving a card unfolded for a reply: up and out.
+    private static let leaving: AnyTransition = .asymmetric(
+        insertion: .identity,
+        removal: .opacity.combined(with: .offset(y: -14)))
     private static let landing: AnyTransition =
         .scale(scale: 0.85, anchor: .topLeading).combined(with: .opacity)
     /// Also the curve of the thread's scroll to its tail when a bubble lands
@@ -4102,9 +4146,22 @@ struct AssistantTurnView: View {
     @ViewBuilder
     private var answerTurnMenu: some View {
         if hasText {
-            if let onReply {
-                Button(action: onReply) {
-                    Label(L("message.reply"), systemImage: "arrowshape.turn.up.left")
+            // Quote: the text selected in this answer when the menu opened,
+            // else the whole answer (Reply's quote).
+            if onQuote != nil || onReply != nil {
+                Button {
+                    if let selection = SelectionQuote.takeMenuSelection(), let onQuote {
+                        onQuote(selection)
+                    } else if let onReply {
+                        onReply()
+                    } else if let onQuote {
+                        let whole = MarkdownParser.plainText(renderedText)
+                            .trimmingCharacters(in: .whitespacesAndNewlines)
+                        let limit = NotchModel.replyQuoteLimit
+                        onQuote(whole.count > limit ? String(whole.prefix(limit)) + "…" : whole)
+                    }
+                } label: {
+                    Label(L("message.quote"), systemImage: "text.quote")
                 }
                 Divider()
             }
@@ -4602,6 +4659,19 @@ extension EnvironmentValues {
     }
 }
 
+private struct BubblesGoneKey: EnvironmentKey {
+    static let defaultValue = 0
+}
+
+extension EnvironmentValues {
+    /// How many of an answer's bubbles have left, oldest first: a card
+    /// unfolded for a reply (`NotchModel.replyBubblesGone`).
+    var bubblesGone: Int {
+        get { self[BubblesGoneKey.self] }
+        set { self[BubblesGoneKey.self] = newValue }
+    }
+}
+
 private struct ChatGlassCulledKey: EnvironmentKey {
     static let defaultValue = false
 }
@@ -4770,10 +4840,10 @@ struct InlineMarkdownText: View {
         guard !plain.isEmpty else { return }
         let full = NSRange(plain.startIndex..<plain.endIndex, in: plain)
         for match in detector.matches(in: plain, options: [], range: full) {
-            guard let url = match.url,
+            guard let matched = Range(match.range, in: plain),
+                  let (found, url) = trimmedLink(plain, matched),
                   let scheme = url.scheme?.lowercased(),
-                  scheme == "http" || scheme == "https",
-                  let found = Range(match.range, in: plain)
+                  scheme == "http" || scheme == "https"
             else { continue }
             let offset = plain.distance(from: plain.startIndex, to: found.lowerBound)
             let length = plain.distance(from: found.lowerBound, to: found.upperBound)
@@ -4789,6 +4859,35 @@ struct InlineMarkdownText: View {
             guard !claimed else { continue }
             attributed[range].link = url
         }
+    }
+
+    /// NSDataDetector does not stop a URL at CJK punctuation: in
+    /// `…/468714，营销侧文档…` it takes everything up to the next space. Cut the
+    /// match at the first CJK or full-width punctuation mark, then drop trailing
+    /// ASCII sentence punctuation. CJK letters inside a path are kept.
+    private static func trimmedLink(_ text: String, _ range: Range<String.Index>)
+        -> (Range<String.Index>, URL)? {
+        var end = range.upperBound
+        if let cut = text[range].firstIndex(where: { ch in
+            ch.unicodeScalars.contains { s in
+                (0x3000...0x303F).contains(s.value)      // 、。「」【】《》 …
+                    || (0xFF00...0xFF0F).contains(s.value) // ！＂＃…（）＊＋，－．／
+                    || (0xFF1A...0xFF20).contains(s.value) // ：；＜＝＞？＠
+                    || (0xFF3B...0xFF40).contains(s.value)
+                    || (0xFF5B...0xFF65).contains(s.value)
+                    || (0x2018...0x201F).contains(s.value) // ‘’“”
+                    || s.value == 0x2026                   // …
+            }
+        }) {
+            end = cut
+        }
+        while end > range.lowerBound,
+              let last = text[range.lowerBound..<end].last, ".,;:!?".contains(last) {
+            end = text.index(before: end)
+        }
+        let found = range.lowerBound..<end
+        guard !found.isEmpty, let url = URL(string: String(text[found])) else { return nil }
+        return (found, url)
     }
 }
 

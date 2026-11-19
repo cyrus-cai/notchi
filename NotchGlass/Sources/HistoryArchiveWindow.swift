@@ -37,7 +37,9 @@ final class HistoryArchiveWindowController: NSObject, NSWindowDelegate {
 
     /// Open (or bring to front) the History window. Reuses the single instance so
     /// repeated invocations don't stack duplicates.
-    func present(model: NotchModel, scope: HistoryArchiveScope = .all) {
+    func present(model: NotchModel, scope: HistoryArchiveScope = .all,
+                 focusSearch: Bool = false) {
+        search.wantsFocus = focusSearch
         if let window {
             // Re-scope even when the window is already open: moving from Agent to
             // Chat (or back) must not retain the previous bucket's rows.
@@ -100,6 +102,9 @@ final class HistoryArchiveWindowController: NSObject, NSWindowDelegate {
 @MainActor
 private final class HistoryArchiveSearch: ObservableObject {
     @Published var query = ""
+    /// Set by `present(focusSearch:)`: the view puts the caret in the search
+    /// field when it appears, then clears it.
+    var wantsFocus = false
 }
 
 /// The archive window. It answers Esc and the image arrows itself: the panel's
@@ -159,6 +164,7 @@ private struct HistoryArchiveView: View {
     let scope: HistoryArchiveScope
 
     private var query: String { search.query }
+    @FocusState private var searchFocused: Bool
     @State private var sourceFilter: NotchModel.HistoryItem.Source?
     /// Whether the Ask bucket's children (Notes / Reminders) are unfurled. Ask is
     /// the parent; its two sub-filters only appear once Ask is tapped.
@@ -244,6 +250,12 @@ private struct HistoryArchiveView: View {
                     .font(.sf(Tokens.TypeSize.label, weight: .medium))
                     .foregroundStyle(Tokens.text3)
                 TextField(L("history.window.search"), text: $search.query)
+                    .focused($searchFocused)
+                    .onAppear {
+                        guard search.wantsFocus else { return }
+                        search.wantsFocus = false
+                        DispatchQueue.main.async { searchFocused = true }
+                    }
                     .textFieldStyle(.plain)
                     .font(.sf(Tokens.TypeSize.form))
                     .foregroundStyle(Tokens.text1)

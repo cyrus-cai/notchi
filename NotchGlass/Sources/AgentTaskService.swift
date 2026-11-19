@@ -835,6 +835,8 @@ final class AgentTaskManager: ObservableObject {
     /// Active `/loop` tasks, so a quit does not drop the schedule. A round in
     /// flight also rides `InFlightRun`; this is what brings a waiting loop back.
     private static let persistLoopsKey = "notch_agent_loops"
+    /// Loop records on disk this build could not read, written back unchanged.
+    private var unreadableLoops: [Any] = []
 
     /// The interval of each stopped loop, by task id. The task itself may be
     /// dismissed or lost to a quit; its Recent row keeps the rounds and the CLI
@@ -1952,9 +1954,24 @@ final class AgentTaskManager: ObservableObject {
     /// `recoverInterruptedRuns` so a round still in flight is re-attached first
     /// and this only fills in the ones that were between rounds.
     func restorePersistedLoops() {
-        guard let data = UserDefaults.standard.data(forKey: Self.persistLoopsKey),
-              let records = try? JSONDecoder().decode([PersistedAgentLoop].self, from: data)
-        else { return }
+        guard let data = UserDefaults.standard.data(forKey: Self.persistLoopsKey) else { return }
+        // Read one record at a time: a record this build cannot read is kept
+        // as it is (`unreadableLoops`) instead of taking every loop with it.
+        guard let array = (try? JSONSerialization.jsonObject(with: data)) as? [Any] else {
+            UserDefaults.standard.set(data, forKey: Self.persistLoopsKey + ".unreadable")
+            LoopLog.write("agent loops load failed: \(data.count) bytes kept")
+            return
+        }
+        var records: [PersistedAgentLoop] = []
+        for element in array {
+            if let one = try? JSONSerialization.data(withJSONObject: element),
+               let record = try? JSONDecoder().decode(PersistedAgentLoop.self, from: one) {
+                records.append(record)
+            } else {
+                unreadableLoops.append(element)
+            }
+        }
+        LoopLog.write("agent loops load \(records.count), \(unreadableLoops.count) unreadable")
         let now = Date()
         for record in records {
             let next = record.nextRoundAt
@@ -2019,7 +2036,12 @@ final class AgentTaskManager: ObservableObject {
                           finishedAt: $0.finishedAt)
                 })
         }
-        if let data = try? JSONEncoder().encode(records) {
+        if var data = try? JSONEncoder().encode(records) {
+            if !unreadableLoops.isEmpty,
+               var array = (try? JSONSerialization.jsonObject(with: data)) as? [Any] {
+                array.append(contentsOf: unreadableLoops)
+                if let merged = try? JSONSerialization.data(withJSONObject: array) { data = merged }
+            }
             UserDefaults.standard.set(data, forKey: Self.persistLoopsKey)
         }
         for t in tasks {

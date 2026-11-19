@@ -991,8 +991,14 @@ struct SummonHotKey: Equatable {
         enabled: true
     )
 
-    /// The top-right card's own shortcut. Off until the user records one.
-    static let cardDefaultConfig = SummonHotKey(keyCode: 0, modifiers: 0, enabled: false)
+    /// The top-right card's own shortcut: double-tap right ⌘.
+    static let cardDefaultConfig = SummonHotKey(
+        keyCode: 0,
+        modifiers: 0,
+        doubleTapModifier: UInt32(cmdKey),
+        doubleTapSide: .right,
+        enabled: true
+    )
 
     static var current: SummonHotKey {
         get { read(prefix: "summonHotKey", fallback: .defaultConfig) }

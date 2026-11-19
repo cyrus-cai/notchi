@@ -162,8 +162,12 @@ enum LoopEndReason: String, Codable {
 }
 
 /// What a loop's ⌘ card shows about it — the same for a chat loop and an agent
-/// loop.
-struct LoopMenuInfo: Equatable {
+/// loop. `id` is the loop's (an agent loop's is its task's).
+struct LoopMenuInfo: Equatable, Identifiable {
+    var id: UUID = UUID()
+    /// The loop's prompt. The card names each loop by it when a thread holds
+    /// more than one.
+    var prompt: String = ""
     let intervalMinutes: Int
     let rounds: Int
     let nextRoundAt: Date?
@@ -171,12 +175,64 @@ struct LoopMenuInfo: Equatable {
     var endReason: LoopEndReason? = nil
 }
 
+// MARK: - Loop log
+
+/// Every change to a chat loop's schedule, one line each, in
+/// Application Support/Notchi/loops.log. A loop that stops says why and from
+/// which call site, so a loop that went quiet can be traced afterwards.
+enum LoopLog {
+    private static let queue = DispatchQueue(label: "notch.loop.log", qos: .utility)
+    private static let maxBytes = 512 * 1024
+    /// Local time, so a line reads against the clock the user saw.
+    private static let stampFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        return f
+    }()
+
+    private static var url: URL? {
+        guard let dir = FileManager.default.urls(for: .applicationSupportDirectory,
+                                                 in: .userDomainMask).first else { return nil }
+        let appDir = dir.appendingPathComponent("Notchi", isDirectory: true)
+        try? FileManager.default.createDirectory(at: appDir, withIntermediateDirectories: true)
+        return appDir.appendingPathComponent("loops.log")
+    }
+
+    static func write(_ line: String) {
+        let text = "\(stampFormatter.string(from: Date())) \(line)\n"
+        queue.async {
+            guard let url, let data = text.data(using: .utf8) else { return }
+            if let size = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? Int,
+               size > maxBytes {
+                // Keep the newer half.
+                if let old = try? Data(contentsOf: url) {
+                    try? old.suffix(maxBytes / 2).write(to: url)
+                }
+            }
+            if let handle = try? FileHandle(forWritingTo: url) {
+                handle.seekToEndOfFile()
+                handle.write(data)
+                try? handle.close()
+            } else {
+                try? data.write(to: url)
+            }
+        }
+    }
+
+    static func short(_ id: UUID) -> String { String(id.uuidString.prefix(8)) }
+}
+
 // MARK: - Chat loops
 
-/// Ask threads on a loop. The rounds themselves run through the ordinary chat
-/// pipeline (`NotchModel.runChatLoopRound` — tools, persistence and Recent all
+/// Ask loops. The rounds themselves run through the ordinary chat pipeline
+/// (`NotchModel.runChatLoopRound` — tools, persistence and Recent all
 /// unchanged); this owns only the schedule: when the next round is due, how
 /// many have run, and when the loop is over.
+///
+/// A loop has its own id; `threadID` is the thread its rounds answer in. One
+/// thread can hold any number of loops. Records written before loops had
+/// their own id carry none, and their loop id is their thread's.
 ///
 /// Loops are written to `UserDefaults` so a quit does not end them; the thread
 /// itself already lives in Recent. A stopped loop stays on disk after its tray
@@ -186,8 +242,10 @@ final class ChatLoopManager: ObservableObject {
     static let shared = ChatLoopManager()
 
     struct ChatLoop: Identifiable, Equatable {
-        /// The thread's id — also its Recent row's.
+        /// The loop's own id.
         let id: UUID
+        /// The thread its rounds answer in — also its Recent row's id.
+        let threadID: UUID
         let prompt: String
         var intervalMinutes: Int
         var startedAt: Date
@@ -217,20 +275,32 @@ final class ChatLoopManager: ObservableObject {
         var isRunning: Bool { roundStartedAt != nil }
         var isWaiting: Bool { active && !isRunning }
         var interval: TimeInterval { TimeInterval(intervalMinutes * 60) }
+
+        var menuInfo: LoopMenuInfo {
+            LoopMenuInfo(id: id, prompt: prompt, intervalMinutes: intervalMinutes,
+                         rounds: rounds, nextRoundAt: nextRoundAt, active: active,
+                         endReason: active ? nil : endReason)
+        }
     }
 
-    /// Disk shape of an active loop. A round that was in flight is stored as
-    /// waiting: the stream died with the process, and the next round starts
-    /// after one interval (or immediately if `nextRoundAt` is already due).
+    /// Disk shape of a loop. A round that was in flight is stored as not yet
+    /// run, due when it started: the stream died with the process, and the
+    /// same round runs again at launch.
+    ///
+    /// Every field past the required ones is read leniently: a value this
+    /// build does not know (an `endReason` added later) reads as absent
+    /// instead of failing the record.
     private struct Record: Codable {
         let id: UUID
+        /// Absent in records written before loops had their own id: the loop's
+        /// thread is then `id`.
+        var threadID: UUID? = nil
         let prompt: String
         let intervalMinutes: Int
         let startedAt: Date
         let rounds: Int
         let lastRoundDuration: TimeInterval
         let nextRoundAt: Date?
-        /// Absent in records written before stopped loops were kept.
         var active: Bool? = nil
         var failed: Bool? = nil
         var dismissed: Bool? = nil
@@ -238,18 +308,62 @@ final class ChatLoopManager: ObservableObject {
         var weekdaysOnly: Bool? = nil
         var pausedSlot: Date? = nil
         var endReason: LoopEndReason? = nil
+
+        init(id: UUID, threadID: UUID?, prompt: String, intervalMinutes: Int,
+             startedAt: Date, rounds: Int, lastRoundDuration: TimeInterval,
+             nextRoundAt: Date?, active: Bool?, failed: Bool?, dismissed: Bool?,
+             endsAt: Date?, weekdaysOnly: Bool?, pausedSlot: Date?,
+             endReason: LoopEndReason?) {
+            self.id = id; self.threadID = threadID; self.prompt = prompt
+            self.intervalMinutes = intervalMinutes; self.startedAt = startedAt
+            self.rounds = rounds; self.lastRoundDuration = lastRoundDuration
+            self.nextRoundAt = nextRoundAt; self.active = active; self.failed = failed
+            self.dismissed = dismissed; self.endsAt = endsAt
+            self.weekdaysOnly = weekdaysOnly; self.pausedSlot = pausedSlot
+            self.endReason = endReason
+        }
+
+        enum CodingKeys: String, CodingKey {
+            case id, threadID, prompt, intervalMinutes, startedAt, rounds, lastRoundDuration,
+                 nextRoundAt, active, failed, dismissed, endsAt, weekdaysOnly, pausedSlot,
+                 endReason
+        }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            id = try c.decode(UUID.self, forKey: .id)
+            prompt = try c.decode(String.self, forKey: .prompt)
+            intervalMinutes = (try? c.decode(Int.self, forKey: .intervalMinutes))
+                ?? LoopInterval.defaultMinutes
+            startedAt = (try? c.decode(Date.self, forKey: .startedAt)) ?? Date()
+            rounds = (try? c.decode(Int.self, forKey: .rounds)) ?? 0
+            lastRoundDuration = (try? c.decode(TimeInterval.self, forKey: .lastRoundDuration)) ?? 0
+            threadID = try? c.decodeIfPresent(UUID.self, forKey: .threadID)
+            nextRoundAt = try? c.decodeIfPresent(Date.self, forKey: .nextRoundAt)
+            active = try? c.decodeIfPresent(Bool.self, forKey: .active)
+            failed = try? c.decodeIfPresent(Bool.self, forKey: .failed)
+            dismissed = try? c.decodeIfPresent(Bool.self, forKey: .dismissed)
+            endsAt = try? c.decodeIfPresent(Date.self, forKey: .endsAt)
+            weekdaysOnly = try? c.decodeIfPresent(Bool.self, forKey: .weekdaysOnly)
+            pausedSlot = try? c.decodeIfPresent(Date.self, forKey: .pausedSlot)
+            endReason = try? c.decodeIfPresent(LoopEndReason.self, forKey: .endReason)
+        }
     }
 
     private static let persistKey = "notch_chat_loops"
 
-    /// Every loop not yet dismissed, in start order.
+    /// Every loop on record, in start order.
     @Published private(set) var loops: [ChatLoop] = []
     private var timers: [UUID: Task<Void, Never>] = [:]
     private var restored = false
+    /// Entries on disk this build could not read. Written back unchanged on
+    /// every save, so a record never disappears because one build failed to
+    /// read it.
+    private var unreadable: [Any] = []
 
-    /// Starts round `round` on the thread; false when it could not start. Set by
-    /// `NotchModel`, which owns the chat pipeline.
-    var runRound: ((_ threadID: UUID, _ prompt: String, _ round: Int) -> Bool)?
+    /// Starts round `round` of loop `loopID` on thread `threadID`; false when
+    /// it could not start. Set by `NotchModel`, which owns the chat pipeline.
+    var runRound: ((_ threadID: UUID, _ prompt: String, _ round: Int, _ loopID: UUID) -> Bool)?
     /// Whether any round is streaming on the thread right now.
     var isThreadBusy: ((UUID) -> Bool)?
 
@@ -257,23 +371,34 @@ final class ChatLoopManager: ObservableObject {
         loadFromDisk()
     }
 
+    /// The loop with this id.
     func loop(for id: UUID) -> ChatLoop? { loops.first { $0.id == id } }
     func isActive(_ id: UUID) -> Bool { loop(for: id)?.active == true }
+    /// The loops whose rounds answer in `threadID`, in start order.
+    func loops(onThread threadID: UUID) -> [ChatLoop] { loops.filter { $0.threadID == threadID } }
+    func hasActiveLoop(onThread threadID: UUID) -> Bool {
+        loops.contains { $0.threadID == threadID && $0.active }
+    }
     /// The loops the task list shows.
     var listed: [ChatLoop] { loops.filter { !$0.dismissed } }
 
-    /// The ⌘ card's facts for a thread. A loop thread with no record (stopped
-    /// and dismissed before stopped loops were kept) reads as stopped, from its
-    /// turns.
-    func menuInfo(for id: UUID, turns: [NotchModel.Turn]) -> LoopMenuInfo? {
-        if let loop = loop(for: id) {
-            return LoopMenuInfo(intervalMinutes: loop.intervalMinutes, rounds: loop.rounds,
-                                nextRoundAt: loop.nextRoundAt, active: loop.active,
-                                endReason: loop.active ? nil : loop.endReason)
-        }
-        guard let rounds = turns.compactMap(\.loopRound).max() else { return nil }
-        return LoopMenuInfo(intervalMinutes: LoopInterval.lastMinutes, rounds: rounds,
-                            nextRoundAt: nil, active: false)
+    /// The loop a turn belongs to: the turn's own `loopID`, or — on a turn saved
+    /// before turns carried one — the loop whose id is the thread's.
+    func loopID(forTurnLoopID turnLoopID: UUID?, threadID: UUID) -> UUID {
+        turnLoopID ?? threadID
+    }
+
+    /// The ⌘ card's facts for a thread, one per loop. A loop thread with no
+    /// record (stopped and dismissed before stopped loops were kept) reads as
+    /// one stopped loop, from its turns, under the thread's id.
+    func menuInfo(forThread threadID: UUID, turns: [NotchModel.Turn]) -> [LoopMenuInfo] {
+        let found = loops(onThread: threadID)
+        if !found.isEmpty { return found.map(\.menuInfo) }
+        guard let rounds = turns.compactMap(\.loopRound).max() else { return [] }
+        let prompt = turns.first(where: { $0.role == "user" })?.text ?? ""
+        return [LoopMenuInfo(id: threadID, prompt: prompt,
+                             intervalMinutes: LoopInterval.lastMinutes, rounds: rounds,
+                             nextRoundAt: nil, active: false)]
     }
 
     /// Arm the waits. `NotchModel` calls this after Recent is on disk and
@@ -286,25 +411,38 @@ final class ChatLoopManager: ObservableObject {
             loops[i].active = false
             loops[i].nextRoundAt = nil
             loops[i].endReason = .endDate
+            LoopLog.write("restore \(LoopLog.short(loops[i].id)) end-date passed")
         }
         persist()
         for loop in loops where loop.active && !loop.isRunning {
-            let next = loop.nextRoundAt
-                ?? now.addingTimeInterval(loop.interval)
+            let next = loop.nextRoundAt ?? now.addingTimeInterval(loop.interval)
             schedule(loop.id, at: next)
         }
+        LoopLog.write("restore active=\(loops.filter(\.active).count) total=\(loops.count)")
     }
 
     private func loadFromDisk() {
-        guard let data = UserDefaults.standard.data(forKey: Self.persistKey),
-              let records = try? JSONDecoder().decode([Record].self, from: data)
-        else { return }
+        guard let data = UserDefaults.standard.data(forKey: Self.persistKey) else { return }
+        guard let array = (try? JSONSerialization.jsonObject(with: data)) as? [Any] else {
+            // Not a list this build can read at all. Keep the bytes under a
+            // side key before anything is saved over them.
+            UserDefaults.standard.set(data, forKey: Self.persistKey + ".unreadable")
+            LoopLog.write("load failed: \(data.count) bytes kept under \(Self.persistKey).unreadable")
+            return
+        }
         let now = Date()
-        for record in records {
+        let decoder = JSONDecoder()
+        for element in array {
+            guard let one = try? JSONSerialization.data(withJSONObject: element),
+                  let record = try? decoder.decode(Record.self, from: one) else {
+                unreadable.append(element)
+                continue
+            }
             let active = record.active ?? true
             let next = active ? record.nextRoundAt
                 ?? now.addingTimeInterval(TimeInterval(record.intervalMinutes * 60)) : nil
-            loops.append(ChatLoop(id: record.id, prompt: record.prompt,
+            loops.append(ChatLoop(id: record.id, threadID: record.threadID ?? record.id,
+                                  prompt: record.prompt,
                                   intervalMinutes: record.intervalMinutes,
                                   startedAt: record.startedAt, rounds: record.rounds,
                                   roundStartedAt: nil,
@@ -317,113 +455,130 @@ final class ChatLoopManager: ObservableObject {
                                   pausedSlot: active ? nil : record.pausedSlot,
                                   endReason: active ? nil : record.endReason))
         }
+        LoopLog.write("load \(loops.count) loops, \(unreadable.count) unreadable")
     }
 
-    /// Round one has just been handed to the chat pipeline under `id`.
-    func register(id: UUID, prompt: String, minutes: Int, endsAt: Date? = nil, weekdaysOnly: Bool = false) {
+    /// Round one of loop `id` has just been handed to the chat pipeline on
+    /// `threadID`.
+    func register(id: UUID, threadID: UUID, prompt: String, minutes: Int,
+                  endsAt: Date? = nil, weekdaysOnly: Bool = false) {
         loops.removeAll { $0.id == id }
-        loops.append(ChatLoop(id: id, prompt: prompt, intervalMinutes: minutes,
-                              startedAt: Date(), endsAt: endsAt, weekdaysOnly: weekdaysOnly))
+        loops.append(ChatLoop(id: id, threadID: threadID, prompt: prompt,
+                              intervalMinutes: minutes, startedAt: Date(),
+                              endsAt: endsAt, weekdaysOnly: weekdaysOnly))
         persist()
+        LoopLog.write("start \(LoopLog.short(id)) thread=\(LoopLog.short(threadID)) every=\(minutes)m round 1 now")
     }
 
     /// A loop whose round one waits for `firstRoundAt` ("every morning at 9").
     /// Nothing has run yet.
-    func register(id: UUID, prompt: String, minutes: Int, firstRoundAt: Date,
+    func register(id: UUID, threadID: UUID, prompt: String, minutes: Int, firstRoundAt: Date,
                   endsAt: Date? = nil, weekdaysOnly: Bool = false) {
         loops.removeAll { $0.id == id }
-        loops.append(ChatLoop(id: id, prompt: prompt, intervalMinutes: minutes,
-                              startedAt: firstRoundAt, rounds: 0, roundStartedAt: nil,
-                              endsAt: endsAt, weekdaysOnly: weekdaysOnly))
+        loops.append(ChatLoop(id: id, threadID: threadID, prompt: prompt,
+                              intervalMinutes: minutes, startedAt: firstRoundAt, rounds: 0,
+                              roundStartedAt: nil, endsAt: endsAt, weekdaysOnly: weekdaysOnly))
+        LoopLog.write("start \(LoopLog.short(id)) thread=\(LoopLog.short(threadID)) every=\(minutes)m first=\(firstRoundAt)")
         schedule(id, at: firstRoundAt)
     }
 
-    /// A loop started by manage_loop from an answer on thread `id`. Round one
-    /// runs when that answer's round finishes (`roundFinished`); the timer here
-    /// is only the fallback if that finish never lands.
-    func registerAfterCurrentRound(id: UUID, prompt: String, minutes: Int,
+    /// A loop started by manage_loop from an answer on thread `threadID`. Round
+    /// one runs when that answer's round finishes (`roundFinished`); the timer
+    /// here is only the fallback if that finish never lands.
+    func registerAfterCurrentRound(id: UUID, threadID: UUID, prompt: String, minutes: Int,
                                    endsAt: Date? = nil, weekdaysOnly: Bool = false) {
-        register(id: id, prompt: prompt, minutes: minutes,
+        register(id: id, threadID: threadID, prompt: prompt, minutes: minutes,
                  firstRoundAt: Date().addingTimeInterval(Self.firstRoundFallback),
                  endsAt: endsAt, weekdaysOnly: weekdaysOnly)
     }
 
     private static let firstRoundFallback: TimeInterval = 60
 
-    /// A round on a loop's thread finished. `loopRound` is the round number its
-    /// answer carried — nil for a follow-up the user typed into the thread,
-    /// which keeps the schedule and does not count as a round. `quietly`
-    /// is a round superseded before it answered: the wait restarts, no banner.
-    /// `done` is a round whose answer carried `LoopInterval.doneMarker`: the
-    /// loop ends there.
-    func roundFinished(threadID: UUID, loopRound: Int?, failed: Bool,
+    /// A round on thread `threadID` finished. `loopRound` is the round number
+    /// its answer carried and `loopID` the loop it belongs to — nil for a
+    /// follow-up the user typed into the thread, which keeps every loop's
+    /// schedule and does not count as a round. `quietly` is a round superseded
+    /// before it answered: the wait restarts, no banner. `done` is a round
+    /// whose answer carried `LoopInterval.doneMarker`: the loop pauses there.
+    func roundFinished(threadID: UUID, loopID: UUID?, loopRound: Int?, failed: Bool,
                        quietly: Bool = false, done: Bool = false, answer: String = "") {
-        guard let i = loops.firstIndex(where: { $0.id == threadID }), loops[i].active
-        else { return }
-        if loopRound != nil, let started = loops[i].roundStartedAt {
+        defer { runHeldRounds(onThread: threadID) }
+        guard loopRound != nil else { return }
+        let id = loopID ?? threadID
+        guard let i = loops.firstIndex(where: { $0.id == id }), loops[i].active else { return }
+        if let started = loops[i].roundStartedAt {
             loops[i].lastRoundDuration = Date().timeIntervalSince(started)
             loops[i].roundStartedAt = nil
         }
-        // A follow-up finishing does not move the schedule: the next round
-        // stays when it was due. A round held back while the follow-up ran
-        // (due now, or within the fallback wait) runs now.
-        if loopRound == nil {
-            let due = loops[i].nextRoundAt ?? Date()
-            schedule(threadID, at: due.timeIntervalSinceNow <= Self.firstRoundFallback ? Date() : due)
-            return
-        }
         if quietly {
-            schedule(threadID)
+            LoopLog.write("round \(LoopLog.short(id)) #\(loopRound ?? 0) superseded")
+            schedule(id)
             return
         }
         let loop = loops[i]
         // The round reports the user's stop condition met. The loop pauses on
         // its schedule and the banner asks the user; it does not end here.
-        if done, loopRound != nil {
-            pause(threadID, reason: .doneSuggested)
+        if done {
+            LoopLog.write("round \(LoopLog.short(id)) #\(loopRound ?? 0) wrote the done marker")
+            pause(id, reason: .doneSuggested)
             notify(loop, subtitle: L("notify.loop.doneSuggested"),
                    silent: false, answer: answer)
             return
         }
         if let endsAt = loop.endsAt, Date().addingTimeInterval(loop.interval) > endsAt {
-            end(threadID, failed: loopRound != nil && failed, reason: .endDate)
+            end(id, failed: failed, reason: .endDate)
             notify(loop, subtitle: L("notify.loop.endDate", loop.rounds),
                    silent: false, answer: answer)
             return
         }
-        if loopRound != nil {
-            notify(loop, subtitle: L("notify.loop.round", loop.rounds),
-                   silent: true, answer: answer)
-        }
+        LoopLog.write("round \(LoopLog.short(id)) #\(loopRound ?? 0) \(failed ? "failed" : "ok")")
+        notify(loop, subtitle: L("notify.loop.round", loop.rounds),
+               silent: true, answer: answer)
         // A failed round does not end the loop; only Stop does. Offline, the
         // next round runs as soon as the network is back.
         if failed {
-            schedule(threadID, at: LoopInterval.nextAfterFailure(
-                intervalMinutes: loop.intervalMinutes))
+            schedule(id, at: LoopInterval.nextAfterFailure(intervalMinutes: loop.intervalMinutes))
         } else {
-            schedule(threadID)
+            schedule(id)
+        }
+    }
+
+    /// A round on the thread just ended, so the thread is free. Rounds held
+    /// back while it streamed (due now, or within the fallback wait) run now,
+    /// one at a time: the first one to start makes the thread busy again, and
+    /// the rest wait for its finish.
+    private func runHeldRounds(onThread threadID: UUID) {
+        for loop in loops where loop.threadID == threadID && loop.isWaiting {
+            let due = loop.nextRoundAt ?? Date()
+            if due.timeIntervalSinceNow <= Self.firstRoundFallback {
+                schedule(loop.id, at: Date())
+            }
         }
     }
 
     /// The Stop in the loop's ⌘ card. A round already streaming finishes; no
     /// further round starts.
-    func stop(_ id: UUID) {
+    func stop(_ id: UUID, file: String = #fileID, line: Int = #line) {
+        guard isActive(id) else { return }
+        LoopLog.write("stop \(LoopLog.short(id)) from \(file):\(line)")
         end(id, failed: false, reason: .stopped)
     }
 
     /// The Continue in a stopped loop's ⌘ card. The next round runs now.
     /// `turns` rebuilds a loop thread that has no record (see `menuInfo`).
-    func resume(_ id: UUID, turns: [NotchModel.Turn] = []) {
-        if loop(for: id) == nil,
+    func resume(_ id: UUID, threadID: UUID? = nil, turns: [NotchModel.Turn] = [],
+                file: String = #fileID, line: Int = #line) {
+        if loop(for: id) == nil, let threadID,
            let rounds = turns.compactMap(\.loopRound).max(),
            let prompt = turns.first(where: { $0.role == "user" })?.text {
-            loops.append(ChatLoop(id: id, prompt: prompt,
+            loops.append(ChatLoop(id: id, threadID: threadID, prompt: prompt,
                                   intervalMinutes: LoopInterval.lastMinutes,
                                   startedAt: Date(), rounds: rounds,
                                   roundStartedAt: nil, active: false))
         }
         guard let i = loops.firstIndex(where: { $0.id == id }), !loops[i].active
         else { return }
+        LoopLog.write("continue \(LoopLog.short(id)) from \(file):\(line)")
         loops[i].active = true
         loops[i].failed = false
         loops[i].dismissed = false
@@ -436,8 +591,10 @@ final class ChatLoopManager: ObservableObject {
 
     /// The Routines switch's off. Like Stop — a round already streaming
     /// finishes — but the slot the next round was due in is kept for `unpause`.
-    func pause(_ id: UUID, reason: LoopEndReason = .paused) {
+    func pause(_ id: UUID, reason: LoopEndReason = .paused,
+               file: String = #fileID, line: Int = #line) {
         guard let loop = loop(for: id), loop.active else { return }
+        LoopLog.write("pause \(LoopLog.short(id)) reason=\(reason.rawValue) from \(file):\(line)")
         let slot = loop.nextRoundAt
             ?? loop.roundStartedAt.map { $0.addingTimeInterval(loop.interval) }
             ?? Date().addingTimeInterval(loop.interval)
@@ -449,9 +606,10 @@ final class ChatLoopManager: ObservableObject {
 
     /// The Routines switch's on. Unlike Continue, nothing runs now: the next
     /// round is the paused schedule's next slot.
-    func unpause(_ id: UUID) {
+    func unpause(_ id: UUID, file: String = #fileID, line: Int = #line) {
         guard let i = loops.firstIndex(where: { $0.id == id }), !loops[i].active
         else { return }
+        LoopLog.write("unpause \(LoopLog.short(id)) from \(file):\(line)")
         let next = LoopInterval.nextSlot(from: loops[i].pausedSlot,
                                          minutes: loops[i].intervalMinutes)
         loops[i].active = true
@@ -465,7 +623,8 @@ final class ChatLoopManager: ObservableObject {
 
     /// manage_loop's delete: the loop stops if it is running and leaves the
     /// task list and Routines, on or off. The thread stays in Recent.
-    func delete(_ id: UUID) {
+    func delete(_ id: UUID, file: String = #fileID, line: Int = #line) {
+        LoopLog.write("delete \(LoopLog.short(id)) from \(file):\(line)")
         if isActive(id) { end(id, failed: false, reason: .stopped) }
         dismiss(id)
     }
@@ -479,11 +638,17 @@ final class ChatLoopManager: ObservableObject {
         persist()
     }
 
-    /// The thread was deleted from Recent.
-    func forget(_ id: UUID) {
-        timers[id]?.cancel()
-        timers[id] = nil
-        loops.removeAll { $0.id == id }
+    /// The thread was deleted from Recent: its stopped loops go with it. A
+    /// running loop keeps running and starts the thread again.
+    func forgetStopped(onThread threadID: UUID) {
+        let gone = loops.filter { $0.threadID == threadID && !$0.active }
+        guard !gone.isEmpty else { return }
+        for loop in gone {
+            timers[loop.id]?.cancel()
+            timers[loop.id] = nil
+            LoopLog.write("forget \(LoopLog.short(loop.id)) (thread deleted)")
+        }
+        loops.removeAll { $0.threadID == threadID && !$0.active }
         persist()
     }
 
@@ -496,6 +661,7 @@ final class ChatLoopManager: ObservableObject {
         LoopInterval.remember(minutes)
         loops[i].intervalMinutes = minutes
         persist()
+        LoopLog.write("interval \(LoopLog.short(id)) every=\(minutes)m")
         if loops[i].isWaiting { schedule(id) }
     }
 
@@ -512,6 +678,7 @@ final class ChatLoopManager: ObservableObject {
         }
         loops[i].roundStartedAt = nil
         persist()
+        LoopLog.write("end \(LoopLog.short(id)) reason=\(reason.rawValue) after \(loops[i].rounds) rounds")
     }
 
     private func schedule(_ id: UUID, after delay: TimeInterval? = nil, at date: Date? = nil) {
@@ -532,20 +699,32 @@ final class ChatLoopManager: ObservableObject {
     }
 
     private func persist() {
+        // A round in flight is stored as not yet run and due when it started:
+        // if the app quits mid-round, the same round runs again at launch
+        // instead of the loop skipping to one interval later.
         let records: [Record] = loops.map { loop in
-            Record(id: loop.id, prompt: loop.prompt,
+            Record(id: loop.id, threadID: loop.threadID, prompt: loop.prompt,
                    intervalMinutes: loop.intervalMinutes,
-                   startedAt: loop.startedAt, rounds: loop.rounds,
+                   startedAt: loop.startedAt,
+                   rounds: loop.isRunning ? max(loop.rounds - 1, 0) : loop.rounds,
                    lastRoundDuration: loop.lastRoundDuration,
-                   nextRoundAt: loop.isRunning ? nil : loop.nextRoundAt,
+                   nextRoundAt: loop.roundStartedAt ?? loop.nextRoundAt,
                    active: loop.active, failed: loop.failed,
                    dismissed: loop.dismissed, endsAt: loop.endsAt,
                    weekdaysOnly: loop.weekdaysOnly, pausedSlot: loop.pausedSlot,
                    endReason: loop.active ? nil : loop.endReason)
         }
-        if let data = try? JSONEncoder().encode(records) {
-            UserDefaults.standard.set(data, forKey: Self.persistKey)
+        guard let encoded = try? JSONEncoder().encode(records) else {
+            LoopLog.write("save failed: could not encode \(records.count) loops")
+            return
         }
+        var data = encoded
+        if !unreadable.isEmpty,
+           var array = (try? JSONSerialization.jsonObject(with: encoded)) as? [Any] {
+            array.append(contentsOf: unreadable)
+            if let merged = try? JSONSerialization.data(withJSONObject: array) { data = merged }
+        }
+        UserDefaults.standard.set(data, forKey: Self.persistKey)
     }
 
     private func fire(_ id: UUID) {
@@ -559,10 +738,18 @@ final class ChatLoopManager: ObservableObject {
             notify(loop, subtitle: L("notify.loop.endDate", loop.rounds), silent: false, answer: "")
             return
         }
-        // A follow-up is streaming on the thread: let it finish. Its finish
-        // runs this round; this is only the fallback if that never lands.
-        if isThreadBusy?(id) == true {
-            schedule(id, after: 60)
+        let threadID = loops[i].threadID
+        // Another round (a follow-up, or another loop's round) is streaming on
+        // the thread: let it finish. Its finish runs this round
+        // (`runHeldRounds`); this is only the fallback if that never lands.
+        // A round this manager just started counts too: it is not in the
+        // chat pipeline's in-flight list until its submit has run.
+        let siblingRunning = loops.contains {
+            $0.threadID == threadID && $0.id != id && $0.isRunning
+        }
+        if siblingRunning || isThreadBusy?(threadID) == true {
+            LoopLog.write("fire \(LoopLog.short(id)) held: thread busy")
+            schedule(id, after: Self.firstRoundFallback)
             return
         }
         loops[i].rounds += 1
@@ -570,21 +757,24 @@ final class ChatLoopManager: ObservableObject {
         loops[i].nextRoundAt = nil
         persist()
         let loop = loops[i]
-        guard runRound?(id, loop.prompt, loop.rounds) != true else { return }
-        // The round could not start (a stream still open on the thread, an
+        if runRound?(threadID, loop.prompt, loop.rounds, id) == true {
+            LoopLog.write("fire \(LoopLog.short(id)) round #\(loop.rounds) started")
+            return
+        }
+        // The round could not start (an answer still streaming on screen, an
         // archive that hasn't caught up). A missed round is not a dead loop:
-        // give the round number back and wait out another interval. A round
-        // that starts and then fails ends the loop from `roundFinished`.
+        // give the round number back and try again shortly.
         guard let j = loops.firstIndex(where: { $0.id == id }) else { return }
         loops[j].rounds -= 1
         loops[j].roundStartedAt = nil
-        schedule(id)
+        LoopLog.write("fire \(LoopLog.short(id)) could not start; retry in \(Int(Self.firstRoundFallback))s")
+        schedule(id, after: Self.firstRoundFallback)
     }
 
     private func notify(_ loop: ChatLoop, subtitle: String, silent: Bool,
                         answer: String) {
         NotificationService.shared.postAnswerReady(
-            threadID: loop.id, title: nil, question: loop.prompt,
+            threadID: loop.threadID, title: nil, question: loop.prompt,
             answer: answer, subtitle: subtitle, silent: silent)
     }
 }

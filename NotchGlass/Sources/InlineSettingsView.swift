@@ -693,7 +693,7 @@ struct InlineSettingsView: View {
     /// go through `selectMenuBarIconVisibility` so `AppDelegate` adds or removes
     /// the status item immediately.
     @State private var menuBarIconVisibility: MenuBarIconVisibility = .current
-    @State private var menuBarIconStyle: MenuBarIconStyle = .current
+    @State private var menuBarCardPlacement: MenuBarCardPlacement = .current
 
     /// Whether the app launches itself at login — seeded from the live system
     /// login-item status (`SMAppService`), not `UserDefaults`. Writes go through
@@ -1413,7 +1413,6 @@ struct InlineSettingsView: View {
                     appIconStyleRow
                 }
                 dockIconRow
-                menuBarIconStyleRow
                 jevAutoPinRow
                 Text(L("capture.destination"))
                     .settingsHeading()
@@ -1425,7 +1424,7 @@ struct InlineSettingsView: View {
                 shortcutsSection
             case .appearance:
                 // Two small, literal groups: how the notch reacts and which
-                // displays carry it. The app and menu bar icons live in General.
+                // displays carry it, plus the menu bar icon and where its card opens.
                 Text(L("appearance.behavior"))
                     .settingsHeading()
                 hoverSensitivityRow
@@ -1441,6 +1440,11 @@ struct InlineSettingsView: View {
                     .padding(.top, metrics.groupHeadingGap)
                 placementRow
                 fullscreenAutoHideRow
+                Text(L("appearance.menuBar"))
+                    .settingsHeading()
+                    .padding(.top, metrics.groupHeadingGap)
+                menuBarIconRow
+                menuBarCardPlacementRow
                 Text(L("chat.group.effects"))
                     .settingsHeading()
                     .padding(.top, metrics.groupHeadingGap)
@@ -4833,8 +4837,9 @@ struct InlineSettingsView: View {
     /// one handle that works when the notch is behind a full-screen app and the
     /// summon shortcut has been forgotten. The choice applies immediately
     /// (AppDelegate adds/removes the status item).
+    /// The glyph follows the app icon: the eyes for Eyes, the mark otherwise.
     private var menuBarIconRow: some View {
-        settingRow(label: L("general.menuBarIcon.toggle")) {
+        settingRow(label: L("general.menuBarIcon"), aligned: true) {
             Toggle("", isOn: Binding(
                 get: { menuBarIconVisibility == .shown },
                 set: { Haptics.levelChange(); selectMenuBarIconVisibility($0 ? .shown : .hidden) }
@@ -4843,44 +4848,6 @@ struct InlineSettingsView: View {
                 .toggleStyle(.switch)
                 .controlSize(.mini)
                 .tint(Tokens.switchTint)
-        }
-    }
-
-    /// Logo, face, or no menu bar icon. Cards with the real glyph and no text,
-    /// so the difference shows without opening a menu. Off is the
-    /// same setting as `MenuBarIconVisibility.hidden`.
-    private var menuBarIconStyleRow: some View {
-        settingRow(label: L("general.menuBarIcon"), verticalAlignment: .top) {
-            HStack(spacing: 8) {
-                ForEach(MenuBarIconStyle.allCases) { style in
-                    menuBarIconStyleCard(style)
-                }
-                menuBarIconOffCard
-            }
-        }
-        .padding(.vertical, 6)
-    }
-
-    private func menuBarIconStyleCard(_ style: MenuBarIconStyle) -> some View {
-        let selected = menuBarIconVisibility == .shown && menuBarIconStyle == style
-        return menuBarIconCard(selected: selected, label: style.label) {
-            if !selected { Haptics.levelChange() }
-            selectMenuBarIconStyle(style)
-            selectMenuBarIconVisibility(.shown)
-        } glyph: {
-            Image(nsImage: MenuBarController.statusIcon(style))
-                .renderingMode(.template)
-        }
-    }
-
-    private var menuBarIconOffCard: some View {
-        menuBarIconCard(selected: menuBarIconVisibility == .hidden,
-                        label: L("menuBarIcon.style.off")) {
-            if menuBarIconVisibility != .hidden { Haptics.levelChange() }
-            selectMenuBarIconVisibility(.hidden)
-        } glyph: {
-            Image(systemName: "nosign")
-                .font(.system(size: 13, weight: .regular))
         }
     }
 
@@ -4895,11 +4862,27 @@ struct InlineSettingsView: View {
         }
     }
 
-    private func selectMenuBarIconStyle(_ newValue: MenuBarIconStyle) {
-        guard newValue != menuBarIconStyle else { return }
-        menuBarIconStyle = newValue
-        MenuBarIconStyle.current = newValue
-        NotificationCenter.default.post(name: .menuBarIconVisibilityChanged, object: nil)
+    /// Where the menu bar card opens: under the icon, or flush with the
+    /// screen's right edge. Same cards as the icon row above.
+    private var menuBarCardPlacementRow: some View {
+        settingRow(label: L("menuBarCard.position"), verticalAlignment: .top) {
+            HStack(spacing: 8) {
+                ForEach(MenuBarCardPlacement.allCases) { p in
+                    menuBarIconCard(selected: menuBarCardPlacement == p, label: p.label) {
+                        guard p != menuBarCardPlacement else { return }
+                        Haptics.levelChange()
+                        menuBarCardPlacement = p
+                        MenuBarCardPlacement.current = p
+                    } glyph: {
+                        Image(systemName: p == .right
+                              ? "rectangle.inset.topright.filled"
+                              : "rectangle.topthird.inset.filled")
+                            .font(.system(size: 13, weight: .regular))
+                    }
+                }
+            }
+        }
+        .padding(.vertical, 6)
     }
 
     private func selectMenuBarIconVisibility(_ newValue: MenuBarIconVisibility) {

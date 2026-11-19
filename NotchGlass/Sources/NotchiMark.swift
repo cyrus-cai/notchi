@@ -52,9 +52,13 @@ struct NotchiMark: View {
     /// panel, the resting notch and the menu bar show the same form at the same
     /// moment. Nil gives the mark its own.
     var shared: NotchiDirector? = .work
+    /// Set when the work ends: the shapes leave whatever form they are in and
+    /// settle into this pose, instead of the view being swapped for another.
+    var finale: NotchiFinale? = nil
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var own = NotchiDirector()
+    @State private var outro = NotchiOutro()
     private var director: NotchiDirector { shared ?? own }
 
     var body: some View {
@@ -65,13 +69,13 @@ struct NotchiMark: View {
                 // At the display's own rate (120 Hz on ProMotion) rather than
                 // capped at 60, and drawn off the main thread, so a busy main
                 // thread (a streaming answer laying out) drops fewer frames.
-                TimelineView(.animation(paused: reduceMotion)) { timeline in
+                TimelineView(.animation(paused: reduceMotion || outro.isSettled)) { timeline in
                     let t = timeline.date.timeIntervalSinceReferenceDate
                     // The director keeps state, so it is asked here on the
                     // main thread; only the drawing runs off it.
                     let blobs = reduceMotion
-                        ? NotchiForm.restingEyes
-                        : director.blobs(at: t, mood: mood)
+                        ? (finale?.blobs(.infinity) ?? NotchiForm.restingEyes)
+                        : outro.blobs(at: t, finale: finale) { director.blobs(at: t, mood: mood) }
                     Canvas(rendersAsynchronously: true) { ctx, size in
                         NotchiBlob.draw(blobs, in: &ctx, size: size, unit: h)
                     }
@@ -81,6 +85,85 @@ struct NotchiMark: View {
                 .allowsHitTesting(false)
             }
             .accessibilityHidden(true)
+    }
+}
+
+/// How a mark ends when its work does. Each starts from the resting eyes and
+/// ends holding a pose.
+enum NotchiFinale: Equatable {
+    /// Back to the resting eyes.
+    case rest
+    /// A write landed: eyes shut while the head dips once, then open.
+    case saved
+    /// Something failed: eyes wide apart, one short shake.
+    case alert
+
+    var duration: Double {
+        switch self {
+        case .rest: return 0
+        case .saved: return 1.4
+        case .alert: return 0.8
+        }
+    }
+
+    func blobs(_ t: Double) -> [NotchiBlob] {
+        let t = min(t, duration)
+        switch self {
+        case .rest:
+            return NotchiForm.restingEyes
+        case .saved:
+            let shut = NotchiForm.smooth(t / 0.18) * (1 - NotchiForm.smooth((t - 0.88) / 0.4))
+            let dip = NotchiForm.smooth(t / 0.18) * (1 - 0.7 * NotchiForm.smooth((t - 0.88) / 0.5))
+            let lid = 1 - 0.88 * shut
+            let y = 0.16 * dip
+            return [.eye(-0.5, y, lid: lid), .eye(0.5, y, lid: lid), .hidden(), .hidden()]
+        case .alert:
+            let apart = NotchiForm.smooth(t / 0.26)
+            let shake = 0.2 * sin(2 * .pi * t / 0.14) * exp(-5 * t)
+            let x = 0.5 * (1 + 0.18 * apart)
+            return [.eye(-x + shake), .eye(x + shake), .hidden(), .hidden()]
+        }
+    }
+}
+
+/// One caller's hand-off into a finale: remembers the frame it drew last, and
+/// blends from that frame into the finale, so the end never cuts.
+final class NotchiOutro {
+    private var last: [NotchiBlob]?
+    private var finale: NotchiFinale?
+    private var from: [NotchiBlob] = NotchiForm.restingEyes
+    private var start: Double = -.infinity
+    /// True once the finale holds still; the caller can stop drawing.
+    private(set) var isSettled = false
+
+    static let blend: Double = 0.45
+
+    func blobs(at t: Double, finale wanted: NotchiFinale?, live: () -> [NotchiBlob]) -> [NotchiBlob] {
+        guard let wanted else {
+            if finale != nil {
+                // Back to live work: blend from the frame drawn last.
+                finale = nil
+                from = last ?? NotchiForm.restingEyes
+                start = t
+            }
+            isSettled = false
+            var b = live()
+            let f = NotchiForm.smooth((t - start) / Self.blend)
+            if f < 1 { b = zip(from, b).map { NotchiBlob.lerp($0, $1, f) } }
+            last = b
+            return b
+        }
+        if finale != wanted {
+            finale = wanted
+            from = last ?? NotchiForm.restingEyes
+            start = t
+        }
+        let local = t - start
+        let f = NotchiForm.smooth(local / Self.blend)
+        let b = zip(from, wanted.blobs(local)).map { NotchiBlob.lerp($0, $1, f) }
+        last = b
+        if local > max(Self.blend, wanted.duration) + 0.05 { isSettled = true }
+        return b
     }
 }
 
@@ -104,6 +187,10 @@ struct NotchiBlob {
     var alpha: Double = 1
     /// Draw order: higher draws on top. Lets a shape pass behind another.
     var z: Double = 0
+    /// Vertical scale of the whole shape, corners included: how an eye
+    /// closes. Shortening `h` instead keeps the corners full size and looks
+    /// like the top of the eye was cut off.
+    var squash: Double = 1
 
     /// The mark's layout width, in eye heights: two eyes and the gap.
     static let markWidth: CGFloat = 1.78
@@ -122,9 +209,9 @@ struct NotchiBlob {
     /// An eye. `lid` is the open fraction, `s` a uniform scale.
     static func eye(_ x: Double, _ y: Double = 0, s: Double = 1, lid: Double = 1,
                     sx: Double = 1, rot: Double = 0, alpha: Double = 1, z: Double = 0) -> NotchiBlob {
-        NotchiBlob(x: x, y: y, w: eyeW * s * sx, h: max(0.06, lid) * s,
+        NotchiBlob(x: x, y: y, w: eyeW * s * sx, h: s,
                    tl: bigR * s, tr: smallR * s, br: bigR * s, bl: bigR * s,
-                   rot: rot, alpha: alpha, z: z)
+                   rot: rot, alpha: alpha, z: z, squash: max(0.06, lid))
     }
 
     /// A round dot of diameter `d`.
@@ -154,7 +241,21 @@ struct NotchiBlob {
         if turn > .pi { turn -= 2 * .pi } else if turn < -.pi { turn += 2 * .pi }
         return NotchiBlob(x: m(a.x, b.x), y: m(a.y, b.y), w: m(a.w, b.w), h: m(a.h, b.h),
                           tl: m(a.tl, b.tl), tr: m(a.tr, b.tr), br: m(a.br, b.br), bl: m(a.bl, b.bl),
-                          rot: a.rot + turn * f, alpha: m(a.alpha, b.alpha), z: m(a.z, b.z))
+                          rot: a.rot + turn * f, alpha: m(a.alpha, b.alpha), z: m(a.z, b.z),
+                          squash: m(a.squash, b.squash))
+    }
+
+    /// The shape centred on the origin, unrotated, in points.
+    func path(unit: CGFloat) -> Path {
+        let w = CGFloat(self.w) * unit, h = CGFloat(self.h) * unit
+        let cap = min(w, h) / 2
+        func r(_ v: Double) -> CGFloat { min(CGFloat(v) * unit, cap) }
+        return UnevenRoundedRectangle(
+            cornerRadii: .init(topLeading: r(tl), bottomLeading: r(bl),
+                               bottomTrailing: r(br), topTrailing: r(tr)),
+            style: .continuous
+        ).path(in: CGRect(x: -w / 2, y: -h / 2, width: w, height: h))
+            .applying(CGAffineTransform(scaleX: 1, y: CGFloat(squash)))
     }
 
     /// Top of each shape: warm off-white, the same ink as `NotchiFace`. Bottom:
@@ -164,24 +265,18 @@ struct NotchiBlob {
         let gradient = Gradient(colors: [NotchiMarkPose.ink, NotchiMarkPose.inkLow])
         for b in blobs.sorted(by: { $0.z < $1.z }) {
             let w = CGFloat(b.w) * unit, h = CGFloat(b.h) * unit
-            guard w > 0.05, h > 0.05, b.alpha > 0.01 else { continue }
-            let cap = min(w, h) / 2
-            func r(_ v: Double) -> CGFloat { min(CGFloat(v) * unit, cap) }
-            let rect = CGRect(x: -w / 2, y: -h / 2, width: w, height: h)
-            let shape = UnevenRoundedRectangle(
-                cornerRadii: .init(topLeading: r(b.tl), bottomLeading: r(b.bl),
-                                   bottomTrailing: r(b.br), topTrailing: r(b.tr)),
-                style: .continuous
-            ).path(in: rect)
+            guard w > 0.05, h * b.squash > 0.05, b.alpha > 0.01 else { continue }
+            let shape = b.path(unit: unit)
             let move = CGAffineTransform(translationX: c.x + CGFloat(b.x) * unit,
                                          y: c.y + CGFloat(b.y) * unit)
                 .rotated(by: CGFloat(b.rot))
+            let half = h * CGFloat(b.squash) / 2
             var layer = ctx
             layer.opacity = b.alpha
             layer.fill(shape.applying(move),
                        with: .linearGradient(gradient,
-                                             startPoint: CGPoint(x: 0, y: -h / 2).applying(move),
-                                             endPoint: CGPoint(x: 0, y: h / 2).applying(move)))
+                                             startPoint: CGPoint(x: 0, y: -half).applying(move),
+                                             endPoint: CGPoint(x: 0, y: half).applying(move)))
         }
     }
 }
@@ -261,9 +356,15 @@ enum NotchiForm: CaseIterable {
             func spot(_ i: Int) -> (Double, Double) {
                 spots[Int(Double(spots.count) * Self.hash(seed, i)) % spots.count]
             }
-            let hold = 0.9
-            let i = min(Int(t / hold), 2)
-            let local = t - Double(i) * hold
+            // Holds of 0.6–1.2s, so the looks land on a different beat each play.
+            var i = 0, begun = 0.0
+            while i < 5 {
+                let hold = 0.6 + 0.6 * Self.hash(seed, 20 + i)
+                if t < begun + hold { break }
+                begun += hold
+                i += 1
+            }
+            let local = t - begun
             let from = i == 0 ? (0.0, 0.0) : spot(i - 1)
             let to = spot(i)
             let f = Self.smooth(local / 0.14)
@@ -528,6 +629,13 @@ final class NotchiDirector {
         let form: NotchiForm
         let start: Double
         let seed: Double
+        /// Playback speed of this play, 0.82–1.18, so two plays of one form
+        /// do not run on the same clock.
+        let rate: Double
+        var duration: Double { form.duration / rate }
+        func blobs(_ t: Double) -> [NotchiBlob] {
+            form.blobs(min(max(t, 0), duration) * rate, seed: seed)
+        }
     }
 
     /// How long one form takes to flow into the next.
@@ -539,6 +647,11 @@ final class NotchiDirector {
     private var previous: Play?
     private var mood: NotchiMark.Mood?
     private var recent: [NotchiForm] = []
+    /// What was returned last. A form that starts early (the mood changed)
+    /// blends from this, so it never starts from a frame nobody saw.
+    private var lastDrawn: [NotchiBlob]?
+    /// Set when a form started from `lastDrawn` instead of a live previous play.
+    private var snapshot: [NotchiBlob]?
     /// The latest time asked for. Callers on different clocks (a TimelineView,
     /// a Timer) ask a few ms apart; time never runs backwards inside one play.
     private var latest: Double = -.infinity
@@ -567,36 +680,52 @@ final class NotchiDirector {
         // The same forms, so asking for one or the other does not restart them.
         if mood == .waiting { mood = .composing }
         // Nobody drew for a while (the work ended): start fresh instead of
-        // playing through every form that would have run meanwhile.
-        if time - latest > 1 { current = nil; previous = nil }
+        // playing through every form that would have run meanwhile. Every
+        // caller shows the resting eyes while idle, so fresh starts there.
+        if time - latest > 1 { current = nil; previous = nil; snapshot = nil; lastDrawn = nil }
         let time = max(time, latest)
         latest = time
         if current == nil || mood != self.mood {
             // First frame, or the mood changed: start a form of the new mood
-            // now, blending from wherever the old one was.
+            // now, blending from the frame drawn last.
+            let wasEyes = current?.form.isEyes ?? false
             self.mood = mood
-            begin(next(eyes: current == nil || current?.form.isEyes == false, mood: mood), at: time)
+            snapshot = lastDrawn ?? NotchiForm.restingEyes
+            begin(next(eyes: !wasEyes, mood: mood), at: time)
         }
         guard var play = current else { return NotchiForm.restingEyes }
-        while time >= play.start + play.form.duration {
-            begin(next(eyes: !play.form.isEyes, mood: mood), at: play.start + play.form.duration)
+        while time >= play.start + play.duration {
+            snapshot = nil
+            begin(next(eyes: nextIsEyes(after: play.form), mood: mood), at: play.start + play.duration)
             play = current!
         }
-        let now = play.form.blobs(time - play.start, seed: play.seed)
-        guard let prev = previous, time - play.start < Self.blend else { return now }
-        // The outgoing form holds its last frame while the incoming one takes
-        // over.
-        let then = prev.form.blobs(min(time - prev.start, prev.form.duration), seed: prev.seed)
-        let f = NotchiForm.smooth((time - play.start) / Self.blend)
-        return zip(then, now).map { NotchiBlob.lerp($0, $1, f) }
+        let now = play.blobs(time - play.start)
+        var out = now
+        if time - play.start < Self.blend {
+            // The outgoing form holds its last frame (or the frame drawn when
+            // the mood changed) while the incoming one takes over.
+            let then = snapshot ?? previous.map { $0.blobs(time - $0.start) }
+            if let then {
+                let f = NotchiForm.smooth((time - play.start) / Self.blend)
+                out = zip(then, now).map { NotchiBlob.lerp($0, $1, f) }
+            }
+        }
+        lastDrawn = out
+        return out
     }
 
     private func begin(_ form: NotchiForm, at time: Double) {
-        previous = current.map { Play(form: $0.form, start: $0.start, seed: $0.seed) }
-        current = Play(form: form, start: time, seed: random())
+        previous = current
+        current = Play(form: form, start: time, seed: random(), rate: 0.82 + 0.36 * random())
         formsStarted += 1
         recent.append(form)
         if recent.count > 8 { recent.removeFirst() }
+    }
+
+    /// Eye forms and transformations mostly alternate; now and then two eye
+    /// forms run back to back, so the order has no fixed beat.
+    private func nextIsEyes(after form: NotchiForm) -> Bool {
+        form.isEyes ? random() < 0.25 : true
     }
 
     /// The next form: from the eye set or the transformation set, never one

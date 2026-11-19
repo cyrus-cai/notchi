@@ -108,14 +108,22 @@ struct ContentView: View {
             if NotchModel.threadSearchEnabled,
                AppShortcutStore.matches(.filter, event: event),
                model.mode == .result, !model.turns.isEmpty,
+               !(metrics.floating && MenuBarChat.takesOver(model)),
                !model.showSettings, !model.showHistory, !model.showWhatsNew {
                 withAnimation(.easeOut(duration: Tokens.hoverFade)) { model.openThreadSearch() }
                 return true
             }
+            // ⌘F in the menu bar card opens Recent's window with the caret in
+            // its search field. A search bar inside the card was too cramped.
+            if metrics.floating, MenuBarChat.takesOver(model),
+               AppShortcutStore.matches(.filter, event: event) {
+                HistoryArchiveWindowController.shared.present(model: model, focusSearch: true)
+                return true
+            }
             // In Agent, ⌘↵ starts this task and opens its live detail page.
-            // Outside Agent it asks the line in the background and leaves the
-            // prompt on screen for the next question (`submitAndStay`). Fresh
-            // prompt only. keyCode 36 is Return.
+            // Outside Agent it saves the line into the thread without a reply
+            // and leaves the prompt on screen (`submitAndStay`). keyCode 36 is
+            // Return.
             if ReservedAppShortcut.sendOther.matches(event),
                model.mode == .idle,
                !model.showSettings, !model.showWhatsNew, !model.showHistory,
@@ -123,10 +131,20 @@ struct ContentView: View {
                 if model.agentComposeActive {
                     return model.submitAgentAndOpenDetail()
                 }
-                if model.hasText {
+                if model.hasText || !model.askComposeImages.isEmpty {
                     model.submitAndStay()
                     return true
                 }
+            }
+            // In the follow-up field, ⌘↵ adds the line to the thread on screen
+            // without a reply.
+            if ReservedAppShortcut.sendOther.matches(event),
+               model.mode == .result, model.hasText || !model.askComposeImages.isEmpty,
+               !model.threadIsAgentRun,
+               !model.showSettings, !model.showWhatsNew, !model.showHistory,
+               model.agentDetailTaskID == nil,
+               model.saveFollowUpWithoutReply() {
+                return true
             }
             // The prompt's two destination switches are customizable too. They
             // stay scoped to the live composer so the same chord remains free in
@@ -240,6 +258,13 @@ struct ContentView: View {
             // everywhere else.
             if event.keyCode == 123, ImageLightboxCenter.shared.step(-1, in: event.window) { return true }
             if event.keyCode == 124, ImageLightboxCenter.shared.step(1, in: event.window) { return true }
+            // ← / → move the selected Text action under a composer that
+            // carries quoted text, while its field is empty.
+            if event.keyCode == 123 || event.keyCode == 124,
+               SummonHotKey.carbonModifiers(from: event.modifierFlags) == 0,
+               model.stepQuotedPick(event.keyCode == 123 ? -1 : 1) {
+                return true
+            }
             // Esc: if the recent list is open, fold just that back to the input
             // first (one step "out"); only a second Esc closes the whole panel.
             // Mid-request it closes too — the in-flight answer finishes in the
@@ -587,7 +612,7 @@ final class RestingResult: ObservableObject {
         item = nil
     }
 
-    private static var screenLocked: Bool {
+    static var screenLocked: Bool {
         guard let session = CGSessionCopyCurrentDictionary() as? [String: Any] else { return false }
         return (session["CGSSessionScreenIsLocked"] as? Bool) == true
     }
@@ -617,17 +642,26 @@ private struct BackgroundWorkEars: View {
         return true
     }
 
+    private var markMood: NotchiMark.Mood {
+        if case .running(let mood) = stage { return mood }
+        return .composing
+    }
+
+    private var markFinale: NotchiFinale? {
+        if case .finished(let failed) = stage { return failed ? .alert : .saved }
+        return nil
+    }
+
     var body: some View {
         HStack(spacing: 0) {
             // Left ear — NotchiMark, or the finished verdict, at the outer edge.
             HStack(spacing: 0) {
                 ZStack {
                     switch stage {
-                    case .running(let mood):
-                        NotchiMark(mood: mood, eyeHeight: 8)
-                            .transition(.opacity)
-                    case .finished(let failed):
-                        NotchiFace(expression: failed ? .alert : .saved)
+                    case .running, .finished:
+                        // One mark for both: when the work ends, the shapes
+                        // flow from the form they are in into the verdict.
+                        NotchiMark(mood: markMood, eyeHeight: 8, finale: markFinale)
                             .transition(.opacity)
                     case .licensed:
                         RestingLicenseEar()
@@ -1009,8 +1043,8 @@ struct NotchIsland: View {
         MenuBarChat(model: model, isOpen: isOpen)
             .environment(\.colorScheme, systemAppearance.colorScheme)
             .environment(\.menuCardLight, !systemAppearance.isDark)
-            .linkGateHost(active: isOpen)
-            .imageLightboxHost()
+            .linkGateHost(active: isOpen, floating: true)
+            .imageLightboxHost(floating: true)
             .background(GeometryReader { proxy in
                 Color.clear
                     .onAppear { model.registerIslandFrame(proxy.frame(in: .global), for: metrics.displayID) }
@@ -1027,8 +1061,21 @@ struct NotchIsland: View {
                     model.collapseOnLeave(from: metrics.displayID, sequenced: !reduceMotion)
                 }
             }
-            .padding(.trailing, NotchMetrics.floatingInset)
+            .padding(.trailing, menuBarChatTrailing)
             .frame(maxWidth: .infinity, alignment: .trailing)
+    }
+
+    /// The chat column is wider than its bubbles, which are leading-aligned.
+    /// With the card set to the right (`MenuBarCardPlacement.right`) the
+    /// column's empty trailing part goes past the canvas edge, so the bubbles
+    /// end `floatingInset` from the screen's right edge.
+    private var menuBarChatTrailing: CGFloat {
+        // The routines side page fills the whole column, so it keeps the inset.
+        guard metrics.displayID == NotchModel.menuBarCardDisplay,
+              MenuBarCardPlacement.current == .right, !model.showRoutines else {
+            return NotchMetrics.floatingInset
+        }
+        return NotchMetrics.floatingInset - MenuBarChat.trailingSlack
     }
 
     private var islandBody: some View {

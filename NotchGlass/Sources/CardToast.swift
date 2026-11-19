@@ -72,8 +72,52 @@ final class CardToasts {
     /// How long a card stays once the pointer leaves it.
     private static let holdAfterHover: TimeInterval = 4
 
+    /// How long a card stays: the time to read its text, plus a margin.
+    /// About 7 CJK characters or 17 other characters a second.
     static func hold(for body: String) -> TimeInterval {
-        body.count > 120 ? 12 : 8
+        var cjk = 0
+        var other = 0
+        for scalar in body.unicodeScalars where !scalar.properties.isWhitespace {
+            switch scalar.value {
+            case 0x3040...0x30FF, 0x3400...0x4DBF, 0x4E00...0x9FFF, 0xAC00...0xD7AF,
+                 0xF900...0xFAFF, 0xFF00...0xFFEF:
+                cjk += 1
+            default:
+                other += 1
+            }
+        }
+        let reading = Double(cjk) / 7 + Double(other) / 17
+        return min(max(2.5 + reading, 4), 20)
+    }
+
+    /// Whether the next card of a sequence may still come. Set by `AppDelegate`.
+    var sequenceMayContinue: () -> Bool = { true }
+    /// The cards of a sequence not shown yet, and the one on screen.
+    private var queued: [(threadID: UUID, body: String)] = []
+    private weak var sequenceToast: Toast?
+    private static let sequenceGap: TimeInterval = 0.3
+
+    /// Show `bodies` one card at a time: each stays for its reading time, and
+    /// the next comes when it leaves. Replaces a sequence still running.
+    func showInSequence(threadID: UUID, title: String, bodies: [String]) {
+        cancelSequence()
+        guard let first = bodies.first else { return }
+        queued = bodies.dropFirst().map { (threadID, $0) }
+        sequenceToast = show(threadID: threadID, title: title, body: first,
+                             hold: Self.hold(for: first))
+    }
+
+    func cancelSequence() {
+        queued = []
+        sequenceToast = nil
+    }
+
+    private func showNextInSequence() {
+        guard !queued.isEmpty else { return }
+        guard sequenceMayContinue() else { return cancelSequence() }
+        let next = queued.removeFirst()
+        sequenceToast = show(threadID: next.threadID, title: "", body: next.body,
+                             hold: Self.hold(for: next.body))
     }
 
     fileprivate final class Content: ObservableObject {
@@ -133,6 +177,7 @@ final class CardToasts {
             },
             onTap: { [weak self, weak toast] in
                 guard let self, let toast else { return }
+                self.cancelSequence()
                 self.openThread(toast.threadID)
                 self.dismiss(toast)
             })
@@ -186,6 +231,12 @@ final class CardToasts {
         toast.dismissal?.cancel()
         guard let index = shown.firstIndex(where: { $0 === toast }) else { return }
         shown.remove(at: index)
+        if toast === sequenceToast {
+            sequenceToast = nil
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.sequenceGap) { [weak self] in
+                self?.showNextInSequence()
+            }
+        }
         let origin = toast.panel.frame.origin
         toast.flight.fly(toast.panel,
                          to: NSPoint(x: origin.x + NotchMetrics.floatingTravel, y: origin.y),
@@ -232,6 +283,9 @@ final class ToastPanel: NSPanel {
         hidesOnDeactivate = false
         isMovable = false
         isReleasedWhenClosed = false
+        // The card is dark glass, like the island; without this its text follows
+        // a light-mode Mac into dark ink.
+        appearance = NSAppearance(named: .darkAqua)
         collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary, .ignoresCycle]
     }
 
