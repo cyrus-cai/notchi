@@ -823,17 +823,15 @@ final class TelegramBridge: ObservableObject {
         return nearestReaction[bare] ?? "👀"
     }
 
-    /// Follows the round once a second (Telegram's edit rate for one chat) and
-    /// mirrors the answer into one message, then writes the final text with
+    /// Follows the round once a second and waits for it to finish; nothing of a
+    /// half-written answer is shown. The finished text goes out with
     /// formatting. Pending questions go out as inline buttons.
     private func stream(thread: UUID, seedIDs: Set<UUID>, chatID: Int64, replyTo firstReplyTo: Int) async {
         guard let model else { return }
         var replyTo = firstReplyTo
         var sentID: Int?
-        var lastShown = ""
         var sawLive = false
         var askedQuestions: Set<UUID> = []
-        var lastActivity = ""
         var ticks = 0
         // A follow-up the round read mid-answer: the text before it stays in
         // the message above it, the text after it goes into a new message
@@ -878,40 +876,13 @@ final class TelegramBridge: ObservableObject {
                 }
                 base = raw.count
                 sentID = nil
-                lastShown = ""
-                lastActivity = ""
                 replyTo = newest
                 continue
             }
-            let shown = Self.plain(String(answer.text.dropFirst(min(base, answer.text.count))))
-            if shown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                // The wait row's line, as the notch shows it over an empty answer.
-                let activity = (answer.toolActivity ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-                if !activity.isEmpty, activity != lastActivity {
-                    lastActivity = activity
-                    if let sentID {
-                        await call("editMessageText", ["chat_id": chatID, "message_id": sentID, "text": activity])
-                    } else {
-                        let result = await call("sendMessage", ["chat_id": chatID, "text": activity,
-                                                                "reply_to_message_id": replyTo])
-                        sentID = Self.messageID(result)
-                        if let sentID { remember(messageID: sentID, chatID: chatID, thread: thread) }
-                    }
-                }
-                if ticks % 4 == 0 { await call("sendChatAction", ["chat_id": chatID, "action": "typing"]) }
-                continue
-            }
-            guard shown != lastShown else { continue }
-            let preview = String(shown.prefix(Self.messageLimit))
-            if let sentID {
-                await call("editMessageText", ["chat_id": chatID, "message_id": sentID, "text": preview])
-            } else {
-                let result = await call("sendMessage", ["chat_id": chatID, "text": preview,
-                                                        "reply_to_message_id": replyTo])
-                sentID = Self.messageID(result)
-                if let sentID { remember(messageID: sentID, chatID: chatID, thread: thread) }
-            }
-            lastShown = shown
+            // No streaming preview and no tool-activity line: the chat shows the
+            // finished answer only (the user asked for no intermediate
+            // "thinking" state, 2026-11-20). Typing keeps the wait readable.
+            if ticks % 4 == 0 { await call("sendChatAction", ["chat_id": chatID, "action": "typing"]) }
         }
 
         let turn = model.history.first(where: { $0.id == thread })?.conversation

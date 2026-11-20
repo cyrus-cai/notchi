@@ -117,6 +117,18 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.9.42",
+            date: "2026-11-20",
+            features: [
+                "Proactive messages keep a notebook of what you are waiting on. Open it in Settings.",
+            ],
+            improvements: [
+                "Proactive messages adapt to how often you reply.",
+                "Paid models in Settings are grouped by vendor.",
+                "Telegram shows only the finished answer.",
+            ]
+        ),
+        Entry(
             version: "0.9.41",
             date: "2026-11-19",
             features: [

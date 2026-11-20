@@ -1381,6 +1381,9 @@ struct InlineSettingsView: View {
                 customInstructionsRow
                 suggestFollowUpRow
                 proactiveRow
+                if proactive.level != .off {
+                    UnderlineLink(title: L("proactive.notebook.open"), external: true) { proactive.openNotebook() }
+                }
                 lidClosedRow
                 if DebugFeatureFlags.cloudMachine {
                     cloudMachineSection
@@ -3455,7 +3458,7 @@ struct InlineSettingsView: View {
                 // them. A lineup that is all one kind gets no headings.
                 let rows = Self.cheapestFirst(NotchiModelVisibility.ordered(nonoLineupRows, id: \.id))
                 let free = rows.filter { Self.isFree($0) }
-                let paid = rows.filter { !Self.isFree($0) }
+                let paid = Self.byVendor(rows.filter { !Self.isFree($0) })
                 if !free.isEmpty, !paid.isEmpty {
                     pricingGroupHeader(L("nono.pricing.freeModels"))
                         .padding(.top, 12)
@@ -3468,7 +3471,7 @@ struct InlineSettingsView: View {
                         pricingRow(row)
                     }
                 } else {
-                    ForEach(rows) { row in
+                    ForEach(free.isEmpty ? paid : rows) { row in
                         pricingRow(row)
                     }
                 }
@@ -3488,6 +3491,16 @@ struct InlineSettingsView: View {
             if leftRates != rightRates { return leftRates < rightRates }
             return a.offset < b.offset
         }.map(\.element)
+    }
+
+    /// OpenAI, Anthropic, Google, then every other vendor. Rows of one vendor
+    /// keep the order they came in (cheapest first).
+    private static func byVendor(_ rows: [NonoLineupRow]) -> [NonoLineupRow] {
+        let order = ["OpenAI", "Anthropic", "Google"]
+        func rank(_ row: NonoLineupRow) -> Int { order.firstIndex(of: row.info.vendor) ?? order.count }
+        return rows.enumerated()
+            .sorted { (rank($0.element), $0.offset) < (rank($1.element), $1.offset) }
+            .map(\.element)
     }
 
     /// Input and output both $0. A row whose rates have not loaded is not free.

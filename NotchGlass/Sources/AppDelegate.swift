@@ -699,6 +699,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let env = ProcessInfo.processInfo.environment
         // NOTCH_OPEN_CARD=1 opens the menu bar icon's card a second after
         // launch, once the status item has a frame. Screenshot aid only.
+        // NOTCH_DEMO_APPEARANCE=light|dark overrides the app's appearance.
+        // Screenshot aid only.
+        switch env["NOTCH_DEMO_APPEARANCE"] {
+        case "light": NSApp.appearance = NSAppearance(named: .aqua)
+        case "dark":  NSApp.appearance = NSAppearance(named: .darkAqua)
+        default: break
+        }
         if env["NOTCH_OPEN_CARD"] == "1" {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
                 self?.toggleMenuBarCard(tip: false)
@@ -756,6 +763,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // without any clicking. Debug aid only.
             if env["NOTCH_DEMO_THREAD"] == "1" {
                 model.seedDemoThread()
+            }
+            // NOTCH_DEMO_NO_PEEK=1 hides the main thread's last answer above
+            // the idle prompt. Screenshot aid only.
+            if env["NOTCH_DEMO_NO_PEEK"] == "1" {
+                model.unifiedThreadsEnabled = false
+            }
+            if let raw = env["NOTCH_DEMO_TURNS"], !raw.isEmpty {
+                model.seedDemoTurns(raw)
             }
             // NOTCH_DEMO_HISTORY=1 expands the recent list at launch so the idle
             // panel (RECENT header + Clear pill) can be inspected without a hover.

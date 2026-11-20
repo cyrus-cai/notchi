@@ -6,15 +6,11 @@ import SwiftUI
 // MARK: - Level
 
 /// How often Notchi writes to the user without being asked (Settings → Chat).
-/// Each level adds sources to the one before it and raises the daily limit;
-/// `frequent` has no daily limit.
 ///
-///   - `minimal`: a reminder that is due, a calendar event about to start.
-///   - `balanced`: also the things the user said they would do by a time
-///     (`ProactiveEngine.considerFollowUp`).
-///   - `frequent`: also anything from a conversation worth checking back on,
-///     with or without a time, shaped by how the user answered earlier ones
-///     (`ProactiveEngine.outcomes`).
+/// Every level runs the same agent (`ProactiveEngine.think`); a level sets how
+/// often it wakes on its own in working hours, how many messages a day it may
+/// send, and the score Jev must give a message. Due reminders and events that
+/// are about to start are sent at every level.
 enum ProactiveLevel: String, CaseIterable, Identifiable {
     case off, minimal, balanced, frequent
 
@@ -22,7 +18,7 @@ enum ProactiveLevel: String, CaseIterable, Identifiable {
     var label: String { L("proactive.level.\(rawValue)") }
 
     /// Messages in any 24 hours, every source counted. `frequent` has none:
-    /// the user's replies set its pace (`ProactiveEngine.followUpGap`).
+    /// the user's replies set its pace (`ProactiveEngine.messageGap`).
     var dailyCap: Int {
         switch self {
         case .off: return 0
@@ -32,21 +28,25 @@ enum ProactiveLevel: String, CaseIterable, Identifiable {
         }
     }
 
-    /// The gap a follow-up keeps from the message before it. A due reminder or
-    /// a starting event has a time of its own and is held to the cap only.
-    var followUpGap: TimeInterval {
+    /// The gap an agent message keeps from the message before it. A due
+    /// reminder or a starting event has a time of its own and is held to the
+    /// cap only.
+    var messageGap: TimeInterval {
         self == .frequent ? 15 * 60 : 60 * 60
     }
 
-    /// Follow-ups on any topic, not only things the user said they would do
-    /// by a time.
-    var followsUpAnything: Bool { self == .frequent }
-
-    var followsUp: Bool { self == .balanced || self == .frequent }
+    /// How long the agent goes without waking in working hours.
+    var wakeInterval: TimeInterval? {
+        switch self {
+        case .off: return nil
+        case .minimal: return 4 * 3600
+        case .balanced: return 2 * 3600
+        case .frequent: return 3600
+        }
+    }
 
     /// The lowest score Jev may give a message for it to be sent
-    /// (`NoNoAccount.checkProactive`). A higher level sends more of what is
-    /// due.
+    /// (`NoNoAccount.checkProactive`).
     var floor: Double {
         switch self {
         case .off: return 1
@@ -76,16 +76,21 @@ enum ProactiveLevel: String, CaseIterable, Identifiable {
 
 // MARK: - Engine
 
-/// Decides when Notchi writes first. Once a minute it collects what is due
-/// (reminders, calendar events, stored follow-ups), drops what the level's
-/// limits rule out, and hands one message to `NotchModel.postProactiveMessage`,
-/// which writes it into the main thread and shows a line on the resting notch.
+/// Decides when Notchi writes first, in three parts.
 ///
-/// The limits come first and cost nothing. What passes them is put to Jev
-/// (`NoNoAccount.checkProactive`): a score under the level's `floor` drops the
-/// message for good, and no answer sends it. The lines themselves are not
-/// written here: a reminder's and an event's are fixed sentences, and a
-/// follow-up's was written when it was stored.
+/// Wake: the agent wakes on the level's interval in working hours, at a time it
+/// set for itself last time, and when the user comes back to the Mac. After
+/// every Ask round it also updates its notebook, without writing to the user.
+///
+/// Think: one agent run (`think`) with read-only tools (time, calendar,
+/// reminders, web, pages, mail, clipboard, the user's history here) and its
+/// notebook (`notebook`, a Markdown file the user can open and edit). It
+/// rewrites the notebook, picks its next wake, and may hand over one message.
+///
+/// Speak: every message passes the same gate (`allows`): quiet hours, not in a
+/// meeting, the user at the Mac, the daily cap, the gap, and Jev's score. Due
+/// reminders and starting events are found without the agent and pass the cap
+/// and Jev only.
 @MainActor
 final class ProactiveEngine: ObservableObject {
     static let shared = ProactiveEngine()
@@ -94,30 +99,15 @@ final class ProactiveEngine: ObservableObject {
         didSet {
             guard level != oldValue else { return }
             ProactiveLevel.stored = level
-            if level == .off { followUps = [] }
+            if level == .off { pending = nil }
         }
     }
 
     weak var model: NotchModel?
 
-    /// Something the user said they would do, with the line to send when its
-    /// time comes.
-    struct FollowUp: Codable, Equatable {
-        var id = UUID()
-        var text: String
-        var fireAt: Date
-    }
-
-    private(set) var followUps: [FollowUp] = [] {
-        didSet {
-            guard followUps != oldValue else { return }
-            UserDefaults.standard.set(try? JSONEncoder().encode(followUps), forKey: Self.followUpsKey)
-        }
-    }
-
     /// A message Notchi sent on its own and what the user did with it. The
-    /// last `outcomeLimit` go into the follow-up prompt, so what Notchi
-    /// writes next follows what the user answered and what they let pass.
+    /// last `outcomeLimit` go to the agent, so what it writes next follows
+    /// what the user answered and what they let pass.
     struct Outcome: Codable, Equatable {
         var text: String
         var sentAt: Date
@@ -138,9 +128,13 @@ final class ProactiveEngine: ObservableObject {
     /// How long after a message the user's next one counts as the reply to it.
     private static let replyWindow: TimeInterval = 6 * 3600
 
-    private static let followUpsKey = "proactive.followUps"
     private static let sentAtKey = "proactive.sentAt"
     private static let seenKey = "proactive.seen"
+    private static let lastWakeKey = "proactive.lastWake"
+    private static let nextWakeKey = "proactive.nextWake"
+    private static let wakeLogKey = "proactive.wakes"
+    /// Follow-ups stored before the agent existed; moved into the notebook once.
+    private static let legacyFollowUpsKey = "proactive.followUps"
 
     private static let tickInterval: TimeInterval = 60
     /// How long before its start an event is announced.
@@ -148,25 +142,56 @@ final class ProactiveEngine: ObservableObject {
     /// How long after its time a message is still worth sending.
     private static let eventGrace: TimeInterval = 5 * 60
     private static let reminderGrace: TimeInterval = 30 * 60
-    private static let followUpGrace: TimeInterval = 12 * 3600
     /// The hour reminders due today with no time are sent.
     private static let dayReminderHour = 9
-    private static let followUpLimit = 50
+
+    /// Weekdays, from `workStartHour` to `workEndHour` local time: when the
+    /// agent wakes on its own interval.
+    private static let workStartHour = 9
+    private static let workEndHour = 19
+    /// Any day, from `dayStartHour` to `dayEndHour`: when an agent message may
+    /// be sent and a wake the agent set for itself may run.
+    private static let dayStartHour = 8
+    private static let dayEndHour = 22
+    /// Away from the Mac this long: an agent message waits for the user.
+    private static let awayAfter: TimeInterval = 5 * 60
+    /// Away this long and back: the agent wakes.
+    private static let returnAfter: TimeInterval = 10 * 60
+    /// The fewest minutes between two wakes of any kind.
+    private static let wakeGap: TimeInterval = 30 * 60
+    private static let wakesPerDay = 24
+    /// Tool rounds in one wake, and search rounds among them.
+    private static let toolRounds = 6
+    private static let searchRounds = 3
+    /// How long an agent message waits for the gate before it is dropped.
+    private static let messageGrace: TimeInterval = 2 * 3600
+    private static let notebookLimit = 6000
+    private static let digestLimit = 8000
 
     private var timer: Timer?
     private var ticking = false
     private var store = EKEventStore()
     private var storeStatus: [EKAuthorizationStatus] = []
 
+    /// The message the last wake handed over, until it is sent or dropped.
+    private var pending: Candidate?
+    /// Agent runs and notebook updates, one after another, so two never
+    /// write the notebook at once.
+    private var job: Task<Void, Never>?
+    private var thinking = false
+    private var wasAway = false
+    private var cameBack = false
+
+    /// The notebook's text, for Settings.
+    @Published private(set) var notebook: String = ""
+
     private init() {
-        if let data = UserDefaults.standard.data(forKey: Self.followUpsKey),
-           let saved = try? JSONDecoder().decode([FollowUp].self, from: data) {
-            followUps = saved
-        }
         if let data = UserDefaults.standard.data(forKey: Self.outcomesKey),
            let saved = try? JSONDecoder().decode([Outcome].self, from: data) {
             outcomes = saved
         }
+        notebook = (try? String(contentsOf: Self.notebookURL, encoding: .utf8)) ?? ""
+        migrateFollowUps()
     }
 
     /// Start the minute timer. Called once from `NotchModel.init`.
@@ -190,6 +215,50 @@ final class ProactiveEngine: ObservableObject {
         return Date().timeIntervalSince(last) < seconds
     }
 
+    // MARK: Notebook
+
+    static var notebookURL: URL {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        return base.appendingPathComponent("Notch", isDirectory: true)
+            .appendingPathComponent("proactive-notebook.md")
+    }
+
+    /// The notebook as the agent reads it: the file on disk, which the user
+    /// may have edited.
+    private func readNotebook() -> String {
+        let text = (try? String(contentsOf: Self.notebookURL, encoding: .utf8)) ?? ""
+        if text != notebook { notebook = text }
+        return text
+    }
+
+    private func writeNotebook(_ text: String) {
+        let trimmed = String(text.trimmingCharacters(in: .whitespacesAndNewlines).prefix(Self.notebookLimit))
+        try? FileManager.default.createDirectory(at: Self.notebookURL.deletingLastPathComponent(),
+                                                 withIntermediateDirectories: true)
+        try? (trimmed.isEmpty ? "" : trimmed + "\n").write(to: Self.notebookURL, atomically: true, encoding: .utf8)
+        notebook = trimmed
+    }
+
+    /// Open the notebook in the user's editor, from Settings.
+    func openNotebook() {
+        if !FileManager.default.fileExists(atPath: Self.notebookURL.path) { writeNotebook(notebook) }
+        NSWorkspace.shared.open(Self.notebookURL)
+    }
+
+    /// Follow-ups stored before the agent existed become notebook lines, and
+    /// the earliest one the next wake.
+    private func migrateFollowUps() {
+        struct FollowUp: Codable { var text: String; var fireAt: Date }
+        let defaults = UserDefaults.standard
+        guard let data = defaults.data(forKey: Self.legacyFollowUpsKey) else { return }
+        defaults.removeObject(forKey: Self.legacyFollowUpsKey)
+        guard let saved = try? JSONDecoder().decode([FollowUp].self, from: data), !saved.isEmpty else { return }
+        let stamp = Self.stampFormatter("yyyy-MM-dd HH:mm")
+        let lines = saved.map { "- Bring up at \(stamp.string(from: $0.fireAt)): \($0.text)" }
+        writeNotebook((readNotebook() + "\n" + lines.joined(separator: "\n")))
+        if let first = saved.map(\.fireAt).min(), first > Date() { nextWake = first }
+    }
+
     // MARK: Tick
 
     private struct Candidate {
@@ -199,25 +268,31 @@ final class ProactiveEngine: ObservableObject {
         let glance: String
         let due: Date
         let expires: Date
-        var followUp: UUID?
+        /// Written by the agent; passes the whole gate.
+        var fromAgent = false
 
         /// `reminder`, `event` or `followup`: the key's own prefix, and what
         /// the gateway's `kind` takes.
         var kind: String {
-            if followUp != nil { return "followup" }
+            if fromAgent { return "followup" }
             return key.hasPrefix("event:") ? "event" : "reminder"
         }
     }
 
     private func tick() {
-        guard level != .off, !ticking, model != nil, !LicenseLock.isLocked else { return }
+        guard level != .off, model != nil, !LicenseLock.isLocked else { return }
+        let now = Date()
+        noteAway(now: now)
+        maybeWake(now: now)
+        guard !ticking else { return }
         ticking = true
         Task { [weak self] in
             guard let self else { return }
             defer { self.ticking = false }
-            let now = Date()
             var candidates = await self.dueReminders(now: now) + self.dueEvents(now: now)
-            if self.level.followsUp { candidates += self.dueFollowUps(now: now) }
+            if let pending = self.pending {
+                if pending.expires < now { self.pending = nil } else { candidates.append(pending) }
+            }
             candidates.sort { $0.due < $1.due }
 
             var seen = self.seen
@@ -225,7 +300,6 @@ final class ProactiveEngine: ObservableObject {
             for candidate in candidates where seen[candidate.key] == nil {
                 if candidate.expires < now {
                     seen[candidate.key] = now
-                    if let id = candidate.followUp { self.followUps.removeAll { $0.id == id } }
                     continue
                 }
                 guard self.level != .off, self.allows(candidate, now: now) else { continue }
@@ -234,7 +308,7 @@ final class ProactiveEngine: ObservableObject {
                 guard self.model?.canPostProactiveMessage == true else { return }
                 if let score = await self.worth(candidate, now: now), score < self.level.floor {
                     seen[candidate.key] = now
-                    if let id = candidate.followUp { self.followUps.removeAll { $0.id == id } }
+                    if candidate.fromAgent { self.pending = nil }
                     continue
                 }
                 // A round is being written into the main thread: next minute.
@@ -244,32 +318,36 @@ final class ProactiveEngine: ObservableObject {
                 self.sentDates = self.sentDates + [now]
                 self.outcomes = Array((self.outcomes + [Outcome(text: candidate.text, sentAt: now)])
                     .suffix(Self.outcomeLimit))
-                if let id = candidate.followUp { self.followUps.removeAll { $0.id == id } }
+                if candidate.fromAgent { self.pending = nil }
                 // One message a minute at most.
                 return
             }
         }
     }
 
+    /// The gate. Every message: the daily cap. An agent message also: the
+    /// hours of the day, not during a meeting, the user at the Mac, and the
+    /// level's gap, doubled for each message in a row the user let pass.
     private func allows(_ candidate: Candidate, now: Date) -> Bool {
         let sent = sentDates
         guard sent.count < level.dailyCap else { return false }
-        if candidate.followUp != nil, let last = sent.last,
-           now.timeIntervalSince(last) < followUpGap(now: now) {
-            return false
-        }
+        guard candidate.fromAgent else { return true }
+        let hour = Calendar.current.component(.hour, from: now)
+        guard hour >= Self.dayStartHour, hour < Self.dayEndHour else { return false }
+        guard Self.idleSeconds() < Self.awayAfter, !inMeeting(now: now) else { return false }
+        if let last = sent.last, now.timeIntervalSince(last) < messageGap(now: now) { return false }
         return true
     }
 
     /// The level's gap, doubled for each message in a row the user let pass,
     /// up to eight hours. One reply brings it back.
-    private func followUpGap(now: Date) -> TimeInterval {
+    private func messageGap(now: Date) -> TimeInterval {
         var ignored = 0
         for outcome in outcomes.reversed() {
             if outcome.reply != nil { break }
             if now.timeIntervalSince(outcome.sentAt) >= Self.replyWindow { ignored += 1 }
         }
-        return min(level.followUpGap * pow(2, Double(min(ignored, 5))), 8 * 3600)
+        return min(level.messageGap * pow(2, Double(min(ignored, 5))), 8 * 3600)
     }
 
     /// The user wrote `reply` right after Notchi's own message `to`: keep it as
@@ -280,11 +358,9 @@ final class ProactiveEngine: ObservableObject {
         outcomes[i].reply = String(reply.trimmingCharacters(in: .whitespacesAndNewlines).prefix(300))
     }
 
-    /// The outcomes as lines for the follow-up prompt.
+    /// The outcomes as lines for the agent.
     private func outcomeLines(now: Date) -> String {
-        let stamp = DateFormatter()
-        stamp.locale = Locale(identifier: "en_US_POSIX")
-        stamp.dateFormat = "MM-dd HH:mm"
+        let stamp = Self.stampFormatter("MM-dd HH:mm")
         return outcomes.compactMap { o in
             let result: String
             if let reply = o.reply {
@@ -292,7 +368,7 @@ final class ProactiveEngine: ObservableObject {
             } else if now.timeIntervalSince(o.sentAt) >= Self.replyWindow {
                 result = "no reply"
             } else {
-                return nil
+                result = "no reply yet"
             }
             return "- \(stamp.string(from: o.sentAt)) you wrote: \"\(o.text)\" → \(result)"
         }.joined(separator: "\n")
@@ -304,9 +380,7 @@ final class ProactiveEngine: ObservableObject {
     private func worth(_ candidate: Candidate, now: Date) async -> Double? {
         let message = String(candidate.text.prefix(600))
         guard !ClipPrivacy.containsSecret(message) else { return nil }
-        let clock = DateFormatter()
-        clock.locale = Locale(identifier: "en_US_POSIX")
-        clock.dateFormat = "EEEE HH:mm"
+        let clock = Self.stampFormatter("EEEE HH:mm")
         return await NoNoAccount.shared.checkProactive(
             kind: candidate.kind, message: message,
             localTime: clock.string(from: now), sentToday: sentDates.count)?.probability
@@ -333,7 +407,348 @@ final class ProactiveEngine: ObservableObject {
         set { UserDefaults.standard.set(newValue, forKey: Self.seenKey) }
     }
 
-    // MARK: Sources
+    // MARK: Wake
+
+    private var lastWake: Date? {
+        get { UserDefaults.standard.object(forKey: Self.lastWakeKey) as? Date }
+        set { UserDefaults.standard.set(newValue, forKey: Self.lastWakeKey) }
+    }
+
+    /// The time the agent set for its next look, if any.
+    private var nextWake: Date? {
+        get { UserDefaults.standard.object(forKey: Self.nextWakeKey) as? Date }
+        set { UserDefaults.standard.set(newValue, forKey: Self.nextWakeKey) }
+    }
+
+    /// The wakes of the last 24 hours.
+    private var wakeDates: [Date] {
+        get {
+            let all = UserDefaults.standard.array(forKey: Self.wakeLogKey) as? [Date] ?? []
+            return all.filter { Date().timeIntervalSince($0) < 24 * 3600 }
+        }
+        set { UserDefaults.standard.set(newValue, forKey: Self.wakeLogKey) }
+    }
+
+    static func isWorkingHours(_ date: Date, calendar: Calendar = .current) -> Bool {
+        guard !calendar.isDateInWeekend(date) else { return false }
+        let hour = calendar.component(.hour, from: date)
+        return hour >= workStartHour && hour < workEndHour
+    }
+
+    private static func isDaytime(_ date: Date) -> Bool {
+        let hour = Calendar.current.component(.hour, from: date)
+        return hour >= dayStartHour && hour < dayEndHour
+    }
+
+    /// Seconds since the last keyboard, mouse or trackpad event.
+    static func idleSeconds() -> TimeInterval {
+        guard let any = CGEventType(rawValue: ~0) else { return 0 }
+        return CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: any)
+    }
+
+    /// Notes a return to the Mac after `returnAfter` away, for `maybeWake`.
+    private func noteAway(now: Date) {
+        let idle = Self.idleSeconds()
+        if idle >= Self.returnAfter {
+            wasAway = true
+        } else if wasAway, idle < 60 {
+            wasAway = false
+            cameBack = true
+        }
+    }
+
+    /// Wake the agent when a wake is due and no message of the last one is
+    /// still waiting: the time it set for itself (any day, daytime), the
+    /// level's interval (working hours), or the user back at the Mac (working
+    /// hours). Never twice within `wakeGap`, at most `wakesPerDay` a day.
+    private func maybeWake(now: Date) {
+        guard let interval = level.wakeInterval, !thinking, pending == nil,
+              let model, let service = model.proactiveService else { return }
+        let back = cameBack
+        cameBack = false
+        if let last = lastWake, now.timeIntervalSince(last) < Self.wakeGap { return }
+        guard wakeDates.count < Self.wakesPerDay else { return }
+
+        let reason: String
+        if let at = nextWake, now >= at, Self.isDaytime(now) {
+            reason = "the time you set for yourself last time"
+        } else if Self.isWorkingHours(now), back {
+            reason = "the user just came back to the Mac"
+        } else if Self.isWorkingHours(now), lastWake.map({ now.timeIntervalSince($0) >= interval }) ?? true {
+            reason = "your regular check"
+        } else {
+            return
+        }
+
+        let since = lastWake ?? now.addingTimeInterval(-24 * 3600)
+        let conversation = conversationDigest(model.history, unified: model.unifiedThreadsEnabled,
+                                              since: since, now: now)
+        let notes = readNotebook()
+        // Nothing to follow and nothing said since the last wake: no request.
+        guard !notes.isEmpty || !conversation.isEmpty || !outcomes.isEmpty else {
+            lastWake = now
+            return
+        }
+        lastWake = now
+        wakeDates = wakeDates + [now]
+        if nextWake.map({ $0 <= now }) == true { nextWake = nil }
+        thinking = true
+        enqueue { [weak self] in
+            guard let self else { return }
+            defer { self.thinking = false }
+            await self.think(service: service, reason: reason, notes: notes,
+                             conversation: conversation, now: now)
+        }
+    }
+
+    /// Run `work` after every earlier agent run and notebook update.
+    private func enqueue(_ work: @escaping @MainActor () async -> Void) {
+        let previous = job
+        job = Task { @MainActor in
+            await previous?.value
+            await work()
+        }
+    }
+
+    // MARK: Think
+
+    /// One wake: the agent reads its notebook and what happened since, checks
+    /// what it needs with its tools, rewrites the notebook, sets its next wake
+    /// and may hand over one message for the gate.
+    private func think(service: AIService, reason: String, notes: String,
+                       conversation: String, now: Date) async {
+        var context = "Now: \(Self.stampFormatter("yyyy-MM-dd HH:mm EEEE").string(from: now)) "
+            + "(\(TimeZone.current.identifier))\nWhy you woke: \(reason)\n\n"
+        context += "Your notebook:\n" + (notes.isEmpty ? "(empty)" : notes) + "\n\n"
+        context += "Conversation with the user since you last woke, oldest first:\n"
+            + (conversation.isEmpty ? "(none)" : conversation) + "\n\n"
+        let history = outcomeLines(now: now)
+        if !history.isEmpty {
+            context += "Messages you sent on your own, and what the user did with them:\n" + history + "\n\n"
+        }
+        let loops = ChatLoopManager.shared.loops.filter(\.active).map { "- every \($0.intervalMinutes) min: \(String($0.prompt.prefix(160)))" }
+        if !loops.isEmpty {
+            context += "Scheduled tasks that already run on their own (leave their topics to them):\n"
+                + loops.joined(separator: "\n") + "\n\n"
+        }
+
+        let tools = agentTools()
+        let reply: String?
+        if let agent = service as? AgentCapableService, APIKeyStore.selectedProvider.supportsTools, !tools.isEmpty {
+            reply = await runAgent(agent, tools: tools, system: proactiveWakeSystemPrompt(tools: true),
+                                   context: context)
+        } else {
+            reply = await ask(service, system: proactiveWakeSystemPrompt(tools: false), prompt: context)
+        }
+        guard let reply, let parsed = Self.parse(reply, now: now) else { return }
+        if let book = parsed.notebook { writeNotebook(book) }
+        nextWake = parsed.wake
+        guard level != .off, let text = parsed.message else { return }
+        pending = Candidate(key: "agent:\(Int(now.timeIntervalSince1970))", text: text, glance: text,
+                            due: now, expires: now.addingTimeInterval(Self.messageGrace), fromAgent: true)
+    }
+
+    /// The agent's read-only tools. Mail only when Mail is running and Notchi
+    /// may already script it, so a wake never raises a permission prompt.
+    private func agentTools() -> [NotchTool] {
+        var tools: [NotchTool] = [DateTimeTool(), ReadPageTool()]
+        tools.append(WebSearchTool(provider: APIKeyStore.resolvedSearchBackend()?.searchProvider
+            ?? AnySearchProvider()))
+        if EKEventStore.authorizationStatus(for: .event) == .fullAccess { tools.append(ReadCalendarTool()) }
+        if EKEventStore.authorizationStatus(for: .reminder) == .fullAccess { tools.append(ReadRemindersTool()) }
+        if !NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.mail").isEmpty,
+           !PermissionPromptGate.automationMayAsk("com.apple.mail") {
+            tools.append(ReadMailTool())
+        }
+        if ClipboardHistory.available { tools.append(ClipboardHistoryTool()) }
+        tools.append(SearchHistoryTool { [weak self] query in
+            await MainActor.run { self?.model?.searchArchive(query) ?? .empty }
+        })
+        return tools
+    }
+
+    private func runAgent(_ agent: AgentCapableService, tools: [NotchTool], system: String,
+                          context: String) async -> String? {
+        var harness = AgentHarness(service: agent, registry: ToolRegistry(tools))
+        harness.maxIterations = Self.toolRounds
+        harness.maxSearchRounds = Self.searchRounds
+        harness.requestContext = NoNoRequestContext(surface: NoNoRequestContext.suggest)
+        var out = ""
+        do {
+            try await RequestAudit.$purpose.withValue("proactive") {
+                try await harness.run(
+                    system: system,
+                    messages: [AgentMessage(kind: .text(role: "user", text: context))],
+                    onText: { out += $0 },
+                    onActivity: { _, _ in },
+                    onSources: { _ in },
+                    onRetract: { n in out = String(out.dropLast(min(n, out.count))) })
+            }
+        } catch {
+            return nil
+        }
+        let trimmed = out.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    /// One request with no tools; nil when it fails or comes back empty.
+    private func ask(_ service: AIService, system: String, prompt: String) async -> String? {
+        var reply = ""
+        do {
+            let chunks = RequestAudit.$purpose.withValue("proactive") {
+                NoNoRequestContext.$current.withValue(
+                    NoNoRequestContext(surface: NoNoRequestContext.suggest)
+                ) {
+                    service.stream(system: system,
+                                   messages: [ChatMessage(role: "user", content: prompt)])
+                }
+            }
+            for try await chunk in chunks { reply += chunk }
+        } catch {
+            return nil
+        }
+        let trimmed = reply.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    struct Parsed: Equatable {
+        /// Nil when the reply had no NOTEBOOK section: the notebook stays.
+        var notebook: String?
+        var wake: Date?
+        var message: String?
+    }
+
+    /// The sections that end the agent's reply. Nil when there is no NOTEBOOK
+    /// section and no MESSAGE line: a reply off the format changes nothing.
+    /// A wake is kept between five minutes and fourteen days out.
+    static func parse(_ reply: String, now: Date) -> Parsed? {
+        let lines = reply.components(separatedBy: .newlines)
+        guard let start = lines.lastIndex(where: { NotchModel.keyedLine($0).uppercased().hasPrefix("NOTEBOOK:") })
+                ?? lines.lastIndex(where: { NotchModel.keyedLine($0).uppercased().hasPrefix("MESSAGE:") })
+        else { return nil }
+        var parsed = Parsed()
+        var book: [String]?
+        let stamp = stampFormatter("yyyy-MM-dd HH:mm")
+        for raw in lines[start...] {
+            let line = NotchModel.keyedLine(raw)
+            let upper = line.uppercased()
+            func value(_ key: String) -> String {
+                line.dropFirst(key.count).trimmingCharacters(in: .whitespaces)
+            }
+            if upper.hasPrefix("NOTEBOOK:") {
+                let rest = value("NOTEBOOK:")
+                book = rest.isEmpty ? [] : [rest]
+            } else if upper.hasPrefix("WAKE:") {
+                parsed.wake = stamp.date(from: value("WAKE:")).flatMap {
+                    $0 > now.addingTimeInterval(5 * 60) && $0 < now.addingTimeInterval(14 * 24 * 3600) ? $0 : nil
+                }
+                if let lines = book { parsed.notebook = lines.joined(separator: "\n") }
+                book = nil
+            } else if upper.hasPrefix("MESSAGE:") {
+                let text = value("MESSAGE:")
+                if !text.isEmpty, text.uppercased() != "NONE", text.count <= 400 { parsed.message = text }
+            } else if upper.hasPrefix("BASIS:") {
+                continue
+            } else if book != nil {
+                book?.append(raw)
+            }
+        }
+        if let lines = book { parsed.notebook = lines.joined(separator: "\n") }
+        if let text = parsed.notebook, text.trimmingCharacters(in: .whitespacesAndNewlines).uppercased() == "(EMPTY)" {
+            parsed.notebook = ""
+        }
+        return parsed
+    }
+
+    // MARK: After a round
+
+    /// After an Ask round: the agent updates its notebook from the exchange
+    /// and may set its next wake. It writes nothing to the user here. One
+    /// request with no tools, on the model that answers background questions.
+    func roundEnded(question: String, answer: String, service: AIService) {
+        guard level != .off, !(service is StubAIService), !LicenseLock.isLocked else { return }
+        let asked = question.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !asked.isEmpty, !ClipPrivacy.containsSecret(asked) else { return }
+        let now = Date()
+        enqueue { [weak self] in
+            guard let self else { return }
+            let notes = self.readNotebook()
+            var prompt = "Now: \(Self.stampFormatter("yyyy-MM-dd HH:mm EEEE").string(from: now)) "
+                + "(\(TimeZone.current.identifier))\n\n"
+            prompt += "Your notebook:\n" + (notes.isEmpty ? "(empty)" : notes) + "\n\n"
+            if let wake = self.nextWake {
+                prompt += "Your next wake is set for \(Self.stampFormatter("yyyy-MM-dd HH:mm").string(from: wake)).\n\n"
+            }
+            prompt += "The exchange that just ended:\nUser: \(String(asked.prefix(1500)))\n\n"
+                + "You: \(String(answer.prefix(1500)))"
+            guard let reply = await self.ask(service, system: proactiveNoteSystemPrompt, prompt: prompt),
+                  let parsed = Self.parse(reply, now: now) else { return }
+            if let book = parsed.notebook { self.writeNotebook(book) }
+            if let wake = parsed.wake, self.nextWake.map({ wake < $0 }) ?? true { self.nextWake = wake }
+        }
+    }
+
+    // MARK: Conversation
+
+    /// The conversation since `since` as text for the agent, the newest kept
+    /// first up to `digestLimit`. With unified threads that is the main thread
+    /// alone; otherwise every thread, merged by time. An answer has no
+    /// `sentAt` of its own and takes the time of the message before it. Loop
+    /// rounds and turns that look like a credential are left out.
+    func conversationDigest(_ history: [NotchModel.HistoryItem], unified: Bool,
+                            since: Date, now: Date) -> String {
+        let threads = unified
+            ? history.filter { $0.mainThread && $0.source == .ask }
+            : history.filter { $0.t > since }
+        var dated: [(date: Date, order: Int, turn: NotchModel.Turn)] = []
+        for item in threads {
+            var last: Date?
+            for turn in item.conversation {
+                if let at = turn.sentAt { last = at }
+                guard let date = last, date > since, turn.loopRound == nil else { continue }
+                dated.append((date, dated.count, turn))
+            }
+        }
+        let turns = dated.sorted { ($0.date, $0.order) < ($1.date, $1.order) }
+
+        let stamp = Self.stampFormatter("MM-dd HH:mm")
+        var lines: [String] = []
+        var size = 0
+        for entry in turns.reversed() {
+            let turn = entry.turn
+            let body = turn.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !body.isEmpty, !turn.isLocal, !ClipPrivacy.containsSecret(body) else { continue }
+            let who = turn.role == "user" ? "User" : turn.proactive ? "You (on your own)" : "You"
+            let note = turn.isError ? " (failed)" : turn.interrupted ? " (cut off)" : ""
+            let line = "[\(stamp.string(from: entry.date))] \(who)\(note): "
+                + String(body.prefix(turn.role == "user" ? 600 : 400))
+            guard size + line.count <= Self.digestLimit else { break }
+            lines.append(line)
+            size += line.count + 1
+        }
+        return lines.reversed().joined(separator: "\n")
+    }
+
+    // MARK: Meetings
+
+    /// An event with someone else in it is on now, and the user has not
+    /// declined it.
+    private func inMeeting(now: Date) -> Bool {
+        guard EKEventStore.authorizationStatus(for: .event) == .fullAccess else { return false }
+        let store = currentStore()
+        let predicate = store.predicateForEvents(withStart: now.addingTimeInterval(-12 * 3600),
+                                                 end: now.addingTimeInterval(60), calendars: nil)
+        return store.events(matching: predicate).contains { event in
+            guard !event.isAllDay, event.status != .canceled,
+                  let start = event.startDate, let end = event.endDate,
+                  start <= now, end > now,
+                  let attendees = event.attendees, attendees.contains(where: { !$0.isCurrentUser })
+            else { return false }
+            return attendees.first(where: \.isCurrentUser)?.participantStatus != .declined
+        }
+    }
+
+    // MARK: Reminders and events
 
     /// The store to read with, rebuilt when either grant changed: a store keeps
     /// the access it was created under (`RemindersService.currentStore`).
@@ -423,18 +838,17 @@ final class ProactiveEngine: ObservableObject {
         return out
     }
 
-    private func dueFollowUps(now: Date) -> [Candidate] {
-        followUps.filter { $0.fireAt <= now }.map {
-            Candidate(key: "followup:\($0.id.uuidString)", text: $0.text, glance: $0.text,
-                      due: $0.fireAt, expires: $0.fireAt.addingTimeInterval(Self.followUpGrace),
-                      followUp: $0.id)
-        }
-    }
-
     private static func clean(_ text: String?) -> String? {
         let line = text?.split(whereSeparator: \.isNewline).first.map(String.init)?
             .trimmingCharacters(in: .whitespaces) ?? ""
         return line.isEmpty ? nil : line
+    }
+
+    private static func stampFormatter(_ format: String) -> DateFormatter {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = format
+        return f
     }
 
     // MARK: Access
@@ -452,131 +866,77 @@ final class ProactiveEngine: ObservableObject {
             }
         }
     }
-
-    // MARK: Follow-ups
-
-    /// After an Ask round: when the user's message names a future time and the
-    /// answer filed nothing for it, ask `service` whether the message states
-    /// something they mean to do by then, and store the line to send at that
-    /// time. One request, on the model that answers background questions.
-    func considerFollowUp(question: String, answer: String, filedSomething: Bool, service: AIService) {
-        guard level.followsUp, !(service is StubAIService), !LicenseLock.isLocked else { return }
-        let anything = level.followsUpAnything
-        let asked = question.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard (2...600).contains(asked.count) else { return }
-        if !anything {
-            guard !filedSomething, RemindersService.futureDate(in: asked) != nil else { return }
-        }
-        let now = Date()
-        let clock = DateFormatter()
-        clock.locale = Locale(identifier: "en_US_POSIX")
-        clock.dateFormat = "yyyy-MM-dd HH:mm EEEE"
-        var prompt = "Now: \(clock.string(from: now)) (\(TimeZone.current.identifier))\n\n"
-        if anything {
-            let history = outcomeLines(now: now)
-            if !history.isEmpty {
-                prompt += "Messages you sent on your own before, and what the user did with them:\n"
-                    + history + "\n\n"
-            }
-            let pending = followUps.map { "- \(clock.string(from: $0.fireAt)): \($0.text)" }
-            if !pending.isEmpty {
-                prompt += "Already scheduled:\n" + pending.joined(separator: "\n") + "\n\n"
-            }
-        }
-        prompt += "User: \(asked)\n\nAssistant: \(String(answer.prefix(600)))"
-        let system = anything ? openFollowUpSystemPrompt : followUpSystemPrompt
-        Task { [weak self] in
-            var reply = ""
-            do {
-                let chunks = RequestAudit.$purpose.withValue("followup") {
-                    NoNoRequestContext.$current.withValue(
-                        NoNoRequestContext(surface: NoNoRequestContext.suggest)
-                    ) {
-                        service.stream(system: system,
-                                       messages: [ChatMessage(role: "user", content: prompt)])
-                    }
-                }
-                for try await chunk in chunks { reply += chunk }
-            } catch {
-                return
-            }
-            guard let self, self.level.followsUp,
-                  let parsed = Self.parseFollowUp(reply, now: Date()) else { return }
-            guard !self.followUps.contains(where: { $0.text == parsed.text }) else { return }
-            self.followUps = Array((self.followUps + [parsed]).suffix(Self.followUpLimit))
-        }
-    }
-
-    /// `followUpSystemPrompt`'s reply: nil for NONE, a time already past or
-    /// more than 60 days out, or anything off the format.
-    static func parseFollowUp(_ reply: String, now: Date) -> FollowUp? {
-        var at: Date?
-        var text = ""
-        let stamp = DateFormatter()
-        stamp.locale = Locale(identifier: "en_US_POSIX")
-        stamp.dateFormat = "yyyy-MM-dd HH:mm"
-        for raw in reply.split(whereSeparator: \.isNewline) {
-            let line = NotchModel.keyedLine(raw)
-            let upper = line.uppercased()
-            if upper.hasPrefix("AT:") {
-                at = stamp.date(from: line.dropFirst(3).trimmingCharacters(in: .whitespaces))
-            } else if upper.hasPrefix("TEXT:") {
-                text = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
-            }
-        }
-        guard let at, !text.isEmpty, text.count <= 300,
-              at > now.addingTimeInterval(5 * 60),
-              at < now.addingTimeInterval(60 * 24 * 3600) else { return nil }
-        return FollowUp(text: text, fireAt: at)
-    }
 }
 
-let followUpSystemPrompt = """
-You are Notchi, a Mac assistant. Below is one exchange with the user. Decide \
-whether the user's message states something they themselves intend or need to \
-do by a specific future time: a deadline, a plan, a promise to someone. You \
-would write to them when that time comes. These are not it: a question about a \
-time or a fact, someone else's schedule, a wish with no time, and anything the \
-assistant's reply already set a reminder or an event for. Resolve relative \
-dates ("明天", "next Friday") against Now. When in doubt, reply NONE.
+// MARK: - Prompts
 
-Reply NONE, or exactly these two lines and nothing else:
-AT: yyyy-MM-dd HH:mm
-TEXT: <one sentence>
+/// A wake's system prompt. `tools` is false for a backend that runs no tools
+/// (a CLI, a provider without tool calls): it works from what it is given.
+func proactiveWakeSystemPrompt(tools: Bool) -> String {
+    let checking = tools
+        ? """
+        Use your tools to check what you need: the time, the user's calendar and \
+        reminders, the web and pages, their mail, their clipboard, their history \
+        in this app. Check only what your notebook or the new conversation gives \
+        you a reason to check, and check each thing at most once.
+        """
+        : "Work from what is below; you cannot check anything else."
+    return """
+    You are Notchi, a Mac assistant. This is not a chat turn: you woke up on \
+    your own to decide whether to write to the user unprompted. Nobody is \
+    waiting for a reply.
 
-AT is local time, when to write to them: the stated time; 09:00 for a day with \
-no time; 09:00 on the day of a deadline. TEXT is the one short sentence to \
-send at that time, in the language the user wrote in, naming the thing and its \
-time as it will read then ("today", not "Friday"). No greeting, and no offer \
-to set a reminder.
-"""
+    You keep a notebook of what you are following for the user. It is below, \
+    with what was said since you last woke. \(checking)
 
-/// The `frequent` level's prompt: any topic is fair, and the user's answers to
-/// earlier messages decide what and when.
-let openFollowUpSystemPrompt = """
-You are Notchi, a Mac assistant that also writes to the user on its own. Below \
-is one exchange with the user. Decide whether there is something in it worth \
-coming back to later, unprompted: how something they are working on, deciding, \
-waiting for, learning, fixing or worried about turned out; a next step they \
-are likely to need; a thing they said they would do. Any topic counts. It does \
-not need a time.
+    Write to the user only when one thing is worth their attention now and \
+    they would be glad you said it unprompted: something they are waiting on \
+    changed, something they said they would do is due, a question you asked \
+    them is still open and matters, something you said you would do. Not: \
+    small talk; anything they already know; anything you already wrote about \
+    that they did not take up; anything a scheduled task below already covers; \
+    anything they turned down or you refused. Write more of the kinds they \
+    replied to and fewer of the kinds they let pass. When in doubt, write nothing.
 
-Use what the user did with your earlier messages. Write more of the kinds they \
-replied to. Write fewer of the kinds they let pass, and none of a kind they \
-told you to stop. Space messages out more when several in a row got no reply. \
-Do not repeat or overlap anything already scheduled. Reply NONE for small \
-talk, a question already fully answered, or anything the assistant's reply \
-already set a reminder or an event for.
+    End your reply with exactly these sections and nothing after them:
+    NOTEBOOK:
+    <the whole notebook, rewritten: one "- " line per thing you follow, saying \
+    what it is, why, when and how to check it next, and what you found last. \
+    Add what the new conversation gives you to follow. Drop what is settled, \
+    no longer wanted, or out of date. At most 30 lines. (empty) when there is \
+    nothing.>
+    WAKE: <yyyy-MM-dd HH:mm local time, the next time something here needs a \
+    look, or NONE>
+    MESSAGE: <one or two short sentences to send now, in the language the user \
+    writes in, naming the thing so it reads clearly on its own, no greeting; \
+    or NONE>
+    BASIS: <what the message rests on: the conversation line or the URL; empty with NONE>
+    """
+}
 
-Reply NONE, or exactly these two lines and nothing else:
-AT: yyyy-MM-dd HH:mm
-TEXT: <one or two short sentences>
+/// After an Ask round: update the notebook only.
+let proactiveNoteSystemPrompt = """
+You are Notchi, a Mac assistant that also writes to the user on its own at \
+times you choose. You keep a notebook of what you are following for the user. \
+An exchange with the user just ended. Update the notebook from it; you do not \
+write to the user now.
 
-AT is local time, when to write: when the outcome is likely known, or when the \
-next step is due; for a stated time, that time; not between 23:00 and 08:00. \
-Resolve relative dates against Now. TEXT is what to send then, in the language \
-the user wrote in, naming the thing so it reads clearly on its own then. Ask \
-how it went or offer the next step. No greeting.
+Worth a line: something the user is waiting on that may change (a release, a \
+price, a reply, a result, an order); something they said they would do, with \
+its time; a question you asked them that you cannot go on without; something \
+you said you would do or could not finish; how something they are working on \
+turned out, when that is worth asking about later. Not worth a line: small \
+talk, a question fully answered, anything they turned down or you refused, \
+anything a reminder or event was just set for. Settle lines this exchange \
+answered or the user no longer wants. Change nothing when there is nothing.
+
+Reply with exactly these sections and nothing else:
+NOTEBOOK:
+<the whole notebook, rewritten: one "- " line per thing, saying what it is, \
+why, when and how to check it next. At most 30 lines. (empty) when there is \
+nothing.>
+WAKE: <yyyy-MM-dd HH:mm local time, when something here first needs a look, \
+or NONE>
 """
 
 // MARK: - Resting ear

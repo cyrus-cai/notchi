@@ -13250,9 +13250,8 @@ final class NotchModel: ObservableObject {
                        before.proactive {
                         ProactiveEngine.shared.noteReply(to: before.text, reply: asked.text)
                     }
-                    ProactiveEngine.shared.considerFollowUp(
+                    ProactiveEngine.shared.roundEnded(
                         question: asked.text, answer: acc,
-                        filedSomething: thread.first(where: { $0.id == answerID })?.captures.isEmpty == false,
                         service: self.backgroundService(askService))
                 }
                 // A loop round's banner is the loop's own (`ChatLoopManager`).
@@ -14930,6 +14929,11 @@ final class NotchModel: ObservableObject {
         return AppDelegate.makeService(provider: .nono, apiKey: nono.apiKey, model: NoNoAccount.backgroundModel)
     }
 
+    /// The service `ProactiveEngine` wakes on. Nil when no model is set up.
+    var proactiveService: AIService? {
+        ai is StubAIService ? nil : backgroundService(ai)
+    }
+
     private func generateTitle(for thread: [Turn], service: AIService) async -> String? {
         guard !(service is StubAIService) else { return nil }
 
@@ -15270,6 +15274,16 @@ final class NotchModel: ObservableObject {
     /// Debug-only: seed a long multi-turn thread so the result view's scrolling and
     /// edge fades can be inspected at launch without clicking. Used by the
     /// `NOTCH_DEMO_THREAD` env path in `AppDelegate`.
+    /// `NOTCH_DEMO_TURNS`: alternating user / assistant lines joined by "||".
+    /// Screenshot aid only.
+    func seedDemoTurns(_ raw: String) {
+        let parts = raw.components(separatedBy: "||")
+        turns = parts.enumerated().map { i, t in
+            Turn(role: i % 2 == 0 ? "user" : "assistant", text: t)
+        }
+        mode = .result
+    }
+
     func seedDemoThread() {
         turns = [
             Turn(role: "user", text: "小米 ceo 是谁"),

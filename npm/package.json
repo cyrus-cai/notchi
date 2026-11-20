@@ -1,6 +1,6 @@
 {
   "name": "notchi",
-  "version": "0.9.41",
+  "version": "0.9.42",
   "description": "Install Notchi, the macOS notch AI app, with one command: npx notchi",
   "bin": {
     "notchi": "bin/notchi.js"
