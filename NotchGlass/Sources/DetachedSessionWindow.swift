@@ -5019,7 +5019,8 @@ struct DetachedThreadView: View {
                         .padding(.leading, 12)
                 }
                 UserQuestionBubble(text: turn.text, isAgent: turn.isAgent, reaction: turn.reaction,
-                                   fromTelegram: turn.fromTelegram, savedOnly: turn.savedOnly, flat: compactShortcut)
+                                   fromTelegram: turn.fromTelegram, fromSignal: turn.fromSignal, savedOnly: turn.savedOnly, flat: compactShortcut,
+                                   sentAt: store.turns.timestamp(for: turn.id))
                     .contextMenu {
                         QuestionTurnMenu(onReply: replyAction(for: turn),
                                          onDelete: deleteAction(for: turn))
@@ -5064,6 +5065,7 @@ struct DetachedThreadView: View {
             onOpenCapture: model.map { model in { model.openTurnCapture($0) } },
             onUndoCapture: model.map { model in { model.undoTurnCapture($0) } },
             turnID: turn.id,
+            sentAt: store.turns.timestamp(for: turn.id),
             flat: compactShortcut
         )
     }

@@ -18,6 +18,10 @@ import SwiftUI
 final class ApprovalPopup {
     static let shared = ApprovalPopup()
 
+    /// The open top-right card's bottom edge on screen, nil while it is closed.
+    /// Set by `AppDelegate`.
+    var cardBottom: () -> CGFloat? = { nil }
+
     /// The card's width: the question card's own ceiling (`UserQuestionCard`
     /// caps its content at 340) plus this card's padding, and no wider, so it
     /// reads as a card rather than a panel.
@@ -98,7 +102,7 @@ final class ApprovalPopup {
     /// bar when that card is closed — the same line the answer cards use.
     private func homeOrigin(height: CGFloat) -> NSPoint {
         guard let screen else { return .zero }
-        let top = CardToasts.shared.cardBottom().map { $0 - Self.gap }
+        let top = cardBottom().map { $0 - Self.gap }
             ?? screen.visibleFrame.maxY - NotchMetrics.floatingInset
         return NSPoint(x: screen.frame.maxX - NotchMetrics.floatingInset - Self.width,
                        y: top - height)

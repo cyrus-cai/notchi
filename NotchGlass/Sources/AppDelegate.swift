@@ -294,6 +294,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         TelegramBridge.shared.restoreLidSleep()
+        SignalBridge.shared.stop()
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -490,6 +491,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // The user's own Telegram bot, when one is set up (`TelegramBridge`).
         TelegramBridge.shared.model = model
         TelegramBridge.shared.start()
+        // Signal channel via local `signal-cli`, when linked (`SignalBridge`).
+        SignalBridge.shared.model = model
+        SignalBridge.shared.start()
 
         // The one and only first run: the screen goes black, the mark becomes a
         // real 3D object, spins once and flies into the notch — and the panel
@@ -553,9 +557,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self, let id = self.model.activeDisplay else { return false }
             return self.anchoredCorners.contains(id)
         }
-        CardToasts.shared.openThread = { [weak self] id in
-            self?.openMenuBarCard { $0.openCardThread(id: id) }
-        }
         model.unfoldCardOnThread = { [weak self] id, live in
             guard let self else { return false }
             self.openWithoutKey = true
@@ -563,8 +564,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.openWithoutKey = false
             return self.model.open
         }
-        CardToasts.shared.cardBottom = { [weak self] in self?.model.cornerCardBottom() }
-        CardToasts.shared.sequenceMayContinue = { [weak self] in self?.model.open != true }
+        ApprovalPopup.shared.cardBottom = { [weak self] in self?.model.cornerCardBottom() }
         model.onCardFlight = { [weak self] flying in
             guard let self else { return }
             if flying {
@@ -599,10 +599,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // Before SwiftUI commits the open animation's first frame, so
                 // a corner panel is on screen for it.
                 self.updateCornerVisibility(isOpen: isOpen, active: active)
-                // Once the card has laid out, or its frame has gone with it.
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                    CardToasts.shared.relayout()
-                }
                 if isOpen {
                     // An open for a reply leaves the keyboard with the app
                     // the user is in.
@@ -950,18 +946,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let delay = env["NOTCH_DEMO_RESULT_AT"].flatMap(Double.init) ?? 1
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
                 RestingResult.shared.show(title, failed: env["NOTCH_DEMO_RESULT_FAILED"] == "1")
-            }
-        }
-        // NOTCH_DEMO_CARD_TOASTS=1 lands two answer cards a second apart, each
-        // leaving after 3 seconds. Screenshot aid only.
-        if env["NOTCH_DEMO_CARD_TOASTS"] == "1" {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-                _ = CardToasts.shared.show(threadID: UUID(), title: "How far is the moon?",
-                                           body: "About 384,400 km on average.", hold: 3)
-            }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
-                _ = CardToasts.shared.show(threadID: UUID(), title: "",
-                                           body: "Light covers that in about 1.3 seconds.", hold: 3)
             }
         }
         // NOTCH_DEMO_FORCE=menu|answer poses the force-click box beside a point
@@ -1803,14 +1787,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func applyAppIconStyle() {
         let dockTile = NSApp.dockTile
         let style = AppIconStyle.current
-        switch style {
-        case .original:
+        if style.usesBundleDefault {
             // `nil` asks AppKit to restore the bundle's primary icon, including
             // the current system's own mask and material treatment.
             appIconDockView = nil
             dockTile.contentView = nil
             NSApp.applicationIconImage = nil
-        case .eyes, .dot:
+        } else {
             guard let image = style.image else { return }
             NSApp.applicationIconImage = image
             // Draw the selected artwork as the tile content as well. Merely
@@ -1848,9 +1831,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Notification Center draws the bundle's icon from Launch Services, not
     /// `applicationIconImage`. Set the selected artwork as the bundle's custom
-    /// icon (removed for Original) and re-register so new notifications use it.
+    /// icon (removed when using the light Original bundle default) and
+    /// re-register so new notifications use it.
     private func applyBundleIcon(_ style: AppIconStyle) {
-        let image: NSImage? = style == .original ? nil : style.image
+        let image: NSImage? = style.usesBundleDefault ? nil : style.image
         let url = Bundle.main.bundleURL
         DispatchQueue.global(qos: .utility).async {
             NSWorkspace.shared.setIcon(image, forFile: url.path, options: [])
@@ -2792,7 +2776,7 @@ enum AppIconStyle: String, CaseIterable, Identifiable {
     var image: NSImage? {
         switch self {
         case .original:
-            return NSImage(named: "AppIcon")
+            return Self.systemUsesDarkAppearance ? Self.originalDark : NSImage(named: "AppIcon")
         case .eyes:
             return Self.systemUsesDarkAppearance ? Self.eyesDark : Self.eyesLight
         case .dot:
@@ -2802,9 +2786,67 @@ enum AppIconStyle: String, CaseIterable, Identifiable {
         }
     }
 
+    /// Whether the current appearance matches the light `AppIcon` shipped in
+    /// the bundle, so AppKit can draw the native bundle icon without an override.
+    var usesBundleDefault: Bool {
+        self == .original && !Self.systemUsesDarkAppearance
+    }
+
     private static var systemUsesDarkAppearance: Bool {
         NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
     }
+
+    /// The original tile inverted for dark mode: the off-white paper tile
+    /// becomes `ink` (`#26262A`) and the dark mark becomes `eyeInk` (`#ECEBE6`),
+    /// matching `eyesDark`'s palette while keeping `AppIcon`'s exact mark
+    /// geometry and edge anti-aliasing.
+    private static func originalDarkImage() -> NSImage? {
+        guard let base = NSImage(named: "AppIcon") else { return nil }
+        let side = 1024
+        guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
+              let ctx = CGContext(
+                  data: nil,
+                  width: side,
+                  height: side,
+                  bitsPerComponent: 8,
+                  bytesPerRow: side * 4,
+                  space: colorSpace,
+                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+              ),
+              let data = ctx.data
+        else { return nil }
+
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(cgContext: ctx, flipped: false)
+        base.draw(in: NSRect(x: 0, y: 0, width: side, height: side))
+        NSGraphicsContext.restoreGraphicsState()
+
+        let pixels = data.bindMemory(to: UInt8.self, capacity: side * side * 4)
+        let paperLum = 245.0
+        let inkLum = 39.0
+        let invSpan = 1.0 / (paperLum - inkLum)
+        let tileR = 38.0, tileG = 38.0, tileB = 42.0
+        let markR = 236.0, markG = 235.0, markB = 230.0
+
+        for i in stride(from: 0, to: side * side * 4, by: 4) {
+            let a = pixels[i + 3]
+            guard a > 0 else { continue }
+            let af = Double(a) / 255.0
+            let r = min(Double(pixels[i]) / af, 255.0)
+            let g = min(Double(pixels[i + 1]) / af, 255.0)
+            let b = min(Double(pixels[i + 2]) / af, 255.0)
+            let lum = 0.299 * r + 0.587 * g + 0.114 * b
+            let t = min(max((paperLum - lum) * invSpan, 0.0), 1.0)
+            pixels[i]     = UInt8(((tileR + (markR - tileR) * t) * af).rounded())
+            pixels[i + 1] = UInt8(((tileG + (markG - tileG) * t) * af).rounded())
+            pixels[i + 2] = UInt8(((tileB + (markB - tileB) * t) * af).rounded())
+        }
+
+        guard let cgImage = ctx.makeImage() else { return nil }
+        return NSImage(cgImage: cgImage, size: NSSize(width: side, height: side))
+    }
+
+    private static let originalDark = originalDarkImage()
 
     /// The original tile with Notchi's two resting eyes (`NotchiForm.restingEyes`)
     /// in place of the mark, as wide as the mark was. Light: the original's
@@ -2852,7 +2894,7 @@ enum AppIconStyle: String, CaseIterable, Identifiable {
     private static let eyesDark = eyesImage(dark: true)
 
     /// Styles that follow the system's light / dark appearance.
-    var followsAppearance: Bool { self != .original }
+    var followsAppearance: Bool { true }
 
     /// Both catalog images already resolve to their visible app-icon bounds.
     /// Keeping one shared scale makes the Appearance previews line up.

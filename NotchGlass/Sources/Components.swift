@@ -2117,12 +2117,12 @@ struct CaptureLineLink: View {
 /// The face of the lines above an answer ("Used folder …", "Updated memory"):
 /// a small rounded tag with a faint fill, `ModelPickerView.Tag`'s shape.
 extension View {
-    func processTag(hovered: Bool = false) -> some View {
+    func processTag(hovered: Bool = false, active: Bool = true) -> some View {
         let shape = RoundedRectangle(cornerRadius: 5, style: .continuous)
         return self
-            .padding(.horizontal, 6)
-            .padding(.vertical, 2)
-            .background(Tokens.ink.opacity(hovered ? 0.10 : 0.06), in: shape)
+            .padding(.horizontal, active ? 6 : 0)
+            .padding(.vertical, active ? 2 : 0)
+            .background(Tokens.ink.opacity(active ? (hovered ? 0.10 : 0.06) : 0), in: shape)
             .contentShape(shape)
     }
 }
@@ -3313,6 +3313,9 @@ struct AssistantTurnView: View {
     /// The turn this is, so the bubbles after the first land at a person's
     /// pace (`BubblePacer`). `nil` shows them all at once.
     var turnID: UUID? = nil
+    /// When this answer settled (or its round was asked, for older turns).
+    /// Shown quietly to the bottom-right of the bubble on hover.
+    var sentAt: Date? = nil
     /// The compact pointer-side card: the answer is plain text on the card's own
     /// surface, with no bubble fill, border or padding of its own, running the
     /// card's full column — the same treatment its question already gets
@@ -3616,7 +3619,7 @@ struct AssistantTurnView: View {
         // Spacing 0: the gap under the headline is the LIST's own top padding, so
         // it collapses with the list instead of leaving a stranded band behind.
         return VStack(alignment: .leading, spacing: 0) {
-            HStack(alignment: .firstTextBaseline, spacing: 12) {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
                 Button {
                     userExpanded = !expanded
                 } label: {
@@ -3663,20 +3666,25 @@ struct AssistantTurnView: View {
                                     .foregroundStyle(headerHovering ? Tokens.text2 : Tokens.text3)
                             }
                         }
+                        .processTag(hovered: headerHovering, active: !working)
                     }
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain).exemptsDoubleClickPin()
                 .onHover { headerHovering = $0 }
                 .animation(.easeOut(duration: Tokens.hoverFade), value: headerHovering)
-                // Beside the headline, outside its button: it names where the
-                // work ran and opens nothing.
-                if showsMarks {
-                    HStack(alignment: .firstTextBaseline, spacing: 6) { marks }
-                        .transition(.opacity)
+                // Beside the headline, outside its button: capture links and
+                // marks share the same row instead of wrapping onto a second line.
+                if !captures.isEmpty || showsMarks {
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        captureLinks
+                        marks
+                    }
+                    .transition(.opacity)
                 }
             }
             .animation(.easeOut(duration: 0.2), value: showsMarks)
+            .animation(.easeOut(duration: 0.2), value: captures.count)
             // Always mounted, opened by HEIGHT — an `if` would insert the list at
             // full size and only crossfade it, which is what made open and shut
             // read as a jump. Clipped so the rows slide out of view under the
@@ -3752,6 +3760,17 @@ struct AssistantTurnView: View {
     /// capture row when there is no search.
     private var showsMarks: Bool { showsCloudMark || showsFolderMark }
 
+    /// Captures of one kind share a tag, which opens the first.
+    @ViewBuilder
+    private var captureLinks: some View {
+        ForEach(Self.captureGroups(captures), id: \.first?.kind) { group in
+            if let first = group.first {
+                CaptureLineLink(capture: first, font: waitFont,
+                                action: onOpenCapture.map { open in { open(first) } })
+            }
+        }
+    }
+
     /// "Used cloud machine" and the folder line, in that order.
     @ViewBuilder
     private var marks: some View {
@@ -3792,7 +3811,8 @@ struct AssistantTurnView: View {
                            idealAtLeast: FractionWidthLayout.minimumLineWidth(layout.lead, fontSize: cardFont),
                            chrome: !toolWaitOnly && !readingWaitOnly && !dotsWaitOnly,
                            bare: leadIsTableOnly,
-                           flat: flat) {
+                           flat: flat,
+                           timestamp: streaming ? nil : sentAt) {
                     cardContent
                 }
                     .contextMenu { answerTurnMenu }
@@ -3808,7 +3828,7 @@ struct AssistantTurnView: View {
                 switch item.segment {
                 case .link(let url, let label):
                     let title = cardTitle(url, label: label)
-                    LinkCardView(url: url, title: title)
+                    LinkCardView(url: url, title: title, timestamp: streaming ? nil : sentAt)
                         .contextMenu {
                             if let onQuote {
                                 Button {
@@ -3823,7 +3843,8 @@ struct AssistantTurnView: View {
                 case .text(let body):
                     AnswerCard(idealAtLeast: FractionWidthLayout.minimumLineWidth(body, fontSize: cardFont),
                                bare: MarkdownParser.isTableOnly(body),
-                               flat: flat) {
+                               flat: flat,
+                               timestamp: streaming ? nil : sentAt) {
                         MarkdownBlocks(source: body, baseFont: cardFont, color: color,
                                        onInAppCopy: onInAppCopy)
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -3834,6 +3855,7 @@ struct AssistantTurnView: View {
                 case .media(let body):
                     FractionWidthLayout(fraction: cardWidthFraction) {
                         MarkdownBlocks(source: body, baseFont: cardFont, color: color)
+                            .modifier(BubbleHoverTimestamp(date: streaming ? nil : sentAt, enabled: !flat))
                     }
                     .contextMenu { answerTurnMenu }
                     .transition(Self.landing)
@@ -3972,20 +3994,12 @@ struct AssistantTurnView: View {
                 AgentWorkTrailView(entries: agentTrail, baseFont: cardFont)
                     .padding(.bottom, hasText ? 6 : 0)
             }
-            // What this answer filed, in the settled headline's face. Each
-            // entry opens its note or reminder, like a Recent capture row's jump.
-            // Captures of one kind share a tag, which opens the first.
-            if !captures.isEmpty || (showsMarks && !showsReadingBlock) {
-                HStack(spacing: 6) {
-                    ForEach(Self.captureGroups(captures), id: \.first?.kind) { group in
-                        if let first = group.first {
-                            CaptureLineLink(capture: first, font: waitFont,
-                                            action: onOpenCapture.map { open in { open(first) } })
-                        }
-                    }
-                    if showsMarks && !showsReadingBlock {
-                        marks
-                    }
+            // What this answer filed, in the settled headline's face. When a
+            // reading block is present, captures and marks sit on its row.
+            if !showsReadingBlock && (!captures.isEmpty || showsMarks) {
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    captureLinks
+                    marks
                 }
                 .padding(.bottom, hasLeadText ? 1 : 0)
                 .transition(.opacity.combined(with: .move(edge: .top)))
@@ -4310,6 +4324,8 @@ struct AnswerCard<Content: View>: View {
     /// three-quarter one — an unboxed answer left at a bubble's width would wrap
     /// for a box that is no longer there.
     var flat: Bool = false
+    /// Quiet hover timestamp shown beside the bubble's bottom-right corner.
+    var timestamp: Date? = nil
     @ViewBuilder let content: Content
     @State private var cardHeight: CGFloat = 0
     @Environment(\.cardWidthFraction) private var widthFraction
@@ -4347,6 +4363,7 @@ struct AnswerCard<Content: View>: View {
                 .onGeometryChange(for: CGFloat.self) { $0.size.height } action: {
                     cardHeight = $0
                 }
+                .modifier(BubbleHoverTimestamp(date: timestamp, enabled: visible && chrome && !flat))
         }
     }
 
@@ -4371,6 +4388,7 @@ struct AnswerCard<Content: View>: View {
                 .onGeometryChange(for: CGFloat.self) { $0.size.height } action: {
                     cardHeight = $0
                 }
+                .modifier(BubbleHoverTimestamp(date: timestamp, enabled: visible && chrome && !flat))
         }
     }
 }
@@ -4385,6 +4403,49 @@ private struct OptionalSmokedGlass: ViewModifier {
         content.background {
             if on { Color.clear.smokedGlass(radius: radius) }
         }
+    }
+}
+
+/// Quiet timestamp shown beside a message bubble's bottom-right corner on hover.
+/// Anchored outside the bubble's trailing edge in an overlay so it never
+/// affects bubble width or triggers `FractionWidthLayout` relayout.
+struct BubbleHoverTimestamp: ViewModifier {
+    let date: Date?
+    var enabled: Bool = true
+    @Environment(\.cardWidthFraction) private var cardWidthFraction
+    @Environment(\.chatBubbleGlass) private var glass
+    @State private var hovering = false
+
+    func body(content: Content) -> some View {
+        content
+            .onHover { over in
+                guard date != nil, enabled, cardWidthFraction < 1 else {
+                    if hovering { hovering = false }
+                    return
+                }
+                withAnimation(.easeOut(duration: Tokens.hoverFade)) {
+                    hovering = over
+                }
+            }
+            .overlay(alignment: .bottomTrailing) {
+                Color.clear
+                    .frame(width: 0, height: 0)
+                    .overlay(alignment: .bottomLeading) {
+                        if let date, hovering, enabled, cardWidthFraction < 1 {
+                            Text(messageTimeStamp(date, compact: glass))
+                                .sfFont(Tokens.TypeSize.caption)
+                                .monospacedDigit()
+                                .foregroundStyle(Tokens.text4)
+                                .multilineTextAlignment(.leading)
+                                .lineLimit(glass ? 2 : 1)
+                                .fixedSize()
+                                .padding(.leading, 8)
+                                .padding(.bottom, 4)
+                                .transition(.opacity)
+                        }
+                    }
+                    .allowsHitTesting(false)
+            }
     }
 }
 

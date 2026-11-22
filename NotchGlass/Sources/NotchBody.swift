@@ -3859,7 +3859,8 @@ struct NotchBody: View {
                 }
                 UserQuestionBubble(text: turn.text, baseFont: Tokens.TypeSize.reading,
                                    isAgent: turn.isAgent, reaction: turn.reaction,
-                                   fromTelegram: turn.fromTelegram, savedOnly: turn.savedOnly)
+                                   fromTelegram: turn.fromTelegram, fromSignal: turn.fromSignal, savedOnly: turn.savedOnly,
+                                   sentAt: item.conversation.timestamp(for: turn.id))
             }
         } else {
             VStack(alignment: .leading, spacing: 14) {
@@ -3889,7 +3890,8 @@ struct NotchBody: View {
                     usedCloudMachine: turn.usedCloudMachine,
                     folders: turn.folders,
                     onOpenCapture: { model.openTurnCapture($0) },
-                    onUndoCapture: { model.undoTurnCapture($0) }
+                    onUndoCapture: { model.undoTurnCapture($0) },
+                    sentAt: item.conversation.timestamp(for: turn.id)
                 )
             }
         }
@@ -6024,6 +6026,7 @@ struct NotchBody: View {
         let index = thread == nil ? model.conversation.index(of: turn.id)
             : thread?.lastIndex(where: { $0.id == turn.id })
         let thread = thread ?? model.turns
+        let turnTime = index.flatMap { thread.timestamp(at: $0) } ?? turn.sentAt
         if let example = turn.example {
             WelcomeExampleCard(example: example,
                                showsAnswer: !model.welcomeHeldAnswers.contains(turn.id),
@@ -6059,7 +6062,8 @@ struct NotchBody: View {
                 // left-aligns with the answer below. Regenerate lives on the
                 // answer's right-click menu.
                 UserQuestionBubble(text: turn.text, isAgent: turn.isAgent, reaction: turn.reaction,
-                                   fromTelegram: turn.fromTelegram, savedOnly: turn.savedOnly)
+                                   fromTelegram: turn.fromTelegram, fromSignal: turn.fromSignal, savedOnly: turn.savedOnly,
+                                   sentAt: turnTime)
                     .contextMenu { QuestionTurnMenu(onReply: onReply, onEdit: onEdit, onDelete: onDelete) }
             }
         } else {
@@ -6140,7 +6144,8 @@ struct NotchBody: View {
                     folders: turn.folders,
                     onOpenCapture: { model.openTurnCapture($0) },
                     onUndoCapture: { model.undoTurnCapture($0) },
-                    turnID: turn.id
+                    turnID: turn.id,
+                    sentAt: turnTime
                 )
               }
             }
@@ -8627,12 +8632,16 @@ struct UserQuestionBubble: View {
     /// The turn came in from Telegram (`Turn.fromTelegram`): a line under the
     /// text says so and opens the bot's chat.
     var fromTelegram: Bool = false
+    /// The turn came in from Signal (`Turn.fromSignal`).
+    var fromSignal: Bool = false
     /// Sent with ⌘↵ (`Turn.savedOnly`): a line under the text says it got
     /// no reply and stays in the context.
     var savedOnly: Bool = false
     /// The quick-summon card: the question runs the card's full width as plain
     /// text, with no fill, border or glass behind it.
     var flat: Bool = false
+    /// When this turn was sent (`Turn.sentAt`), shown quietly on hover.
+    var sentAt: Date? = nil
     @State private var hoveringForwarded = false
 
     /// Set one step under `baseFont`, the same step the answer card takes.
@@ -8804,6 +8813,7 @@ struct UserQuestionBubble: View {
             // column's edge (the side page sets the fraction to 1) leaves room
             // for it inside the scroll view's clip.
             bubble
+                .modifier(BubbleHoverTimestamp(date: sentAt, enabled: !flat))
                 .padding(.trailing, reaction == nil ? 0 : Self.reactionOverhang)
         }
     }
@@ -8857,6 +8867,31 @@ struct UserQuestionBubble: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
+            if fromSignal {
+                Button {
+                    if let app = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "org.whispersystems.signal-desktop") {
+                        NSWorkspace.shared.openApplication(at: app, configuration: .init())
+                    } else if let url = URL(string: "sgnl://") {
+                        NSWorkspace.shared.open(url)
+                    }
+                } label: {
+                    HStack(spacing: 3) {
+                        Text(L("signal.forwarded"))
+                            .sfFont(max(Tokens.TypeSize.meta, bubbleFont - 2))
+                            .lineLimit(1)
+                        if hoveringForwarded {
+                            Image(systemName: "arrow.up.right")
+                                .sfFont(Tokens.TypeSize.badge, weight: .semibold)
+                        }
+                    }
+                    .foregroundStyle(hoveringForwarded ? Tokens.text2 : Tokens.text3)
+                    .processTag(hovered: hoveringForwarded)
+                }
+                .buttonStyle(.plain).exemptsDoubleClickPin()
+                .onHover { hoveringForwarded = $0 }
+                .animation(.easeOut(duration: Tokens.hoverFade), value: hoveringForwarded)
+            }
+
             if fromTelegram {
                 Button {
                     if let url = TelegramBridge.shared.botChatURL { NSWorkspace.shared.open(url) }
@@ -8864,16 +8899,20 @@ struct UserQuestionBubble: View {
                     // Drawn like an answer's capture line (`CaptureLineLink`).
                     HStack(spacing: 3) {
                         Text(L("telegram.forwarded"))
-                            .sfFont(max(Tokens.TypeSize.meta, baseFont - 2))
+                            .sfFont(max(Tokens.TypeSize.meta, bubbleFont - 2))
                             .lineLimit(1)
-                        Image(systemName: "arrow.up.right")
-                            .sfFont(Tokens.TypeSize.badge, weight: .semibold)
+                        // Only under the cursor: at rest every tag looks the same.
+                        if hoveringForwarded {
+                            Image(systemName: "arrow.up.right")
+                                .sfFont(Tokens.TypeSize.badge, weight: .semibold)
+                        }
                     }
                     .foregroundStyle(hoveringForwarded ? Tokens.text2 : Tokens.text3)
-                    .contentShape(Rectangle())
+                    .processTag(hovered: hoveringForwarded)
                 }
                 .buttonStyle(.plain).exemptsDoubleClickPin()
                 .onHover { hoveringForwarded = $0 }
+                .animation(.easeOut(duration: Tokens.hoverFade), value: hoveringForwarded)
             }
         }
         .padding(.horizontal, flat ? 0 : (glass ? ChatBubbleChrome.glassHorizontalPad : ChatBubbleChrome.horizontalPad))

@@ -600,6 +600,24 @@ enum ToolOutputSpill {
             .appendingPathComponent("Notchi/tool-output", isDirectory: true)
     }
 
+    /// Writes `text` to a new file in `folder` and returns its path.
+    static func save(_ text: String, tool: String) -> String? {
+        let fm = FileManager.default
+        try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        sweep()
+        let stamp = Int(Date().timeIntervalSince1970)
+        let file = folder.appendingPathComponent("\(tool)-\(stamp)-\(UUID().uuidString.prefix(6)).txt")
+        guard (try? text.write(to: file, atomically: true, encoding: .utf8)) != nil else { return nil }
+        return file.path
+    }
+
+    /// The file path `fit` wrote into a result, when it spilled one.
+    static func savedPath(in text: String) -> String? {
+        guard let range = text.range(of: #"is saved at (/\S+?\.txt)\."#, options: .regularExpression) else { return nil }
+        let found = String(text[range]).dropFirst("is saved at ".count).dropLast()
+        return String(found)
+    }
+
     static func fit(_ text: String, tool: String) -> String {
         guard text.count > inlineLimit else { return text }
         let fm = FileManager.default
@@ -844,6 +862,10 @@ struct AgentHarness {
         // search returned — a link line naming one of those is already trusted.
         var spokenText = ""
         var allSources: [WebSource] = []
+        /// Page URLs this turn's `page` tool created or updated; only those
+        /// skip `LinkCheck.opened` (private pages return 403). Arbitrary
+        /// `*.notch.website` links from strangers still go through `LinkCheck`.
+        var touchedPageKeys: Set<String> = []
         // Every call this run made, results included, for the claim check.
         var ranCalls: [ToolInvocation] = []
         // The claim check (`unbackedClaimNote`) runs at most once per answer.
@@ -870,7 +892,9 @@ struct AgentHarness {
             let unchecked = written
                 .filter { !sourceKeys.contains(LinkLine.key($0)) }
                 .prefix(LinkCheck.maxPerAnswer)
-            var trusted = await LinkCheck.opened(Array(unchecked))
+            let notchiPages = unchecked.filter { touchedPageKeys.contains(LinkLine.key($0)) }
+            let external = unchecked.filter { !touchedPageKeys.contains(LinkLine.key($0)) }
+            var trusted = notchiPages + (await LinkCheck.opened(Array(external)))
             var appended: URL? = nil
             if written.isEmpty,
                let article = LinkCheck.wikipediaArticle(about: question, in: allSources) {
@@ -1297,6 +1321,11 @@ struct AgentHarness {
             // Hand any structured sources this round produced to the UI so they can
             // appear as a source badge under the answer. Deduped/accumulated on the
             // caller's side across rounds.
+            for call in completed where call.name == PageTool.toolName && !call.isError {
+                for page in PagesService.pageURLs(in: call.result) {
+                    touchedPageKeys.insert(LinkLine.key(page.url))
+                }
+            }
             let roundSources = completed.flatMap(\.sources)
             if !roundSources.isEmpty { onSources(roundSources) }
             allSources += roundSources
@@ -1410,8 +1439,19 @@ struct AgentHarness {
                 guard text.count > prunedResultLimit, !text.contains(prunedMarker) else { continue }
                 let head = 2_000, tail = 1_000
                 let cut = text.count - head - tail
+                // On 2026-11-21 one answer opened the same three pages in the cloud
+                // browser in turn, 62 calls of about 42 s each (aifree.dev/changes 18
+                // times): every page was cut here two rounds later, and the old note
+                // said to run the call again. The full text goes to a file instead.
+                let note: String
+                if let saved = ToolOutputSpill.savedPath(in: text) ?? ToolOutputSpill.save(text, tool: calls[i].name) {
+                    note = "the full result is saved at \(saved). Read it with files action=read path=\(saved) "
+                        + "offset=<line> lines=<count>; do not run the call again to see it"
+                } else {
+                    note = "run the call again if you need them"
+                }
                 calls[i].result = text.prefix(head)
-                    + "\n[… \(cut) \(prunedMarker); run the call again if you need them …]\n"
+                    + "\n[… \(cut) \(prunedMarker); \(note) …]\n"
                     + text.suffix(tail)
                 changed = true
             }

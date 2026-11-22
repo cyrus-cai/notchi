@@ -36,7 +36,7 @@ enum LoopInterval {
     /// schedule: nothing, except report that a stop condition the user wrote
     /// has been met. Even then the loop only pauses (`LoopEndReason.doneSuggested`).
     static func wireSuffix(minutes: Int, round: Int?, endsAt: Date? = nil,
-                           weekdaysOnly: Bool = false) -> String {
+                           weekdaysOnly: Bool = false, pageSlug: String? = nil) -> String {
         var schedule = "repeats every \(short(minutes))"
         if weekdaysOnly { schedule += " on weekdays" }
         if let endsAt {
@@ -45,12 +45,18 @@ enum LoopInterval {
         }
         let roundText = round.map { "This is round \($0) of a loop that \(schedule)." }
             ?? "This task is a loop that \(schedule)."
+        let pageText = pageSlug.map {
+            " This loop already has a live page (\($0), https://\($0).\(PagesService.domain))."
+                + " Append this round's full findings to that page with page(action=\"append\", page_id=\"\($0)\", text=...),"
+                + " and keep your reply in this thread to one brief sentence plus the page URL on its own line."
+        } ?? ""
         return "\n\n(" + roundText
             + " The app runs the schedule. You cannot start, stop, pause or re-time this loop,"
             + " and you have no tool for it, so never say you changed it."
             + " Only if the message above names a condition for stopping and that condition is now met,"
             + " end your reply with \(doneMarker); the app then pauses the loop and asks the user."
-            + " A round that finds nothing new is not a reason to stop.)"
+            + " A round that finds nothing new is not a reason to stop."
+            + pageText + ")"
     }
 
     /// A loop round's answer as shown while it streams: the done marker
@@ -271,6 +277,10 @@ final class ChatLoopManager: ObservableObject {
         var pausedSlot: Date? = nil
         /// Why the loop stopped; nil while it runs.
         var endReason: LoopEndReason? = nil
+        /// Bound Notchi page (`<slug>.notch.website`), auto-set when a round
+        /// creates or updates a page.
+        var pageSlug: String? = nil
+        var pageTitle: String? = nil
 
         var isRunning: Bool { roundStartedAt != nil }
         var isWaiting: Bool { active && !isRunning }
@@ -308,25 +318,27 @@ final class ChatLoopManager: ObservableObject {
         var weekdaysOnly: Bool? = nil
         var pausedSlot: Date? = nil
         var endReason: LoopEndReason? = nil
+        var pageSlug: String? = nil
+        var pageTitle: String? = nil
 
         init(id: UUID, threadID: UUID?, prompt: String, intervalMinutes: Int,
              startedAt: Date, rounds: Int, lastRoundDuration: TimeInterval,
              nextRoundAt: Date?, active: Bool?, failed: Bool?, dismissed: Bool?,
              endsAt: Date?, weekdaysOnly: Bool?, pausedSlot: Date?,
-             endReason: LoopEndReason?) {
+             endReason: LoopEndReason?, pageSlug: String? = nil, pageTitle: String? = nil) {
             self.id = id; self.threadID = threadID; self.prompt = prompt
             self.intervalMinutes = intervalMinutes; self.startedAt = startedAt
             self.rounds = rounds; self.lastRoundDuration = lastRoundDuration
             self.nextRoundAt = nextRoundAt; self.active = active; self.failed = failed
             self.dismissed = dismissed; self.endsAt = endsAt
             self.weekdaysOnly = weekdaysOnly; self.pausedSlot = pausedSlot
-            self.endReason = endReason
+            self.endReason = endReason; self.pageSlug = pageSlug; self.pageTitle = pageTitle
         }
 
         enum CodingKeys: String, CodingKey {
             case id, threadID, prompt, intervalMinutes, startedAt, rounds, lastRoundDuration,
                  nextRoundAt, active, failed, dismissed, endsAt, weekdaysOnly, pausedSlot,
-                 endReason
+                 endReason, pageSlug, pageTitle
         }
 
         init(from decoder: Decoder) throws {
@@ -347,6 +359,8 @@ final class ChatLoopManager: ObservableObject {
             weekdaysOnly = try? c.decodeIfPresent(Bool.self, forKey: .weekdaysOnly)
             pausedSlot = try? c.decodeIfPresent(Date.self, forKey: .pausedSlot)
             endReason = try? c.decodeIfPresent(LoopEndReason.self, forKey: .endReason)
+            pageSlug = try? c.decodeIfPresent(String.self, forKey: .pageSlug)
+            pageTitle = try? c.decodeIfPresent(String.self, forKey: .pageTitle)
         }
     }
 
@@ -374,6 +388,25 @@ final class ChatLoopManager: ObservableObject {
     /// The loop with this id.
     func loop(for id: UUID) -> ChatLoop? { loops.first { $0.id == id } }
     func isActive(_ id: UUID) -> Bool { loop(for: id)?.active == true }
+
+    /// Binds a Notchi page to a loop so subsequent rounds automatically append
+    /// to it instead of piling reports into the thread.
+    func bindPage(loopID: UUID, slug: String, title: String?) {
+        guard let i = loops.firstIndex(where: { $0.id == loopID }) else { return }
+        var changed = false
+        if loops[i].pageSlug != slug {
+            loops[i].pageSlug = slug
+            changed = true
+        }
+        if let title, !title.isEmpty, loops[i].pageTitle != title {
+            loops[i].pageTitle = title
+            changed = true
+        }
+        if changed {
+            persist()
+            LoopLog.write("bindPage \(LoopLog.short(loopID)) slug=\(slug)")
+        }
+    }
     /// The loops whose rounds answer in `threadID`, in start order.
     func loops(onThread threadID: UUID) -> [ChatLoop] { loops.filter { $0.threadID == threadID } }
     func hasActiveLoop(onThread threadID: UUID) -> Bool {
@@ -453,7 +486,9 @@ final class ChatLoopManager: ObservableObject {
                                   endsAt: record.endsAt,
                                   weekdaysOnly: record.weekdaysOnly ?? false,
                                   pausedSlot: active ? nil : record.pausedSlot,
-                                  endReason: active ? nil : record.endReason))
+                                  endReason: active ? nil : record.endReason,
+                                  pageSlug: record.pageSlug,
+                                  pageTitle: record.pageTitle))
         }
         LoopLog.write("load \(loops.count) loops, \(unreadable.count) unreadable")
     }
@@ -712,7 +747,8 @@ final class ChatLoopManager: ObservableObject {
                    active: loop.active, failed: loop.failed,
                    dismissed: loop.dismissed, endsAt: loop.endsAt,
                    weekdaysOnly: loop.weekdaysOnly, pausedSlot: loop.pausedSlot,
-                   endReason: loop.active ? nil : loop.endReason)
+                   endReason: loop.active ? nil : loop.endReason,
+                   pageSlug: loop.pageSlug, pageTitle: loop.pageTitle)
         }
         guard let encoded = try? JSONEncoder().encode(records) else {
             LoopLog.write("save failed: could not encode \(records.count) loops")

@@ -644,7 +644,8 @@ struct CloudMachineTool: NotchTool {
         try FileManager.default.moveItem(at: temp, to: target)
         let note = """
         The picture is saved on this Mac. To show it, put this line in your answer as it is: \
-        ![captcha](\(target.absoluteString))
+        ![captcha](\(target.absoluteString)) \
+        You have not seen the picture: do not say what kind of captcha it is or what it shows.
         """
         return output.replacingCharacters(in: match, with: note)
     }
@@ -988,6 +989,7 @@ enum CloudDesktopBridge {
                 try await InstaBoxMachine.shared.write(Data(script.utf8), to: path)
                 await written.set(true)
             }
+            let sent = Date()
             let result = try await InstaBoxMachine.shared.exec(
                 "node \(path) run", env: ["NOTCHI_CU": payload], cwd: nil, timeout: timeout)
             // A machine made again since the script was written.
@@ -995,10 +997,41 @@ enum CloudDesktopBridge {
                 await written.set(false)
                 continue
             }
-            if result.timedOut { return "[stopped after \(Int(timeout)) seconds] " + result.output }
-            return result.output.trimmingCharacters(in: .whitespacesAndNewlines)
+            let output = Self.logTiming(result.output, roundTrip: Date().timeIntervalSince(sent))
+            if result.timedOut { return "[stopped after \(Int(timeout)) seconds] " + output }
+            return output.trimmingCharacters(in: .whitespacesAndNewlines)
         }
         return "Error: the desktop script could not be written to the cloud machine."
+    }
+
+    /// Where each browser call's step times go: one line per call, with the
+    /// script's own times and the whole exec as seen from this Mac.
+    static var timingLog: URL {
+        FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Notchi/cloud-browser-timing.log")
+    }
+
+    /// Takes the script's `NOTCHI-TIMING` line off `output` and appends it to
+    /// `timingLog`. The model does not see it.
+    private static func logTiming(_ output: String, roundTrip: TimeInterval) -> String {
+        let marker = "NOTCHI-TIMING "
+        var kept: [Substring] = []
+        var timing = ""
+        for line in output.split(separator: "\n", omittingEmptySubsequences: false) {
+            if line.hasPrefix(marker) { timing = String(line.dropFirst(marker.count)) } else { kept.append(line) }
+        }
+        let stamp = ISO8601DateFormatter().string(from: Date())
+        let entry = "\(stamp) exec=\(Int(roundTrip * 1000)) \(timing.isEmpty ? "{}" : timing)\n"
+        let url = timingLog
+        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if let handle = try? FileHandle(forWritingTo: url) {
+            handle.seekToEndOfFile()
+            handle.write(Data(entry.utf8))
+            try? handle.close()
+        } else {
+            try? Data(entry.utf8).write(to: url)
+        }
+        return kept.joined(separator: "\n")
     }
 
     private static let script = #"""
@@ -1019,6 +1052,7 @@ enum CloudDesktopBridge {
     import { spawn } from 'node:child_process';
 
     const SOCK = '/tmp/notchi-cu.sock';
+    const TIMING = 'NOTCHI-TIMING ';
     const LOG = '/tmp/notchi-cu.log';
     const PROFILE = '/data/home/.notchi/chromium';
     const IDLE_MS = 20 * 60 * 1000;
@@ -1188,13 +1222,77 @@ enum CloudDesktopBridge {
 
     // The app's window that keyboard input should reach. xdotool types into the
     // window with X focus, which an accessibility click does not always move.
+    // With several windows open, the one picked is the window the last state
+    // was read from (its title is in the state's `Window: "…"` line). On
+    // 2026-11-20 the last Chromium window in xdotool's list was an older
+    // sign-up page: show_element took its picture instead of the captcha, and
+    // mouse clicks and wheel scrolls would have gone to it too.
     async function focusWindow(app) {
       const found = isChromium(app)
         ? await xdo(['search', '--onlyvisible', '--name', ' - Chromium$'])
         : await xdo(['search', '--onlyvisible', '--class', app]);
-      const id = found.out.split('\n').filter(Boolean).pop();
+      const ids = found.out.split('\n').filter(Boolean);
+      let title = null;
+      try { title = fs.readFileSync(stateFile(app), 'utf8').match(/Window: "(.*?)", App:/)?.[1] || null; } catch {}
+      let id = null;
+      if (title && ids.length > 1) {
+        for (const candidate of ids) {
+          const name = await xdo(['getwindowname', candidate]);
+          if (name.out === title) { id = candidate; break; }
+        }
+      }
+      if (!id) id = ids.pop();
       if (id) await xdo(['windowactivate', '--sync', id]);
       return id;
+    }
+
+    // The window xdotool reports as active, to check that a screenshot or a
+    // mouse action lands on the window that was raised.
+    async function activeWindow() {
+      return (await xdo(['getactivewindow'])).out || null;
+    }
+
+    // The container a captcha widget sits in: element `index` itself or its
+    // nearest ancestor that is a dialog or a frame. Returns the container's
+    // line and the lines under it, or null when there is no such container
+    // below the page (a captcha image in the page's own form).
+    function enclosing(app, index) {
+      let lines = [];
+      try { lines = fs.readFileSync(stateFile(app), 'utf8').split('\n'); } catch { return null; }
+      const at = lines.findIndex((l) => new RegExp(`^\\s*${index} `).test(l));
+      if (at < 0) return null;
+      const depthOf = (l) => l.match(/^\s*/)[0].length;
+      const container = (l) => /^\s*\d+ (dialog|internal frame|alert)\b/.test(l);
+      let top = container(lines[at]) ? at : -1;
+      for (let i = at - 1, d = depthOf(lines[at]); top < 0 && i >= 0; i--) {
+        if (!/^\s*\d+ /.test(lines[i]) || depthOf(lines[i]) >= d) continue;
+        d = depthOf(lines[i]);
+        if (container(lines[i])) top = i;
+        else if (/^\s*\d+ document web\b/.test(lines[i])) {
+          // A frame's own document sits under the frame; the page's top
+          // document ends the search.
+          const parent = lines.slice(0, i).reverse().find((l) => /^\s*\d+ /.test(l) && depthOf(l) < d);
+          if (!parent || !container(parent)) return null;
+        }
+      }
+      if (top < 0) return null;
+      const depth = depthOf(lines[top]);
+      let end = top + 1;
+      while (end < lines.length && (depthOf(lines[end]) > depth || !/^\s*\d+ /.test(lines[end]))) end++;
+      return { head: lines[top], body: lines.slice(top, end) };
+    }
+
+    // A captcha the user can answer in a reply has a field for the characters.
+    // A captcha widget with no text field (slider, "click the pictures in
+    // order", puzzle) is answered on the picture itself. On 2026-11-20 the
+    // model showed such a widget as a "typed captcha" and asked the user for
+    // characters that had no field to go in.
+    const CAPTCHA = /captcha|验证码|人机验证|verification|verify you are human/i;
+    function untypedCaptcha(app, index) {
+      const box = enclosing(app, index);
+      if (!box || !box.body.some((l) => CAPTCHA.test(l))) return null;
+      if (box.body.some((l) => /^\s*\d+ (entry|password text|text|spin button)\b/.test(l))) return null;
+      return box.head.match(/^\s*(\d+) /)?.[1] || String(index);
     }
 
     // AT-SPI role names, longest first so `page tab list` wins over `page tab`.
@@ -1268,10 +1366,23 @@ enum CloudDesktopBridge {
 
     // A picture of one element, scrolled into view first.
     async function snap(app, index, el) {
+      const widget = untypedCaptcha(app, index);
+      if (widget) {
+        throw new Error(`Element ${index} is in a captcha (${widget}) that has no text field: it is answered by `
+          + 'clicking or dragging on the picture, and a reply from the user cannot do that. Do not show it '
+          + 'or ask for characters; say this step needs the user at the page and give the page\'s link.');
+      }
       const line = await scrollIntoView(app, index, el);
       const frame = frameOf(line);
       const origin = await windowOrigin(app);
       if (!frame || !origin) throw new Error(`Could not find element ${index} on screen.`);
+      const raised = await focusWindow(app);
+      await sleep(300);
+      const active = await activeWindow();
+      if (raised && active && String(+active) !== String(+raised)) {
+        throw new Error(`Another window is in front of ${app}, so a picture would show that window. `
+          + 'Read the page again (action=page_state) and retry once.');
+      }
       const pad = 8;
       const x = Math.max(0, Math.round(origin.x + frame.x - pad));
       const y = Math.max(0, Math.round(origin.y + frame.y - pad));
@@ -1599,12 +1710,17 @@ enum CloudDesktopBridge {
       }
     }
 
+    // get_app_state calls and their milliseconds in the last readState.
+    let lastReads = [];
     async function readState(app) {
       let state = '';
+      lastReads = [];
       // Chromium builds the page's accessibility tree on the first request, so
       // the first read can show only the window around it.
       for (let i = 0; i < 5; i++) {
+        const t0 = Date.now();
         state = await tool('get_app_state', { app, max_tree_nodes: 3000, text_limit: 2000 });
+        lastReads.push(Date.now() - t0);
         if (!isChromium(app) || /\n\s*\d+ document web .*\n\s+\d+ /.test(state)) break;
         await sleep(1500);
       }
@@ -1616,9 +1732,18 @@ enum CloudDesktopBridge {
       const job = JSON.parse(process.env.NOTCHI_CU || '{}');
       const app = job.app || 'Chromium';
       const lines = [];
+      // Milliseconds per step. Browser calls took 38 to 49 s each on 2026-11-21,
+      // a page_state with no page load among them, and nothing showed which
+      // step used the time. Notchi takes this line off the result and logs it.
+      const started = Date.now();
+      const timing = { op: job.op };
+      const mark = (name, from) => { timing[name] = Date.now() - from; return Date.now(); };
+      let t = Date.now();
       const healed = await healDesktop();
       if (healed) lines.push(healed);
+      t = mark('heal', t);
       await connected();
+      t = mark('connect', t);
       let before = '';
       if (job.op === 'click') {
         try {
@@ -1635,10 +1760,13 @@ enum CloudDesktopBridge {
         process.exit(1);
       }
       if (said) lines.push(said);
+      t = mark('perform', t);
       if (job.op !== 'apps') {
         if (job.op !== 'state' && job.op !== 'open') await sleep(1200);
         try {
           let state = await readState(app);
+          t = mark('readState', t);
+          timing.reads = lastReads;
           if (before && !job.verified && plainState(state) === before) {
             lines.push('The page is the same as before this click: the click did not take effect. '
               + 'Do not assume it worked; check the element is on screen (action=scroll), then try its label, '
@@ -1661,7 +1789,10 @@ enum CloudDesktopBridge {
       }
       let out = lines.join('\n');
       if (out.length > 40000) out = out.slice(0, 40000) + '\n[Cut at 40000 characters.]';
-      process.stdout.write(out + '\n');
+      timing.total = Date.now() - started;
+      timing.load = os.loadavg()[0].toFixed(1);
+      log(`timing ${JSON.stringify(timing)}`);
+      process.stdout.write(out + '\n' + TIMING + JSON.stringify(timing) + '\n');
     }
 
     const mode = process.argv[2];

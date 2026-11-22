@@ -542,6 +542,7 @@ struct MenuBarChat: View {
                                         ? recentCardsCache.cards(for: turn, at: index[id], in: thread,
                                                                  fresh: id == lastID)
                                         : [],
+                                    timestamp: index[id].flatMap { thread.timestamp(at: $0) } ?? turn.sentAt,
                                     onScreen: onScreen,
                                     live: turn.streaming && !showsCopies ? model.chatLiveStatus : nil,
                                     streamingNow: !showsCopies && id == lastID && model.isStreaming,
@@ -926,6 +927,7 @@ private struct ChatRow: View, Equatable {
     /// before it (`AssistantTurnView.question`, `.recentCards`).
     let question: String
     let recentCards: Set<String>
+    let timestamp: Date?
     let onScreen: Bool
     /// The round's wait state, for the answer still streaming only.
     let live: ChatLiveStatus?
@@ -949,7 +951,7 @@ private struct ChatRow: View, Equatable {
             && a.holdsAnswer == b.holdsAnswer && a.holdsLink == b.holdsLink
             && a.streamingNow == b.streamingNow && a.askFailed == b.askFailed
             && a.isLast == b.isLast && a.question == b.question
-            && a.recentCards == b.recentCards
+            && a.recentCards == b.recentCards && a.timestamp == b.timestamp
     }
 
     var body: some View {
@@ -971,7 +973,8 @@ private struct ChatRow: View, Equatable {
                 }
                 UserQuestionBubble(text: turn.text, baseFont: MenuBarChat.baseFont,
                                    isAgent: turn.isAgent,
-                                   reaction: turn.reaction, fromTelegram: turn.fromTelegram, savedOnly: turn.savedOnly)
+                                   reaction: turn.reaction, fromTelegram: turn.fromTelegram, fromSignal: turn.fromSignal, savedOnly: turn.savedOnly,
+                                   sentAt: timestamp)
                     .contextMenu { QuestionTurnMenu(onReply: onReply, onEdit: onEdit, onDelete: onDelete) }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -1038,7 +1041,8 @@ private struct ChatRow: View, Equatable {
                 folders: turn.folders,
                 onOpenCapture: { model.openTurnCapture($0) },
                 onUndoCapture: { model.undoTurnCapture($0) },
-                turnID: turn.id)
+                turnID: turn.id,
+                sentAt: timestamp)
         }
     }
 }

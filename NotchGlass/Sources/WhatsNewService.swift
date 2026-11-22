@@ -35,6 +35,9 @@ final class WhatsNewService: ObservableObject {
         var blurb: String?
         /// A switch under the blurb for the setting the headline is about.
         var blurbSwitch: BlurbSwitch?
+        /// A direct button under the blurb that jumps to the feature's setup or
+        /// setting, so the reader does not have to hunt through Settings.
+        var blurbAction: Action?
         var features: [String]
         var improvements: [String]
         var fixes: [String]
@@ -63,11 +66,14 @@ final class WhatsNewService: ObservableObject {
             case forceClickPressure
             /// Settings → Audit, the request record.
             case audit
+            /// Settings → Channels, starting Signal setup when not yet linked.
+            case signal
 
             var title: String {
                 switch self {
                 case .forceClickPressure: L("whatsnew.action.forceClick")
                 case .audit: L("whatsnew.action.audit")
+                case .signal: L("whatsnew.action.signal")
                 }
             }
         }
@@ -79,6 +85,7 @@ final class WhatsNewService: ObservableObject {
             heroAssetName: String? = nil,
             blurb: String? = nil,
             blurbSwitch: BlurbSwitch? = nil,
+            blurbAction: Action? = nil,
             features: [String] = [],
             improvements: [String] = [],
             fixes: [String] = [],
@@ -91,6 +98,7 @@ final class WhatsNewService: ObservableObject {
             self.heroAssetName = heroAssetName
             self.blurb = blurb
             self.blurbSwitch = blurbSwitch
+            self.blurbAction = blurbAction
             self.features = features; self.improvements = improvements
             self.fixes = fixes; self.others = others
             self.action = action; self.actionAfter = actionAfter
@@ -116,6 +124,25 @@ final class WhatsNewService: ObservableObject {
     /// English-only by design. Order doesn't matter — `sorted` puts the newest
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
+        Entry(
+            version: "0.9.43",
+            date: "2026-11-22",
+            headline: "Notchi now works in Signal.",
+            heroAssetName: "WhatsNew0943Promo",
+            blurb: "Link your Signal account in Settings → Channels with a QR code to chat with Notchi from your phone. Replies run on your Mac with your models and tools, and stay in Recent.",
+            blurbAction: .signal,
+            features: [
+                "Hover over a message to see when it was sent.",
+            ],
+            improvements: [
+                "The Original app icon now adapts to Dark Mode.",
+                "On new installs, double-tapping Left Command opens the notch.",
+                "Custom actions are opt-in for the long-press menu.",
+                "Answer tags, capture links, and Telegram or Signal labels now share one compact row.",
+                "Notchi's model icon uses Notchi's eyes.",
+                "The cloud machine recognizes image and slider captchas and hands back the page link instead of asking for typed characters.",
+            ]
+        ),
         Entry(
             version: "0.9.42",
             date: "2026-11-20",

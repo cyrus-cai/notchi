@@ -369,12 +369,16 @@ struct InlineSettingsView: View {
     @ObservedObject private var mcp = MCPHub.shared
     @ObservedObject private var connectorAuth = MCPConnectorAuth.shared
     @ObservedObject private var telegram = TelegramBridge.shared
+    @ObservedObject private var signal = SignalBridge.shared
     @ObservedObject private var instaBox = InstaBoxAccount.shared
     @State private var telegramToken = ""
     @State private var telegramOpenedBotFather = false
     @State private var telegramSetupOpen = false
     @State private var telegramConfirmForget = false
     @State private var telegramBoardCount = NSPasteboard.general.changeCount
+    @State private var signalSetupOpen = false
+    @State private var signalConfirmForget = false
+    @State private var signalCopiedBrew = false
     /// The open group in the connectors table. One tab shows one category's
     /// rows, so the table keeps a single heading over a short list.
     @State private var connectorCategory: MCPConnector.Category = .docs
@@ -581,6 +585,7 @@ struct InlineSettingsView: View {
         case balances = "Balances" // Blend1 gifts and purchases — reached from the wallet's links
         case privacy = "Privacy" // what happens to a Blend1 request — reached from the wallet's links
         case memory = "Memory"   // the memory folder — reached from Chat
+        case pages = "Pages"     // Notchi pages (*.notch.website) — reached from Chat
         case whatsNew = "WhatsNew" // the release notes — reached from About
         var id: String { rawValue }
 
@@ -588,14 +593,14 @@ struct InlineSettingsView: View {
         /// the pane's full width instead of `SettingsMetrics.contentMaxWidth`.
         var fillsWindowWidth: Bool {
             self == .stats || self == .usage || self == .pricing || self == .balances
-                || self == .memory
+                || self == .memory || self == .pages
         }
 
         /// A sub-page rather than a category: reached from a parent pane, drawn
         /// across the whole panel, and left through the header's back pill or Esc.
         var isDetail: Bool {
             self == .licenses || self == .survey || self == .usage || self == .pricing || self == .balances
-                || self == .privacy || self == .memory || self == .whatsNew
+                || self == .privacy || self == .memory || self == .pages || self == .whatsNew
         }
 
         /// The section a sub-page sits under — where back (and ⎋) returns to.
@@ -605,6 +610,7 @@ struct InlineSettingsView: View {
             case .licenses, .survey, .whatsNew: return .about
             case .usage, .pricing, .balances, .privacy: return .model
             case .memory: return .memories
+            case .pages:  return .chat
             default:               return nil
             }
         }
@@ -649,6 +655,7 @@ struct InlineSettingsView: View {
             case .balances:   return L("nono.balances")
             case .privacy:    return L("nono.privacy.title")
             case .memory:     return L("memory.title")
+            case .pages:      return "Pages"
             case .whatsNew:   return L("whatsnew.title")
             }
         }
@@ -1027,6 +1034,34 @@ struct InlineSettingsView: View {
                 .padding(.top, -NotchBody.panelPadding)
                 .padding(.bottom, -NotchBody.panelPadding)
                 .transition(.opacity.combined(with: .scale(scale: 0.96)))
+            } else if signalConfirmForget, case .connected(let account) = signal.state {
+                ConfirmationDialogOverlay(onDismiss: { signalConfirmForget = false }) {
+                    VStack(spacing: 14) {
+                        Text(L("signal.forget.confirm", account))
+                            .font(.sf(Tokens.TypeSize.reading, weight: .regular))
+                            .foregroundStyle(Tokens.text1)
+                            .multilineTextAlignment(.center)
+                            .fixedSize(horizontal: false, vertical: true)
+                        HStack(spacing: 10) {
+                            ConfirmDialogButton(title: L("telegram.forget"), kind: .destructive) {
+                                signalConfirmForget = false
+                                withAnimation(.easeOut(duration: Tokens.hoverFade)) {
+                                    signalSetupOpen = true
+                                    signal.forget(relink: true)
+                                }
+                            }
+                            ConfirmDialogButton(title: L("clear.cancel"), kind: .neutral) {
+                                signalConfirmForget = false
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 18)
+                    .frame(maxWidth: 280)
+                }
+                .padding(.horizontal, -NotchBody.panelPadding)
+                .padding(.bottom, -NotchBody.panelPadding)
+                .transition(.opacity.combined(with: .scale(scale: 0.96)))
             } else if telegramConfirmForget, case .connected(let bot, _) = telegram.state {
                 // Starting over unpairs the bot, and pairing again takes the
                 // whole setup, so it asks first. Same card as Forget memories.
@@ -1083,6 +1118,7 @@ struct InlineSettingsView: View {
         .animation(.easeOut(duration: 0.16), value: model.confirmingDisconnect)
         .animation(.easeOut(duration: 0.16), value: memoryForgetTarget)
         .animation(.easeOut(duration: 0.16), value: telegramConfirmForget)
+        .animation(.easeOut(duration: 0.16), value: signalConfirmForget)
         .animation(.easeOut(duration: 0.16), value: promptTemplatePickerOpen)
         .animation(.easeOut(duration: 0.16), value: presentedPromptShortcutID)
         .animation(.easeOut(duration: 0.16), value: licenseOfferOpen)
@@ -1385,6 +1421,7 @@ struct InlineSettingsView: View {
                     UnderlineLink(title: L("proactive.notebook.open"), external: true) { proactive.openNotebook() }
                 }
                 lidClosedRow
+                UnderlineLink(title: "Manage Pages") { open(.pages) }
                 if DebugFeatureFlags.cloudMachine {
                     cloudMachineSection
                 }
@@ -1416,7 +1453,6 @@ struct InlineSettingsView: View {
                     appIconStyleRow
                 }
                 dockIconRow
-                jevAutoPinRow
                 Text(L("capture.destination"))
                     .settingsHeading()
                     .padding(.top, metrics.groupHeadingGap)
@@ -1448,12 +1484,16 @@ struct InlineSettingsView: View {
                     .padding(.top, metrics.groupHeadingGap)
                 menuBarIconRow
                 menuBarCardPlacementRow
+                jevAutoPinRow
                 Text(L("chat.group.effects"))
                     .settingsHeading()
                     .padding(.top, metrics.groupHeadingGap)
                 messageSoundsRow
             case .channels:
-                telegramSection
+                VStack(alignment: .leading, spacing: 14) {
+                    telegramSection
+                    signalSection
+                }
             case .connect:
                 // One tab per group that has connectors, then that group's rows:
                 // the tab is the heading, so each row needs no caption of its own.
@@ -1482,6 +1522,8 @@ struct InlineSettingsView: View {
                 NonoPrivacyNote()
             case .memory:
                 memoryPage
+            case .pages:
+                NotchiPagesPane()
             case .whatsNew:
                 // Drawn beside this scroller, not in it (see `paneContent`).
                 EmptyView()
@@ -4769,6 +4811,7 @@ struct InlineSettingsView: View {
         return PickerCard(selected: selected, label: style.label) {
             selectAppIconStyle(style)
         } content: {
+            let _ = appIconAppearanceRevision
             if let icon = style.image {
                 Image(nsImage: icon)
                     .resizable()
@@ -6139,6 +6182,198 @@ struct InlineSettingsView: View {
                 telegramToken = copied.trimmingCharacters(in: .whitespacesAndNewlines)
             }
         }
+    }
+
+    // MARK: - Signal Channel
+
+    private var signalSection: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .top, spacing: 10) {
+                Image("ConnectorLogo-signal")
+                    .resizable()
+                    .interpolation(.high)
+                    .frame(width: 24, height: 24)
+                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                    .shadow(color: .black.opacity(0.25), radius: 1.5, y: 0.5)
+                    .padding(.top, 8)
+                VStack(alignment: .leading, spacing: 0) {
+                    HStack(spacing: 6) {
+                        Text(L("signal.title"))
+                            .font(.sf(Tokens.TypeSize.form))
+                            .foregroundStyle(Tokens.text1)
+                            .lineLimit(1)
+                        NewBadge(text: L("signal.tag"), tint: Tokens.text2)
+                        Spacer(minLength: 12)
+                        Toggle("", isOn: Binding(
+                            get: { signalOn },
+                            set: { on in
+                                Haptics.levelChange()
+                                setSignal(on)
+                            }
+                        ))
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                        .controlSize(.mini)
+                        .tint(Tokens.switchTint)
+                    }
+                    .frame(height: 40)
+                    if case .connected(let account) = signal.state {
+                        HStack(spacing: 12) {
+                            Text(signal.settingUpChat ? L("signal.settingUpChat") : L("signal.noteToSelfHint"))
+                                .font(.sf(Tokens.TypeSize.meta))
+                                .foregroundStyle(Tokens.text3)
+                                .lineLimit(1)
+                            Text(account)
+                                .font(.sf(Tokens.TypeSize.meta))
+                                .foregroundStyle(Tokens.text3)
+                                .lineLimit(1)
+                                .textSelection(.enabled)
+                            UnderlineLink(title: L("telegram.forget")) { signalConfirmForget = true }
+                        }
+                        .padding(.top, -6)
+                    }
+                }
+            }
+            if signalSettingUp {
+                VStack(alignment: .leading, spacing: 6) {
+                    signalStepRow(1, L("signal.step1")) {
+                        switch signal.state {
+                        case .installingCLI:
+                            TelegramStepPill(title: L("signal.installing"), action: nil)
+                        case .missingCLI:
+                            if SignalBridge.hasBrew {
+                                TelegramStepPill(title: L("signal.installBrew")) {
+                                    Task { await signal.installCLI() }
+                                }
+                            } else {
+                                TelegramStepPill(title: signalCopiedBrew ? L("signal.copied") : L("signal.copyBrew")) {
+                                    NSPasteboard.general.clearContents()
+                                    NSPasteboard.general.setString("brew install signal-cli", forType: .string)
+                                    signalCopiedBrew = true
+                                }
+                            }
+                        default:
+                            EmptyView()
+                        }
+                    }
+                    if signalCurrentStep == 1 {
+                        telegramStepNote(L("signal.step1.detail"))
+                    }
+                    signalStepRow(2, L("signal.step2")) {
+                        switch signal.state {
+                        case .checking:
+                            TelegramStepPill(title: L("telegram.checking"), action: nil)
+                        case .linking:
+                            TelegramStepPill(title: L("signal.refreshQR")) {
+                                signal.startNewLink()
+                            }
+                        case .failed:
+                            TelegramStepPill(title: L("signal.retry")) {
+                                Task { await signal.beginSetup() }
+                            }
+                        default:
+                            EmptyView()
+                        }
+                    }
+                    if case .linking(let uri) = signal.state {
+                        VStack(alignment: .leading, spacing: 8) {
+                            telegramStepNote(L("signal.step2.detail"))
+                            if let qr = SignalBridge.qrImage(for: uri) {
+                                Image(nsImage: qr)
+                                    .interpolation(.none)
+                                    .resizable()
+                                    .frame(width: 148, height: 148)
+                                    .padding(10)
+                                    .background(Color.white, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                                    .padding(.leading, 18)
+                                    .padding(.top, 2)
+                            }
+                        }
+                    } else if case .failed(let reason) = signal.state {
+                        Text(reason)
+                            .font(.sf(Tokens.TypeSize.meta))
+                            .foregroundStyle(Tokens.danger)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .padding(.leading, 18)
+                    }
+                    signalStepRow(3, L("signal.step3")) {
+                        EmptyView()
+                    }
+                }
+                .padding(.leading, 34)
+                .padding(.top, -4)
+                .transition(.opacity)
+            }
+        }
+        .onChange(of: signalSettingUp, initial: true) { signal.holdsPanel = signalSettingUp }
+        .onDisappear { signal.holdsPanel = false }
+    }
+
+    private var signalSettingUp: Bool {
+        if case .connected = signal.state { return false }
+        return signalOn
+    }
+
+    private var signalOn: Bool {
+        switch signal.state {
+        case .connected, .linking, .checking, .installingCLI, .missingCLI, .failed: return true
+        case .paused: return false
+        case .off: return signalSetupOpen
+        }
+    }
+
+    private var signalCurrentStep: Int {
+        switch signal.state {
+        case .missingCLI, .installingCLI: return 1
+        case .checking, .linking, .failed: return 2
+        case .connected, .paused: return 3
+        case .off: return SignalBridge.findCLI() == nil ? 1 : 2
+        }
+    }
+
+    private func setSignal(_ on: Bool) {
+        withAnimation(.easeOut(duration: 0.16)) {
+            if on {
+                if case .paused = signal.state {
+                    signal.reconnect()
+                } else {
+                    signalSetupOpen = true
+                    Task { await signal.beginSetup() }
+                }
+            } else {
+                signalSetupOpen = false
+                if case .connected = signal.state {
+                    signal.disconnect()
+                } else if signal.state != .off {
+                    signal.forget()
+                }
+            }
+        }
+    }
+
+    private func signalStepRow<Action: View>(_ number: Int, _ title: String,
+                                             @ViewBuilder action: () -> Action) -> some View {
+        let current = signalCurrentStep
+        let done = number < current
+        return HStack(spacing: 8) {
+            Text("\(number)")
+                .font(.sf(Tokens.TypeSize.label).monospacedDigit())
+                .foregroundStyle(Tokens.text4)
+                .frame(width: 10, alignment: .leading)
+            Text(title)
+                .font(.sf(Tokens.TypeSize.label, weight: .regular))
+                .foregroundStyle(number == current ? Tokens.text2 : done ? Tokens.text3 : Tokens.text4)
+                .lineLimit(1)
+            Spacer(minLength: 12)
+            if done {
+                Image(systemName: "checkmark")
+                    .font(.sf(Tokens.TypeSize.meta, weight: .regular))
+                    .foregroundStyle(Tokens.text3)
+            } else if number == current {
+                action()
+            }
+        }
+        .frame(minHeight: 28)
     }
 
     /// The setup steps are on screen.
@@ -8162,7 +8397,7 @@ struct InlineSettingsView: View {
     private func promptForceTouchBinding(for id: UUID) -> Binding<Bool> {
         Binding(
             get: {
-                promptShortcuts.first(where: { $0.id == id })?.appearsInForceTouch ?? true
+                promptShortcuts.first(where: { $0.id == id })?.appearsInForceTouch ?? false
             },
             set: { value in
                 guard let index = promptShortcuts.firstIndex(where: { $0.id == id }) else { return }
@@ -8677,6 +8912,7 @@ struct InlineSettingsView: View {
                 // dark panel. Reading the asset gives either artwork as drawn.
                 // Both catalog assets use the same preview scale so their visible
                 // icon heights stay aligned here and in Appearance.
+                let _ = appIconAppearanceRevision
                 let iconStyle = AppIconStyle.current
                 if let icon = iconStyle.image ?? NSApp.applicationIconImage {
                     Image(nsImage: icon)

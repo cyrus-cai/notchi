@@ -33,6 +33,8 @@ struct NoNoRequestContext: Sendable {
     static let window = "window"
     /// A message sent to the Notchi bot in Telegram (`TelegramBridge`).
     static let telegram = "telegram"
+    /// A message sent to Notchi via Signal (`SignalBridge`).
+    static let signal = "signal"
     /// Background naming of a new prompt shortcut.
     static let naming = "naming"
     /// Background titling of a conversation thread.
@@ -41,6 +43,12 @@ struct NoNoRequestContext: Sendable {
     static let suggest = "suggest"
     /// The one-time read of past conversations for facts to remember.
     static let memory = "memory"
+
+    /// Whether this request came from an external messaging channel (Telegram,
+    /// Signal, …) that delivers its own notification to the user.
+    var isExternalChannel: Bool {
+        surface == Self.telegram || surface == Self.signal
+    }
 
     @TaskLocal static var current: NoNoRequestContext?
 

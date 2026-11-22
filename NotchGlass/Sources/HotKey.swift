@@ -982,9 +982,19 @@ struct SummonHotKey: Equatable {
             || doubleTapSide == other.doubleTapSide
     }
 
-    /// Double-tap ⌥ — the shipped default. Reachable one-handed, taken by no
-    /// system shortcut, and never collides with a typed character.
+    /// Double-tap left ⌘ — the shipped default for new installs. Pairs with the
+    /// top-right card's double-tap right ⌘ without overlapping it.
     static let defaultConfig = SummonHotKey(
+        keyCode: 0,
+        modifiers: 0,
+        doubleTapModifier: UInt32(cmdKey),
+        doubleTapSide: .left,
+        enabled: true
+    )
+
+    /// Earlier shipped default (double-tap ⌥), preserved for existing installs
+    /// that never customized their summon shortcut.
+    static let legacyDefaultConfig = SummonHotKey(
         keyCode: 0,
         modifiers: 0,
         doubleTapModifier: UInt32(optionKey),
@@ -1001,37 +1011,44 @@ struct SummonHotKey: Equatable {
     )
 
     static var current: SummonHotKey {
-        get { read(prefix: "summonHotKey", fallback: .defaultConfig) }
+        get {
+            if let stored = readStored(prefix: "summonHotKey") {
+                return stored
+            }
+            let initial: SummonHotKey = OnboardingService.hasRunBefore
+                ? .legacyDefaultConfig
+                : .defaultConfig
+            write(initial, prefix: "summonHotKey")
+            return initial
+        }
         set { write(newValue, prefix: "summonHotKey") }
     }
 
     static var card: SummonHotKey {
-        get { read(prefix: "cardHotKey", fallback: .cardDefaultConfig) }
+        get { readStored(prefix: "cardHotKey") ?? .cardDefaultConfig }
         set { write(newValue, prefix: "cardHotKey") }
     }
 
-    private static func read(prefix: String, fallback: SummonHotKey) -> SummonHotKey {
-            let keyCodeKey = prefix + ".keyCode"
-            let modifiersKey = prefix + ".modifiers"
-            let doubleTapKey = prefix + ".doubleTapModifier"
-            let enabledKey = prefix + ".enabled"
-            let defaults = UserDefaults.standard
-            // No stored config at all (neither a recorded chord nor a double-tap
-            // choice) → first run → ship the default.
-            guard defaults.object(forKey: keyCodeKey) != nil
-                    || defaults.object(forKey: doubleTapKey) != nil else {
-                return fallback
-            }
-            let code = UInt32(bitPattern: Int32(defaults.integer(forKey: keyCodeKey)))
-            let mods = UInt32(bitPattern: Int32(defaults.integer(forKey: modifiersKey)))
-            let dbl = UInt32(bitPattern: Int32(defaults.integer(forKey: doubleTapKey)))
-            let side = ModifierSide(rawValue: defaults.integer(forKey: prefix + ".doubleTapSide")) ?? .either
-            // `enabled` defaults to true when the flag was never written (e.g. a
-            // config saved before the flag existed); only an explicit false disables.
-            let enabled = defaults.object(forKey: enabledKey) as? Bool ?? true
-            return SummonHotKey(keyCode: code, modifiers: mods,
-                                doubleTapModifier: dbl, doubleTapSide: side,
-                                enabled: enabled)
+    private static func readStored(prefix: String) -> SummonHotKey? {
+        let keyCodeKey = prefix + ".keyCode"
+        let modifiersKey = prefix + ".modifiers"
+        let doubleTapKey = prefix + ".doubleTapModifier"
+        let enabledKey = prefix + ".enabled"
+        let defaults = UserDefaults.standard
+        guard defaults.object(forKey: keyCodeKey) != nil
+                || defaults.object(forKey: doubleTapKey) != nil else {
+            return nil
+        }
+        let code = UInt32(bitPattern: Int32(defaults.integer(forKey: keyCodeKey)))
+        let mods = UInt32(bitPattern: Int32(defaults.integer(forKey: modifiersKey)))
+        let dbl = UInt32(bitPattern: Int32(defaults.integer(forKey: doubleTapKey)))
+        let side = ModifierSide(rawValue: defaults.integer(forKey: prefix + ".doubleTapSide")) ?? .either
+        // `enabled` defaults to true when the flag was never written (e.g. a
+        // config saved before the flag existed); only an explicit false disables.
+        let enabled = defaults.object(forKey: enabledKey) as? Bool ?? true
+        return SummonHotKey(keyCode: code, modifiers: mods,
+                            doubleTapModifier: dbl, doubleTapSide: side,
+                            enabled: enabled)
     }
 
     private static func write(_ value: SummonHotKey, prefix: String) {
@@ -1202,9 +1219,7 @@ struct PromptShortcut: Codable, Equatable, Identifiable {
     var opensBesidePointer: Bool?
     /// Whether this row is offered as a button in the force click box
     /// (`CompactShortcutPromptView.quickPicks`). That box holds four rows at
-    /// most, so a shortcut that isn't wanted under the pointer can step out and
-    /// leave the slot to one that is. `nil` — every row saved before this
-    /// existed — means shown, which is the behaviour those rows already had.
+    /// most, so actions are opt-in: `nil` means hidden until explicitly enabled.
     var showsInForceTouch: Bool?
     /// Pins this shortcut to one backend — a translation chord can stay on a cheap
     /// fast model at one provider while the notch's default answers everything
@@ -1297,8 +1312,8 @@ struct PromptShortcut: Codable, Equatable, Identifiable {
 
     var opensInPointerWindow: Bool { true }
 
-    /// Shown in the force click box unless the row was explicitly taken out of it.
-    var appearsInForceTouch: Bool { showsInForceTouch != false }
+    /// Shown in the force click box only when explicitly enabled.
+    var appearsInForceTouch: Bool { showsInForceTouch == true }
 
     var canRunFromHotKey: Bool { isReady }
 }

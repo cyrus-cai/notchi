@@ -348,6 +348,11 @@ struct WhatsNewView: View {
                     if let blurbSwitch = entry.blurbSwitch {
                         blurbSwitchRow(blurbSwitch)
                     }
+
+                    if let blurbAction = entry.blurbAction, shouldShowAction(blurbAction) {
+                        actionButton(blurbAction)
+                            .padding(.top, 2)
+                    }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -416,6 +421,12 @@ struct WhatsNewView: View {
                 SettingsNewMarks.auditSeen = true
                 model.settingsSection = InlineSettingsView.Section.stats.rawValue
                 model.openSettings()
+            case .signal:
+                model.settingsSection = InlineSettingsView.Section.channels.rawValue
+                model.openSettings()
+                if SignalBridge.shared.state == .off {
+                    Task { await SignalBridge.shared.beginSetup() }
+                }
             }
         } label: {
             Text(action.title)
@@ -432,7 +443,7 @@ struct WhatsNewView: View {
         switch action {
         case .forceClickPressure:
             !model.forceClickPressure.isEnabled
-        case .audit:
+        case .audit, .signal:
             true
         }
     }
@@ -462,7 +473,7 @@ struct WhatsNewView: View {
                             .strokeBorder(Tokens.hairline, lineWidth: 0.75)
                     )
                     .accessibilityHidden(true)
-            case .audit:
+            case .audit, .signal:
                 EmptyView()
             }
         }

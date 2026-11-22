@@ -25,6 +25,7 @@
 		A1000961 /* NoNoAccount.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000960 /* NoNoAccount.swift */; };
 		A1000C71 /* ClipPrivacy.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000C70 /* ClipPrivacy.swift */; };
 		A1000D91 /* LinkGate.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000D90 /* LinkGate.swift */; };
+		A1000EC1 /* PagesService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000EC0 /* PagesService.swift */; };
 		A1000DE1 /* DecisionModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000DE0 /* DecisionModel.swift */; };
 		A1000D93 /* FeatureNudge.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000D92 /* FeatureNudge.swift */; };
 		A1000E91 /* VisualBlocks.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000E90 /* VisualBlocks.swift */; };
@@ -85,6 +86,7 @@
 		A1000DB0 /* NotchiFace.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000DB1 /* NotchiFace.swift */; };
 		A1000DB2 /* NotchiMark.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000DB3 /* NotchiMark.swift */; };
 		A1000DB4 /* TelegramBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000DB5 /* TelegramBridge.swift */; };
+		A1000DB6 /* SignalBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000DB7 /* SignalBridge.swift */; };
 		A10000C4 /* NotificationService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000C5 /* NotificationService.swift */; };
 		A1000082 /* WhatsNewView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000083 /* WhatsNewView.swift */; };
 		A10003AA /* HistoryArchiveWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10003BB /* HistoryArchiveWindow.swift */; };
@@ -156,6 +158,7 @@
 		A1000DB1 /* NotchiFace.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotchiFace.swift; sourceTree = "<group>"; };
 		A1000DB3 /* NotchiMark.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotchiMark.swift; sourceTree = "<group>"; };
 		A1000DB5 /* TelegramBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TelegramBridge.swift; sourceTree = "<group>"; };
+		A1000DB7 /* SignalBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SignalBridge.swift; sourceTree = "<group>"; };
 		A10000C5 /* NotificationService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationService.swift; sourceTree = "<group>"; };
 		A1000083 /* WhatsNewView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WhatsNewView.swift; sourceTree = "<group>"; };
 		A10003BB /* HistoryArchiveWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HistoryArchiveWindow.swift; sourceTree = "<group>"; };
@@ -172,6 +175,7 @@
 		A1000960 /* NoNoAccount.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NoNoAccount.swift; sourceTree = "<group>"; };
 		A1000C70 /* ClipPrivacy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClipPrivacy.swift; sourceTree = "<group>"; };
 		A1000D90 /* LinkGate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LinkGate.swift; sourceTree = "<group>"; };
+		A1000EC0 /* PagesService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PagesService.swift; sourceTree = "<group>"; };
 		A1000DE0 /* DecisionModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DecisionModel.swift; sourceTree = "<group>"; };
 		A1000D92 /* FeatureNudge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeatureNudge.swift; sourceTree = "<group>"; };
 		A1000E90 /* VisualBlocks.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VisualBlocks.swift; sourceTree = "<group>"; };
@@ -278,6 +282,7 @@
 				A1000DB1 /* NotchiFace.swift */,
 				A1000DB3 /* NotchiMark.swift */,
 				A1000DB5 /* TelegramBridge.swift */,
+				A1000DB7 /* SignalBridge.swift */,
 				A10000C5 /* NotificationService.swift */,
 				A1000083 /* WhatsNewView.swift */,
 				A10003BB /* HistoryArchiveWindow.swift */,
@@ -295,6 +300,7 @@
 				A1000960 /* NoNoAccount.swift */,
 				A1000C70 /* ClipPrivacy.swift */,
 				A1000D90 /* LinkGate.swift */,
+				A1000EC0 /* PagesService.swift */,
 				A1000DE0 /* DecisionModel.swift */,
 				A1000D92 /* FeatureNudge.swift */,
 				A1000E90 /* VisualBlocks.swift */,
@@ -458,6 +464,7 @@
 				A1000DB0 /* NotchiFace.swift in Sources */,
 				A1000DB2 /* NotchiMark.swift in Sources */,
 				A1000DB4 /* TelegramBridge.swift in Sources */,
+				A1000DB6 /* SignalBridge.swift in Sources */,
 				A10000C4 /* NotificationService.swift in Sources */,
 				A1000082 /* WhatsNewView.swift in Sources */,
 				A10003AA /* HistoryArchiveWindow.swift in Sources */,
@@ -475,6 +482,7 @@
 				A1000961 /* NoNoAccount.swift in Sources */,
 				A1000C71 /* ClipPrivacy.swift in Sources */,
 				A1000D91 /* LinkGate.swift in Sources */,
+				A1000EC1 /* PagesService.swift in Sources */,
 				A1000DE1 /* DecisionModel.swift in Sources */,
 				A1000D93 /* FeatureNudge.swift in Sources */,
 				A1000E91 /* VisualBlocks.swift in Sources */,
@@ -557,7 +565,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.9.42;
+				MARKETING_VERSION = 0.9.43;
 				PRODUCT_BUNDLE_IDENTIFIER = com.notchglass.app;
 				PRODUCT_NAME = Notchi;
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -580,7 +588,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.9.42;
+				MARKETING_VERSION = 0.9.43;
 				PRODUCT_BUNDLE_IDENTIFIER = com.notchglass.app;
 				PRODUCT_NAME = Notchi;
 				SWIFT_EMIT_LOC_STRINGS = YES;

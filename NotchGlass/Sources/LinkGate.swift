@@ -31,13 +31,21 @@ final class LinkGate: ObservableObject {
     func open(_ url: URL) {
         // A path or a date the app linked in an answer (`AnswerLinks`).
         if AnswerLinks.open(url) { return }
-        guard Self.applies(to: url) else {
+        let pageSlug = PagesService.slug(from: url)
+        guard pageSlug != nil || Self.applies(to: url) else {
             NSWorkspace.shared.open(url)
             return
         }
         let window = NSApp.currentEvent?.window.map(ObjectIdentifier.init)
         Task {
-            guard await warns(url) else {
+            // Only pages owned by this Mac (mintTicket succeeds) skip LinkGate;
+            // another user's public `*.notch.website` page still runs linkcheck.
+            if let pageSlug,
+               let ticketed = try? await PagesService.shared.mintTicket(slug: pageSlug) {
+                NSWorkspace.shared.open(ticketed)
+                return
+            }
+            guard Self.applies(to: url), await warns(url) else {
                 NSWorkspace.shared.open(url)
                 return
             }

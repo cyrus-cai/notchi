@@ -149,8 +149,9 @@ final class TelegramBridge: ObservableObject {
             state = .paused(bot: bot, owner: ownerName)
             return
         }
-        if let _ = owner {
+        if let owner {
             state = .connected(bot: bot, owner: ownerName)
+            syncPagesIdentity(owner: owner)
         } else {
             state = .pairing(bot: bot)
         }
@@ -208,6 +209,7 @@ final class TelegramBridge: ObservableObject {
         guard case .paused(let bot, let ownerName) = state else { return }
         UserDefaults.standard.removeObject(forKey: Self.pausedKey)
         state = .connected(bot: bot, owner: ownerName)
+        if let owner { syncPagesIdentity(owner: owner) }
         await call("deleteWebhook", ["drop_pending_updates": true])
         UserDefaults.standard.removeObject(forKey: Self.offsetKey)
         poll()
@@ -222,47 +224,72 @@ final class TelegramBridge: ObservableObject {
         }
         pairingUntil = nil
         state = .off
+        Task { await PagesService.shared.clearTelegram() }
+    }
+
+    private var botID: String? {
+        let parts = token.split(separator: ":", maxSplits: 1)
+        guard let first = parts.first, !first.isEmpty, first.allSatisfy(\.isNumber) else { return nil }
+        return String(first)
+    }
+
+    private func syncPagesIdentity(owner: Int64) {
+        guard let botID else { return }
+        Task { await PagesService.shared.syncTelegram(botID: botID, userID: owner) }
+    }
+
+    private static func pageWebAppButtons(in text: String) -> [[[String: Any]]] {
+        PagesService.pageURLs(in: text).prefix(3).map { item in
+            let title = PagesService.cachedTitle(forSlug: item.slug) ?? item.slug
+            return [[
+                "text": "↗ \(title)",
+                "web_app": ["url": item.url.absoluteString],
+            ]]
+        }
     }
 
     // MARK: - Lid
 
-    /// With a paired bot, turning it on installs the sudo rule `LidSleep` runs
-    /// under and turns lid sleep off; turning it off does the reverse. Each asks
-    /// for an administrator password once. With nothing to change on the system
-    /// yet, only the choice is saved, and pairing installs the rule.
+    private var anyChannelActive: Bool { pollTask != nil || SignalBridge.shared.isListening }
+
+    /// With a paired channel (Telegram or Signal), turning it on installs the
+    /// sudo rule `LidSleep` runs under and turns lid sleep off; turning it off
+    /// does the reverse. Each asks for an administrator password once. With
+    /// nothing to change on the system yet, only the choice is saved, and
+    /// pairing installs the rule.
     func setAnswersWithLidClosed(_ on: Bool) async {
         guard !lidBusy, on != answersWithLidClosed else { return }
-        if !LidSleep.ruleInstalled, !on || owner == nil {
+        if !LidSleep.ruleInstalled, !on || (owner == nil && !SignalBridge.shared.isPaired) {
             answersWithLidClosed = on
             UserDefaults.standard.set(on, forKey: Self.lidKey)
             return
         }
         lidBusy = true
         defer { lidBusy = false }
-        let done = on ? await LidSleep.install(disableNow: pollTask != nil)
+        let done = on ? await LidSleep.install(disableNow: anyChannelActive)
                       : await LidSleep.uninstall()
         guard done else { return }
         answersWithLidClosed = on
         UserDefaults.standard.set(on, forKey: Self.lidKey)
-        LidSleep.applied = on && pollTask != nil
+        LidSleep.applied = on && anyChannelActive
     }
 
     /// First pairing with the setting on. Declining the password dialog turns
     /// the setting off.
-    private func installLidRuleAfterPairing() async {
+    func installLidRuleAfterPairing() async {
         guard answersWithLidClosed, !LidSleep.ruleInstalled, !lidBusy else { return }
         lidBusy = true
         defer { lidBusy = false }
-        let done = await LidSleep.install(disableNow: pollTask != nil)
+        let done = await LidSleep.install(disableNow: anyChannelActive)
         answersWithLidClosed = done
         UserDefaults.standard.set(done, forKey: Self.lidKey)
-        LidSleep.applied = done && pollTask != nil
+        LidSleep.applied = done && anyChannelActive
     }
 
     /// Lid sleep is off exactly while the setting is on, its sudo rule is in
-    /// place and the bot polls.
-    private func applyLidSleep() {
-        let want = answersWithLidClosed && pollTask != nil && LidSleep.ruleInstalled
+    /// place and any channel (Telegram or Signal) is actively listening.
+    func applyLidSleep() {
+        let want = answersWithLidClosed && anyChannelActive && LidSleep.ruleInstalled
         guard want != LidSleep.applied else { return }
         LidSleep.applied = want
         Task.detached { LidSleep.set(disabled: want) }
@@ -488,6 +515,7 @@ final class TelegramBridge: ObservableObject {
             UserDefaults.standard.set(name, forKey: Self.ownerNameKey)
             pairingUntil = nil
             state = .connected(bot: UserDefaults.standard.string(forKey: Self.botKey) ?? "", owner: name)
+            syncPagesIdentity(owner: chatID)
             Task { await installLidRuleAfterPairing() }
         }
         guard chatID == owner else { return }
@@ -1001,22 +1029,36 @@ final class TelegramBridge: ObservableObject {
         let asked = String(question.trimmingCharacters(in: .whitespacesAndNewlines).prefix(500))
         guard !body.isEmpty || !pictures.isEmpty else { return }
         setThread(threadID, chat: owner)
+        let pageButtons = Self.pageWebAppButtons(in: answer)
         let previous = chains["\(owner)"]
         chains["\(owner)"] = Task { [weak self] in
             await previous?.value
             guard let self else { return }
-            for (index, part) in (body.isEmpty ? [] : Self.split(body)).enumerated() {
+            let parts = body.isEmpty ? [] : Self.split(body)
+            for (index, part) in parts.enumerated() {
                 let quote = index == 0 && !asked.isEmpty
-                var result = await self.call("sendMessage", [
+                let isLast = index == parts.count - 1
+                var params: [String: Any] = [
                     "chat_id": owner,
                     "text": (quote ? "<blockquote>" + TelegramFormat.escape(asked) + "</blockquote>\n" : "")
                         + TelegramFormat.html(part),
                     "parse_mode": "HTML", "disable_web_page_preview": true,
-                    "disable_notification": true])
+                    "disable_notification": true,
+                ]
+                if isLast && !pageButtons.isEmpty {
+                    params["reply_markup"] = ["inline_keyboard": pageButtons]
+                }
+                var result = await self.call("sendMessage", params)
                 if result["ok"] as? Bool != true {
-                    result = await self.call("sendMessage", ["chat_id": owner,
-                                                             "text": (quote ? "› " + asked + "\n\n" : "") + part,
-                                                             "disable_notification": true])
+                    var fallback: [String: Any] = [
+                        "chat_id": owner,
+                        "text": (quote ? "› " + asked + "\n\n" : "") + part,
+                        "disable_notification": true,
+                    ]
+                    if isLast && !pageButtons.isEmpty {
+                        fallback["reply_markup"] = ["inline_keyboard": pageButtons]
+                    }
+                    result = await self.call("sendMessage", fallback)
                 }
                 if let id = Self.messageID(result) { self.remember(messageID: id, chatID: owner, thread: threadID) }
             }
@@ -1351,7 +1393,7 @@ final class TelegramBridge: ObservableObject {
     }
 
     /// Stills spread evenly through a video.
-    nonisolated private static func frames(of url: URL, count: Int) async -> [NSImage] {
+    nonisolated static func frames(of url: URL, count: Int) async -> [NSImage] {
         let asset = AVURLAsset(url: url)
         guard let duration = try? await asset.load(.duration), duration.seconds > 0 else { return [] }
         let generator = AVAssetImageGenerator(asset: asset)
@@ -1372,7 +1414,7 @@ final class TelegramBridge: ObservableObject {
     /// when speech recognition is not allowed, on-device recognition is not
     /// available for the system language, the file has no readable audio, or
     /// nothing was said.
-    nonisolated private static func transcript(of url: URL) async -> String? {
+    nonisolated static func transcript(of url: URL) async -> String? {
         let status = await withCheckedContinuation { continuation in
             SFSpeechRecognizer.requestAuthorization { continuation.resume(returning: $0) }
         }
@@ -1819,14 +1861,16 @@ extension TelegramBridge {
             choices[id] = .undo(capture)
             rows.append((id, L("agent.process.undo")))
         }
+        let pageButtons = Self.pageWebAppButtons(in: turn.text)
         func markup(_ rows: [(UUID, String)]) -> [String: Any] {
-            ["inline_keyboard": rows.filter { choices[$0.0] != nil }.map { row in
+            let callbackRows: [[[String: Any]]] = rows.filter { choices[$0.0] != nil }.map { row in
                 [["text": row.1, "callback_data": "pick|\(row.0.uuidString)|0"]]
-            }]
+            }
+            return ["inline_keyboard": pageButtons + callbackRows]
         }
         Task { [weak self] in
             guard let self else { return }
-            if !rows.isEmpty {
+            if !rows.isEmpty || !pageButtons.isEmpty {
                 await self.call("editMessageReplyMarkup", ["chat_id": chatID, "message_id": messageID,
                                                            "reply_markup": markup(rows)])
             }
@@ -2003,7 +2047,7 @@ extension TelegramBridge {
 
     // MARK: Answer extras
 
-    fileprivate static func captureLabel(_ capture: NotchModel.Turn.Capture) -> String {
+    static func captureLabel(_ capture: NotchModel.Turn.Capture) -> String {
         CaptureLineLink.label(for: capture.kind)
     }
 

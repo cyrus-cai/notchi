@@ -272,6 +272,9 @@ final class NotchModel: ObservableObject {
         /// A *user* turn that came in from the Notchi bot in Telegram
         /// (`TelegramBridge`), marked under its bubble. Persisted.
         var fromTelegram: Bool = false
+        /// A *user* turn that came in from Signal (`SignalBridge`), marked
+        /// under its bubble. Persisted.
+        var fromSignal: Bool = false
         /// A *user* turn sent with ⌘↵: saved into the thread with no reply.
         /// It rides in the context of later rounds. Persisted.
         var savedOnly: Bool = false
@@ -369,7 +372,7 @@ final class NotchModel: ObservableObject {
         // its whole thread down with it. `decodeIfPresent` + defaults is what keeps old saved conversations
         // loadable. `role`/`text` are required — every saved turn has them.
         // `toolActivity` is deliberately absent: it's runtime-only UI state.
-        enum CodingKeys: String, CodingKey { case id, role, text, streaming, hidesUserBubble, usedClipboard, sources, isError, regenModel, answerModel, imageFiles, isAgent, agentLog, reasoning, loopRound, loopID, reaction, fromTelegram, sharedLinks, isLocal, captures, sentAt, interrupted, example, licenseCard, toolTrail, folders, proactive, savedOnly }
+        enum CodingKeys: String, CodingKey { case id, role, text, streaming, hidesUserBubble, usedClipboard, sources, isError, regenModel, answerModel, imageFiles, isAgent, agentLog, reasoning, loopRound, loopID, reaction, fromTelegram, fromSignal, sharedLinks, isLocal, captures, sentAt, interrupted, example, licenseCard, toolTrail, folders, proactive, savedOnly }
 
         init(from decoder: Decoder) throws {
             let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -391,6 +394,7 @@ final class NotchModel: ObservableObject {
             loopID       = try? c.decodeIfPresent(UUID.self, forKey: .loopID)
             reaction     = try c.decodeIfPresent(String.self, forKey: .reaction)
             fromTelegram = try c.decodeIfPresent(Bool.self, forKey: .fromTelegram) ?? false
+            fromSignal   = try c.decodeIfPresent(Bool.self, forKey: .fromSignal) ?? false
             sharedLinks  = try c.decodeIfPresent([String].self, forKey: .sharedLinks) ?? []
             isLocal      = try c.decodeIfPresent(Bool.self, forKey: .isLocal) ?? false
             // `try?`: a local build briefly stored bare kinds here; an unreadable
@@ -464,6 +468,8 @@ final class NotchModel: ObservableObject {
             case forceTouch
             /// A message to the Notchi bot in Telegram (`TelegramBridge`).
             case telegram
+            /// A message to Notchi via Signal (`SignalBridge`).
+            case signal
         }
         var origin: Origin? = nil
 
@@ -2166,6 +2172,7 @@ final class NotchModel: ObservableObject {
                      loop: loopIntervalMinutes)
         nextSubmitSurface = origin == .forceTouch ? NoNoRequestContext.forceTouch
             : origin == .telegram ? NoNoRequestContext.telegram
+            : origin == .signal ? NoNoRequestContext.signal
             : trackCompactTask ? NoNoRequestContext.shortcut
             : NoNoRequestContext.window
         armModelPin(pin)
@@ -2326,6 +2333,14 @@ final class NotchModel: ObservableObject {
     @discardableResult
     func runTelegramRound(threadID: UUID?, question: String, images: [NSImage],
                           hideUserBubble: Bool = false, pin: ModelPin? = nil) -> UUID? {
+        runChannelRound(threadID: threadID, question: question, images: images,
+                        origin: .telegram, hideUserBubble: hideUserBubble, pin: pin)
+    }
+
+    @discardableResult
+    func runChannelRound(threadID: UUID?, question: String, images: [NSImage],
+                         origin: HistoryItem.Origin,
+                         hideUserBubble: Bool = false, pin: ModelPin? = nil) -> UUID? {
         if let threadID, inFlightRounds.contains(where: { $0.threadID == threadID }) { return nil }
         var seed = threadID.flatMap { id in history.first { $0.id == id }?.conversation } ?? []
         // Same repair as `runChatLoopRound`: a turn left streaming by a quit.
@@ -2336,7 +2351,7 @@ final class NotchModel: ObservableObject {
         return runDetachedRound(threadID: threadID ?? UUID(), seed: seed, question: question,
                                 hideUserBubble: hideUserBubble,
                                 trackCompactTask: true, pin: pin,
-                                origin: .telegram, images: images, mintsMirror: false)
+                                origin: origin, images: images, mintsMirror: false)
     }
 
     /// Telegram's Continue button under a cut-off answer: the same hidden
@@ -4463,7 +4478,7 @@ final class NotchModel: ObservableObject {
         case "chat":       section = .chat
         case "memory", "memories": section = .memories
         case "connect", "connectors": section = .connect
-        case "channels", "telegram": section = .channels
+        case "channels", "telegram", "signal": section = .channels
         case "general":    section = .general
         case "appearance": section = .appearance
         case "shortcuts":  section = .shortcuts
@@ -5224,6 +5239,29 @@ final class NotchModel: ObservableObject {
         return choice == "The user chose: \"\(copy.delete)\""
     }
 
+    /// Asks before a normal chat turn writes into a page the user made public,
+    /// so prompt injection cannot silently exfiltrate private data to a public URL.
+    func confirmPublicPageWrite(answerID: UUID, slug: String, title: String, preview: String) async throws -> Bool {
+        let copy: (question: String, allow: String, cancel: String)
+        switch Localization.shared.language.resolved {
+        case .zhHans: copy = ("更新公开页面？任何有链接的人都能看到写入的内容。", "允许写入", "取消")
+        case .zhHant: copy = ("更新公開頁面？任何有連結的人都能看到寫入的內容。", "允許寫入", "取消")
+        case .ja:     copy = ("公開ページを更新しますか？リンクを知る全員に表示されます。", "更新する", "キャンセル")
+        case .ko:     copy = ("공개 페이지를 업데이트할까요? 링크가 있는 누구나 볼 수 있습니다.", "업데이트", "취소")
+        case .fr:     copy = ("Mettre à jour cette page publique ? Toute personne ayant le lien pourra la lire.", "Autoriser", "Annuler")
+        case .es:     copy = ("¿Actualizar esta página pública? Cualquiera con el enlace podrá verla.", "Permitir", "Cancelar")
+        case .en:     copy = ("Update this public page? Anyone with the link will see what is written.", "Update", "Cancel")
+        }
+        let summary = preview.isEmpty ? "\(title) (\(slug).\(PagesService.domain))"
+            : "\(title) (\(slug).\(PagesService.domain))\n\(preview)"
+        let choice = try await awaitUserChoice(
+            answerID: answerID,
+            question: copy.question + "\n" + summary,
+            options: [copy.cancel, copy.allow],
+            inlineOptions: true)
+        return choice == "The user chose: \"\(copy.allow)\""
+    }
+
     /// A line above the answer for something filed without a link.
     func markCaptureLine(_ kind: CaptureRequest.Kind, answerID: UUID) {
         markCapture(Turn.Capture(kind: kind, link: nil), answerID: answerID)
@@ -5412,8 +5450,11 @@ final class NotchModel: ObservableObject {
             shortcut.enabled = false
             return shortcut
         }
-        if ["default", "double_option", "double_alt", "option_option"].contains(token) {
+        if token == "default" {
             return .defaultConfig
+        }
+        if ["double_option", "double_alt", "option_option"].contains(token) {
+            return .legacyDefaultConfig
         }
         let doubles: [String: UInt32] = [
             "double_command": UInt32(cmdKey), "double_cmd": UInt32(cmdKey),
@@ -5613,11 +5654,7 @@ final class NotchModel: ObservableObject {
                 if !isPresented(answerID: answerID),
                    let round = inFlightRounds.first(where: { $0.answerID == answerID }),
                    (cardSends[round.threadID] ?? 0) > 0 {
-                    let line = round.thread.last(where: { $0.role == "user" })?.text ?? question
-                    if !unfoldCardForReply(threadID: round.threadID, live: true, bubbles: []) {
-                        _ = CardToasts.shared.show(threadID: round.threadID, title: cardTitle(line),
-                                                   body: question, hold: CardToasts.questionHold)
-                    }
+                    _ = unfoldCardForReply(threadID: round.threadID, live: true, bubbles: [])
                 }
                 // Timeout backstop: an unanswered question (user walked away, panel
                 // stayed closed) must not hang the round forever — resolve with an
@@ -9601,7 +9638,7 @@ final class NotchModel: ObservableObject {
         }
         // Telegram setup sends the user to Telegram and back (BotFather, the
         // token, Start); the steps must still be there on return.
-        if TelegramBridge.shared.holdsPanel {
+        if TelegramBridge.shared.holdsPanel || SignalBridge.shared.holdsPanel {
             cancelLeaveWatch()
             return
         }
@@ -9686,7 +9723,7 @@ final class NotchModel: ObservableObject {
         guard let watch = leaveWatch else { return }
         guard open else { leaveWatch = nil; return }
         if isAnswerPinned || isFloatingCardOpen || InfoPopoverGate.open
-            || TelegramBridge.shared.holdsPanel {
+            || TelegramBridge.shared.holdsPanel || SignalBridge.shared.holdsPanel {
             cancelLeaveWatch(); return
         }
         if PermissionPromptGate.open {
@@ -11556,7 +11593,7 @@ final class NotchModel: ObservableObject {
 
     /// Rounds sent from the top-right card and not finished yet, by thread. When
     /// the card folded before the answer, it unfolds once the answer is complete
-    /// (`unfoldCardForReply`), else the answer arrives as cards (`CardToasts`).
+    /// (`unfoldCardForReply`).
     private var cardSends: [UUID: Int] = [:]
 
     /// Opens the top-right card on a thread without taking the keyboard.
@@ -11571,8 +11608,7 @@ final class NotchModel: ObservableObject {
 
     /// A reply to a question sent from the card arrived after the card folded:
     /// the card unfolds in place on the thread. False when it can't (the panel
-    /// is open on something else, the screen is locked); the caller then
-    /// shows the reply as cards.
+    /// is open on something else, the screen is locked).
     ///
     /// `bubbles` holds each message's text in the order the card draws them
     /// (the answer's first bubble, then each later one). They leave one at a
@@ -11584,7 +11620,7 @@ final class NotchModel: ObservableObject {
         replyOnly = true
         replyBubblesGone = 0
         replyHolds = bubbles.map { body in
-            body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? 0 : CardToasts.hold(for: body)
+            body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? 0 : ReplyTiming.hold(for: body)
         }
         runReplyVanish()
         return true
@@ -11683,124 +11719,6 @@ final class NotchModel: ObservableObject {
     func openCardThread(id: UUID) {
         guard let item = history.first(where: { $0.id == id }) else { return }
         openHistory(item)
-    }
-
-    /// A round sent from the card, arriving as cards: the answer's first message
-    /// fills one from its first text, at the reply tone; each message after it
-    /// gets its own as `BubblePacer` lands it, at its tone.
-    private struct CardStream {
-        let lead: CardToasts.Toast
-        var rest: [AnswerSegment] = []
-        var finished = false
-        var lastTick = Date.distantPast
-    }
-    private var cardStreams: [UUID: CardStream] = [:]
-
-    /// Feed a card round's text so far. Called for every chunk and once at the
-    /// end with `streaming` false.
-    private func cardStreamTick(answerID: UUID, threadID: UUID, question: String, text: String,
-                                sources: [WebSource], shared: [String], streaming: Bool) {
-        guard !isPresented(answerID: answerID) else {
-            if cardStreams.removeValue(forKey: answerID) != nil {
-                BubblePacer.shared.landed[answerID] = nil
-            }
-            return
-        }
-        if cardStreams[answerID] == nil {
-            if streaming {
-                // The card folded before the answer: it unfolds once the
-                // answer is complete.
-                if !open, (cardSends[threadID] ?? 0) > 0 { return }
-            } else if unfoldCardForReply(threadID: threadID, live: false,
-                                         bubbles: replyBubbles(text: text, sources: sources,
-                                                               question: question, shared: shared)) {
-                return
-            }
-        }
-        let now = Date()
-        if streaming, let stream = cardStreams[answerID],
-           now.timeIntervalSince(stream.lastTick) < 0.1 { return }
-        // `streaming` false comes only from a finished round sent from the card.
-        guard (cardSends[threadID] ?? 0) > 0 || cardStreams[answerID] != nil || !streaming,
-              !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        let layout = LinkCardSplitter.layout(text, streaming: streaming, sources: sources,
-                                             question: question, shared: shared)
-        let body = MarkdownParser.plainText(layout.lead)
-        var stream: CardStream
-        if let existing = cardStreams[answerID] {
-            stream = existing
-            stream.lead.update(body: body)
-        } else {
-            stream = CardStream(lead: CardToasts.shared.show(
-                threadID: threadID, title: cardTitle(question), body: body,
-                hold: CardToasts.hold(for: body)))
-            BubblePacer.shared.landed[answerID] = { [weak self] index in
-                self?.cardBubbleLanded(answerID: answerID, threadID: threadID, index: index)
-            }
-        }
-        stream.lastTick = now
-        stream.rest = layout.rest
-        stream.finished = !streaming
-        cardStreams[answerID] = stream
-        BubblePacer.shared.sync(answerID, items: layout.rest.map { segment in
-            switch segment {
-            case .link(let url, let label): return .link(url, title: label)
-            case .text(let body): return .text(body.count)
-            case .media: return .media
-            }
-        }, streaming: streaming)
-        if !streaming, layout.rest.isEmpty { endCardStream(answerID) }
-    }
-
-    private func cardBubbleLanded(answerID: UUID, threadID: UUID, index: Int) {
-        guard let stream = cardStreams[answerID], index < stream.rest.count else { return }
-        let body: String?
-        switch stream.rest[index] {
-        case .text(let text): body = MarkdownParser.plainText(text)
-        case .link(let url, let label): body = label ?? url.host ?? url.absoluteString
-        case .media: body = nil
-        }
-        if let body {
-            _ = CardToasts.shared.show(threadID: threadID, title: "", body: body,
-                                       hold: CardToasts.hold(for: body))
-        }
-        if stream.finished, index == stream.rest.count - 1 { endCardStream(answerID) }
-    }
-
-    /// A round the user walked away from finished: its messages come out as
-    /// cards one at a time, each held for its reading time. False when the
-    /// cards can't show (panel open, screen locked, nothing to show).
-    private func popAnswerCards(threadID: UUID, answerID: UUID, question: String,
-                                thread: [Turn]) -> Bool {
-        guard !open, !RestingResult.screenLocked,
-              let turn = thread.last(where: { $0.id == answerID }),
-              turn.role == "assistant", !turn.isError else { return false }
-        let text = CitationMarkup.rendered(
-            ReasoningTags.visible(turn.text), sources: turn.sources,
-            stripUnresolved: CitationMarkup.shouldStripUnresolved(
-                answerModel: turn.answerModel, regenModel: turn.regenModel))
-        let layout = LinkCardSplitter.layout(text, streaming: false, sources: turn.sources,
-                                             question: question, shared: turn.sharedLinks)
-        var bodies = [MarkdownParser.plainText(layout.lead)]
-        for segment in layout.rest {
-            switch segment {
-            case .text(let text): bodies.append(MarkdownParser.plainText(text))
-            case .link(let url, let label): bodies.append(label ?? url.host ?? url.absoluteString)
-            case .media: break
-            }
-        }
-        bodies = bodies.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-        guard !bodies.isEmpty else { return false }
-        RestingResult.shared.show(cardTitle(question), failed: false)
-        CardToasts.shared.showInSequence(threadID: threadID, title: cardTitle(question),
-                                         bodies: bodies)
-        return true
-    }
-
-    private func endCardStream(_ answerID: UUID) {
-        cardStreams[answerID] = nil
-        BubblePacer.shared.landed[answerID] = nil
     }
 
     /// Whether this round was sent from the card, counting it as answered.
@@ -12379,6 +12297,7 @@ final class NotchModel: ObservableObject {
         questionTurn.loopRound = loopRound
         questionTurn.loopID = loopID
         questionTurn.fromTelegram = nonoContext.surface == NoNoRequestContext.telegram
+        questionTurn.fromSignal = nonoContext.surface == NoNoRequestContext.signal
         questionTurn.sentAt = Date()
         // Held so the deferred image encode below can find this exact turn again —
         // by id, never by index, since the thread on screen may have moved on (a new
@@ -12428,7 +12347,8 @@ final class NotchModel: ObservableObject {
             let suffix = LoopInterval.wireSuffix(
                 minutes: loop?.intervalMinutes ?? LoopInterval.lastMinutes,
                 round: loopRound, endsAt: loop?.endsAt,
-                weekdaysOnly: loop?.weekdaysOnly ?? false)
+                weekdaysOnly: loop?.weekdaysOnly ?? false,
+                pageSlug: loop?.pageSlug)
             context[context.count - 1] = ChatMessage(role: last.role, content: last.content + suffix)
         }
 
@@ -12709,16 +12629,13 @@ final class NotchModel: ObservableObject {
                 let appendChunk: @MainActor (String) -> Void = { [weak self] piece in
                     guard let self else { return }
                     // The answer's first text plays the reply sound — once per
-                    // round, and not for a /loop round nobody is waiting on. The
-                    // bubbles after it play their own as they land (`BubblePacer`).
-                    if acc.isEmpty, loopRound == nil {
+                    // round, and not for a /loop round or an off-screen external
+                    // channel round (Telegram/Signal already notify there).
+                    if acc.isEmpty, loopRound == nil,
+                       !nonoContext.isExternalChannel || self.isPresented(answerID: answerID) {
                         MessageTone.play(MessageTone.received)
                     }
                     acc += piece
-                    let cardTurn = thread.first(where: { $0.id == answerID })
-                    self.cardStreamTick(answerID: answerID, threadID: threadID, question: q, text: acc,
-                                        sources: cardTurn?.sources ?? [],
-                                        shared: cardTurn?.sharedLinks ?? [], streaming: true)
                     // First real text for this round ends the thinking phase — clear the
                     // dots even if the panel folded away (the round is detached but still
                     // ours). Idempotent: only the round that owns the flag clears it.
@@ -12869,6 +12786,22 @@ final class NotchModel: ObservableObject {
                                                                 request: request)
                     })
                 }
+                let boundPageSlug = loopID.flatMap { ChatLoopManager.shared.loop(for: $0)?.pageSlug }
+                agentTools.append(PageTool(
+                    isLoopRound: loopRound != nil,
+                    boundLoopSlug: boundPageSlug,
+                    confirmPublicWrite: { [weak self] slug, title, preview in
+                        guard let self else { throw CancellationError() }
+                        return try await self.confirmPublicPageWrite(
+                            answerID: answerID, slug: slug, title: title, preview: preview)
+                    },
+                    onTouch: { slug, title, _, _ in
+                        guard let loopID else { return }
+                        await MainActor.run {
+                            ChatLoopManager.shared.bindPage(loopID: loopID, slug: slug, title: title)
+                        }
+                    }
+                ))
                 // A flagged command's card reaches Telegram too, as inline buttons
                 // (`TelegramBridge.ask`).
                 if ChatSwitch.runCommands {
@@ -13217,6 +13150,7 @@ final class NotchModel: ObservableObject {
                 self.endThinking(for: answerID)
                 if let i = thread.firstIndex(where: { $0.id == answerID }) {
                     thread[i].streaming = false
+                    if thread[i].sentAt == nil { thread[i].sentAt = Date() }
                 }
                 // Captured BEFORE persist: whether this round finished detached —
                 // the user walked away while it streamed, so the panel folded back
@@ -13232,6 +13166,9 @@ final class NotchModel: ObservableObject {
                 // hold one history. A Telegram round is already there.
                 if nonoContext.surface != NoNoRequestContext.telegram {
                     TelegramBridge.shared.mirror(threadID: threadID, question: q, answer: acc)
+                }
+                if nonoContext.surface != NoNoRequestContext.signal {
+                    SignalBridge.shared.mirror(threadID: threadID, question: q, answer: acc)
                 }
                 if self.suggestFollowUpEnabled, loopRound == nil,
                    !acc.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -13255,15 +13192,20 @@ final class NotchModel: ObservableObject {
                         service: self.backgroundService(askService))
                 }
                 // A loop round's banner is the loop's own (`ChatLoopManager`).
+                // External channels (Telegram, Signal, …) notify in their own
+                // channel, never on the desktop.
                 let fromCard = self.takeCardSend(threadID)
-                if walkedAway, loopRound == nil {
+                if walkedAway, loopRound == nil, !nonoContext.isExternalChannel {
                     if fromCard {
                         let cardTurn = thread.first(where: { $0.id == answerID })
-                        self.cardStreamTick(answerID: answerID, threadID: threadID, question: q, text: acc,
-                                            sources: cardTurn?.sources ?? [],
-                                            shared: cardTurn?.sharedLinks ?? [], streaming: false)
-                    } else if !self.popAnswerCards(threadID: threadID, answerID: answerID,
-                                                   question: q, thread: thread) {
+                        if !self.unfoldCardForReply(
+                            threadID: threadID, live: false,
+                            bubbles: self.replyBubbles(
+                                text: acc, sources: cardTurn?.sources ?? [],
+                                question: q, shared: cardTurn?.sharedLinks ?? [])) {
+                            self.notifyAnswerReady(threadID: threadID, question: q, answer: acc)
+                        }
+                    } else {
                         self.notifyAnswerReady(threadID: threadID, question: q, answer: acc)
                     }
                 }
@@ -13289,6 +13231,7 @@ final class NotchModel: ObservableObject {
                         thread[i].streaming = false
                         thread[i].toolActivity = nil
                         thread[i].interrupted = true
+                        if thread[i].sentAt == nil { thread[i].sentAt = Date() }
                         thread = self.rebased(thread, answerID: answerID, threadID: threadID)
                         self.persistThread(thread, threadID: threadID, answer: acc,
                                            answerID: answerID, service: askService)
@@ -13323,6 +13266,7 @@ final class NotchModel: ObservableObject {
                         thread[i].text = saved
                         thread[i].streaming = false
                         thread[i].interrupted = true
+                        if thread[i].sentAt == nil { thread[i].sentAt = Date() }
                     }
                     let walkedAway = !self.isPresented(answerID: answerID)
                     thread = self.rebased(thread, answerID: answerID, threadID: threadID)
@@ -13339,14 +13283,18 @@ final class NotchModel: ObservableObject {
                             self.turns[j].interrupted = true
                         }
                         self.mode = .result
-                    } else if walkedAway, loopRound == nil {
+                    } else if walkedAway, loopRound == nil, !nonoContext.isExternalChannel {
                         // Interrupted but salvaged a partial answer, and the user had
                         // already walked away — still notify, same as a clean finish.
                         if self.takeCardSend(threadID) {
                             let cardTurn = thread.first(where: { $0.id == answerID })
-                            self.cardStreamTick(answerID: answerID, threadID: threadID, question: q,
-                                                text: saved, sources: cardTurn?.sources ?? [],
-                                                shared: cardTurn?.sharedLinks ?? [], streaming: false)
+                            if !self.unfoldCardForReply(
+                                threadID: threadID, live: false,
+                                bubbles: self.replyBubbles(
+                                    text: saved, sources: cardTurn?.sources ?? [],
+                                    question: q, shared: cardTurn?.sharedLinks ?? [])) {
+                                self.notifyAnswerReady(threadID: threadID, question: q, answer: saved)
+                            }
                         } else {
                             self.notifyAnswerReady(threadID: threadID, question: q, answer: saved)
                         }
@@ -13363,6 +13311,7 @@ final class NotchModel: ObservableObject {
                         thread[i].text = error.localizedDescription
                         thread[i].isError = true
                         thread[i].streaming = false
+                        if thread[i].sentAt == nil { thread[i].sentAt = Date() }
                     }
                     if (error as? OpenAICompatAIService.ServiceError)?.isLicenseRequired == true {
                         NotchiLicense.shared.noteRefusal()
@@ -13378,12 +13327,11 @@ final class NotchModel: ObservableObject {
                                                          loopRound: loopRound, failed: true,
                                                          answer: error.localizedDescription)
                     let fromCard = self.takeCardSend(threadID)
-                    if walkedAway, loopRound == nil {
+                    if walkedAway, loopRound == nil, !nonoContext.isExternalChannel {
                         if fromCard {
                             let body = error.localizedDescription
                             if !self.unfoldCardForReply(threadID: threadID, live: false, bubbles: [body]) {
-                                _ = CardToasts.shared.show(threadID: threadID, title: self.cardTitle(q),
-                                                           body: body, hold: CardToasts.hold(for: body))
+                                RestingResult.shared.show(body, failed: true)
                             }
                         } else {
                             RestingResult.shared.show(error.localizedDescription, failed: true)
@@ -13465,6 +13413,7 @@ final class NotchModel: ObservableObject {
             if turns[i].role == "assistant" {
                 partial = turns[i].text
                 turns[i].interrupted = !partial.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                if turns[i].sentAt == nil { turns[i].sentAt = Date() }
             }
         }
         if partial.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -14472,6 +14421,7 @@ final class NotchModel: ObservableObject {
     private func markFinished(id: UUID) {
         guard let i = turns.firstIndex(where: { $0.id == id }) else { return }
         turns[i].streaming = false
+        if turns[i].sentAt == nil { turns[i].sentAt = Date() }
         setThinkingActivity(nil)
     }
 
@@ -16169,6 +16119,29 @@ func completionStamp(_ date: Date) -> String {
         return date.formatted(date: .omitted, time: .shortened)
     }
     return date.formatted(.dateTime.month(.abbreviated).day().hour().minute())
+}
+
+/// Compact hover timestamp for a chat bubble:
+/// - today: time only (`22:40`)
+/// - yesterday: `Yesterday 22:40` / `昨天 22:40`
+/// - earlier this year: `Nov 19 22:40` / `11月19日 22:40`
+/// - previous years: `Nov 19, 2025` / `2025年11月19日`
+/// `compact` stacks date and time onto two lines for narrow trailing margins.
+func messageTimeStamp(_ date: Date, compact: Bool = false) -> String {
+    let cal = Calendar.current
+    let time = date.formatted(date: .omitted, time: .shortened)
+    if cal.isDateInToday(date) {
+        return time
+    }
+    let sep = compact ? "\n" : " "
+    if cal.isDateInYesterday(date) {
+        return "\(L("time.yesterday"))\(sep)\(time)"
+    }
+    if cal.isDate(date, equalTo: Date(), toGranularity: .year) {
+        let day = date.formatted(.dateTime.month(.abbreviated).day())
+        return "\(day)\(sep)\(time)"
+    }
+    return date.formatted(.dateTime.year().month(.abbreviated).day())
 }
 
 /// Messages' own tones, played through the system sound service. None are

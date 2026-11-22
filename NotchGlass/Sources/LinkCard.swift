@@ -411,6 +411,25 @@ extension Array where Element == NotchModel.Turn {
         self[..<i].last(where: { $0.role == "user" })?.text ?? ""
     }
 
+    /// When the turn at index `i` was sent or answered. Assistant turns saved
+    /// before they recorded their own `sentAt` fall back to the user turn that
+    /// opened the same round.
+    func timestamp(at i: Int) -> Date? {
+        guard indices.contains(i) else { return nil }
+        if let at = self[i].sentAt { return at }
+        guard self[i].role == "assistant" else { return nil }
+        for j in stride(from: i - 1, through: 0, by: -1) {
+            if self[j].role == "assistant" { return nil }
+            if let at = self[j].sentAt { return at }
+        }
+        return nil
+    }
+
+    func timestamp(for turnID: UUID) -> Date? {
+        guard let i = lastIndex(where: { $0.id == turnID }) else { return nil }
+        return timestamp(at: i)
+    }
+
     /// The pages the `window` answers above `answerID` hand over as cards, by
     /// `LinkLine.key`. Those answers are laid out on their own, without this
     /// filter, so a page every answer repeats still stays hidden until it
@@ -488,6 +507,8 @@ struct LinkCardView: View {
     /// Draw the page's preview image above the title when it has one. The
     /// answer asks for it when this is its only card.
     var large: Bool
+    /// Quiet hover timestamp shown beside the card's bottom-right corner.
+    var timestamp: Date? = nil
 
     @State private var still: NSImage?
     /// The size this card was last shown at, from an earlier mount or launch.
@@ -495,10 +516,11 @@ struct LinkCardView: View {
     /// does not change height under the reader when it arrives.
     private let knownSize: CGSize?
 
-    init(url: URL, title: String?, large: Bool = false) {
+    init(url: URL, title: String?, large: Bool = false, timestamp: Date? = nil) {
         self.url = url
         self.title = title
         self.large = large
+        self.timestamp = timestamp
         _still = State(initialValue: LinkCardStore.cachedStill(url: url, title: title, large: large))
         knownSize = LinkCardStore.knownSize(url: url, title: title, large: large)
     }
@@ -519,6 +541,7 @@ struct LinkCardView: View {
                                                     style: .continuous))
                 }
                 .buttonStyle(PlatePressStyle())
+                .modifier(BubbleHoverTimestamp(date: timestamp))
                 .transition(.opacity)
             } else if let knownSize {
                 Color.clear
@@ -619,6 +642,15 @@ final class LinkCardStore {
         if let at = failed[key as String], Date().timeIntervalSince(at) < Self.retryAfter { return nil }
         if let running = drawing[key as String] { return await running.value.image }
         let task = Task { () -> (image: NSImage?, complete: Bool) in
+            if let page = Self.notchiPageDetails(url) {
+                let card = LPLinkMetadata()
+                card.originalURL = url
+                card.url = url
+                card.title = title ?? page.title
+                card.iconProvider = page.icon
+                let image = await self.draw(card)
+                return (image, image != nil)
+            }
             let local = Self.mapsDetails(url)
             // Drawn while the page is read: reading a Maps link runs to the
             // provider's timeout.
@@ -767,7 +799,7 @@ final class LinkCardStore {
     }
 
     private func placeholder(url: URL, title: String?) -> LPLinkMetadata {
-        let local = Self.mapsDetails(url)
+        let local = Self.notchiPageDetails(url) ?? Self.mapsDetails(url)
         let card = LPLinkMetadata()
         card.originalURL = url
         card.url = url
@@ -811,6 +843,31 @@ final class LinkCardStore {
         }
         return nil
     }
+
+    /// A Notchi page (`<slug>.notch.website`) drawn from its cached title and
+    /// the app icon without fetching the URL — private pages answer 403 to
+    /// `LPMetadataProvider`.
+    private static func notchiPageDetails(_ url: URL) -> (title: String?, icon: NSItemProvider?)? {
+        guard let slug = PagesService.slug(from: url) else { return nil }
+        let title = PagesService.cachedTitle(forSlug: slug) ?? slug
+        let icon = notchiAppIcon.map { NSItemProvider(item: $0 as NSData, typeIdentifier: "public.png") }
+        return (title, icon)
+    }
+
+    private static let notchiAppIcon: Data? = {
+        guard let icon = NSApp.applicationIconImage,
+              let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 128, pixelsHigh: 128,
+                                         bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
+                                         isPlanar: false, colorSpaceName: .deviceRGB,
+                                         bytesPerRow: 0, bitsPerPixel: 0),
+              let context = NSGraphicsContext(bitmapImageRep: rep)
+        else { return nil }
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = context
+        icon.draw(in: NSRect(x: 0, y: 0, width: 128, height: 128))
+        NSGraphicsContext.restoreGraphicsState()
+        return rep.representation(using: .png, properties: [:])
+    }()
 
     /// An Apple Maps link as a card without reading the page: the place it
     /// searches for and the Maps icon. `LPMetadataProvider` reads such a link

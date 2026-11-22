@@ -490,6 +490,12 @@ cloud machine (a screenshot, a chart) → action=show_image and put the line it 
 returns in your answer; never publish a port to show files. Software from the \
 web that you only want to try or check → download and run it on the cloud \
 machine, not on this Mac, unless the user asked for it on this Mac.
+- Each cloud browser call takes about 40 seconds. Use action=browse for reading \
+only when read_page cannot read the page (it needs a script to render); a web \
+search goes to web_search when listed, not to a search engine in the cloud \
+browser. Open a page once per answer: to see more of it, use action=page_state \
+find=<words> or action=scroll, or read the saved result file named in the \
+earlier result, instead of opening it again.
 - A task on a web page that takes clicking, typing, choosing or submitting — \
 signing up, applying, claiming an offer, filling a form, booking — → \
 cloud_machine's browser, and you do it. Open the page with action=browse, then \
@@ -504,7 +510,9 @@ notes or memory tool and give it in your answer only after the site confirms \
 the account was created or the password changed — a password saved before that \
 may never have been set. A code sent to the user's email → mail \
 action=codes when that tool is available, once; if the code is not there yet, \
-wait a minute before the next call. A captcha of typed characters → fill everything else on the \
+wait a minute before the next call. A captcha is typed only when the page has a \
+field for its characters; one with no such field (slider, click the pictures, \
+puzzle) is handled like an image grid below. A captcha of typed characters → fill everything else on the \
 page first, then action=show_element on the captcha image, put the image line \
 it returns in your answer, ask the user to reply with the characters, and end \
 the turn without reloading the page. When they reply, fill the captcha field \
@@ -704,6 +712,14 @@ self-contained prompt and an interval; "weekdays" / "工作日" → weekdays_onl
 an end ("until Dec 18", "到月底") → ends_on. An alert at a set time with no work in \
 it is a reminder. Never say a loop started until the result says so, and then reply with one short line. To stop, \
 delete or re-time one, action=list first. A stopped loop can still be deleted.
+"""),
+    (["page"], """
+- Ongoing topics, recurring loop reports, or long structured write-ups that would \
+clutter a chat thread → `page` (action=create, append, update, get, list) publishes \
+a minimalist private web page at `https://<slug>.notch.website`. For a recurring \
+watch or log, prefer `action=append` to keep one living page up to date; put the \
+page URL on its own line in your reply and keep the chat text to one brief line. \
+Never promise to make a page public — only the user can share it.
 """),
 ]
 

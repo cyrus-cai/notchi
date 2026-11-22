@@ -178,20 +178,17 @@ enum VendorLogos {
         "OpenRouter": Mark(
             path: "M16.804 1.957l7.22 4.105v.087L16.73 10.21l.017-2.117-.821-.03c-1.059-.028-1.611.002-2.268.11-1.064.175-2.038.577-3.147 1.352L8.345 11.03c-.284.195-.495.336-.68.455l-.515.322-.397.234.385.23.53.338c.476.314 1.17.796 2.701 1.866 1.11.775 2.083 1.177 3.147 1.352l.3.045c.694.091 1.375.094 2.825.033l.022-2.159 7.22 4.105v.087L16.589 22l.014-1.862-.635.022c-1.386.042-2.137.002-3.138-.162-1.694-.28-3.26-.926-4.881-2.059l-2.158-1.5a21.997 21.997 0 00-.755-.498l-.467-.28a55.927 55.927 0 00-.76-.43C2.908 14.73.563 14.116 0 14.116V9.888l.14.004c.564-.007 2.91-.622 3.809-1.124l1.016-.58.438-.274c.428-.28 1.072-.726 2.686-1.853 1.621-1.133 3.186-1.78 4.881-2.059 1.152-.19 1.974-.213 3.814-.138l.02-1.907z",
             viewBox: CGSize(width: 24, height: 24)),
-        // nono — Notchi's own gateway, so it wears Notchi's own app mark rather
-        // than the model actually running behind the tier. Traced off the app icon
-        // (`AppIcon.appiconset`), whose glyph sits on an exact 3×3 grid: the notch
-        // block is the 2×2 top square plus the cell below its left half, and the
-        // dot is the circle inscribed in the bottom-right cell. Written on that
-        // grid at 8 units a cell.
+        // nono — Notchi's own gateway, so it wears Notchi's own mark rather than
+        // the model actually running behind the tier: the two eyes of the app
+        // icon, at the sizes `NotchiEyeShape` uses. Each eye is 56 × 72 with a 28
+        // radius on the top-left and both bottom corners and 10 on the top-right;
+        // the eyes sit 16 apart.
         //
-        // Set in a 30-box with a 3-unit margin, not flush to 24 like the line-art
-        // marks: this one is a solid block, and a solid shape filling the same box
-        // as a knot or a burst outweighs them badly. 80% of the slot is where it
-        // stops reading as the biggest thing in the menu.
+        // Set in a 160-box with a 16-unit side margin: the eyes are solid, and a
+        // solid shape filling the box as a knot or a burst does outweighs them.
         "Notchi": Mark(
-            path: "M3 3H19V19H11V27H3ZM27 23A4 4 0 0 1 19 23A4 4 0 0 1 27 23Z",
-            viewBox: CGSize(width: 30, height: 30)),
+            path: "M44 44H62A10 10 0 0 1 72 54V88A28 28 0 0 1 44 116A28 28 0 0 1 16 88V72A28 28 0 0 1 44 44ZM116 44H134A10 10 0 0 1 144 54V88A28 28 0 0 1 116 116A28 28 0 0 1 88 88V72A28 28 0 0 1 116 44Z",
+            viewBox: CGSize(width: 160, height: 160)),
         // Vercel — the triangle. The AI Gateway ships under the Vercel brand, so
         // the gateway provider wears it (its *models* keep their own vendors').
         "Vercel": Mark(
