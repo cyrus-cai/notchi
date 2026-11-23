@@ -185,12 +185,6 @@ struct GlassMaterial: View {
     /// composite target unchanged.
     static let bakedTint: Double = 0.34
 
-    /// Wider than any panel the island opens to (see `expandShimmer`).
-    private static let bandWidth: CGFloat = 1600
-    /// The size `diagonalGloss` is drawn at before it is stretched to the panel:
-    /// the idle panel's open size, so the common case is drawn 1:1.
-    private static let glossReference = CGSize(width: 580, height: 320)
-
     /// Whether the macOS 26 native glass (and therefore the baked tint) is in
     /// play; the legacy backdrop keeps the original full-strength veil.
     private var tintBaked: Bool {
@@ -220,17 +214,17 @@ struct GlassMaterial: View {
             shape.fill(.clear).nativeGlass(in: shape, tint: light ? .white : .black,
                                            frosted: light)
             darkVeil
-            // The raking diagonal gloss over the lower body — faded in when
-            // open. Both decorations stay MOUNTED at rest (opacity 0) instead
-            // of being `if expanded`-inserted: each is a blurred offscreen
-            // layer, and allocating those buffers on the open's very first
-            // frame cost that frame its budget — a visible hitch right as the
-            // expansion starts.
-            diagonalGloss(shape).opacity(expanded ? 1 : 0)
+            // The raking diagonal gloss over the lower body — pure gradient
+            // (no offscreen `.drawingGroup()` IOSurface), faded in when open.
+            if expanded {
+                diagonalGloss(shape)
+            }
             // No camera zone on the floating card; with a zero zone the cap
             // would still paint its 46pt fade across the top.
             if cameraZone > 0 { blackCap(shape) }
-            expandShimmer(shape).opacity(expanded ? 1 : 0)
+            if sweepsOnOpen && expanded {
+                expandShimmer(shape)
+            }
             // NOTE: the edge rim is intentionally NOT drawn here. It's stamped over
             // the island as a separate overlay *after* the bottom/left/right edge
             // fade (see `NotchIsland`), so the specular highlight keeps tracing the
@@ -259,21 +253,16 @@ struct GlassMaterial: View {
         // A tight, downward-only drop shadow for separation — small radius so it
         // doesn't smear into a halo around the corners on a bright wallpaper.
         // Resting only: under the open panel it would show through the clear
-        // bottom band as a dark smudge.
-        .background(
-            shape
-                .fill(.black.opacity(0.30))
-                .blur(radius: 9)
-                // Flatten the blurred shadow to one offscreen texture: its content is
-                // a fixed solid fill (no height-derived gradient stops), so only the
-                // geometry springs as the panel grows. Without this the radius-9
-                // offscreen blur re-renders every frame of the expand; with it the
-                // frame just scales the cached texture. Pixel-identical.
-                .drawingGroup()
-                .offset(y: 5)
-                .opacity(expanded ? 0 : 1)
-                .allowsHitTesting(false)
-        )
+        // bottom band as a dark smudge, and floating/bubble cards never use it.
+        .background {
+            if !expanded {
+                shape
+                    .fill(.black.opacity(0.30))
+                    .blur(radius: 9)
+                    .offset(y: 5)
+                    .allowsHitTesting(false)
+            }
+        }
         .onChange(of: expanded) { _, isOpen in
             if isOpen, sweepsOnOpen {
                 // Reset to the top instantly, then drive the sweep down on the
@@ -322,30 +311,22 @@ struct GlassMaterial: View {
             let h = max(geo.size.height, 1)
             // Travel from just above the panel to just below it.
             let travel = h + 80
+            // Soft multi-stop gradient directly on the GPU — avoids allocating
+            // a wide offscreen `.drawingGroup()` IOSurface per instance.
             LinearGradient(
                 stops: [
                     .init(color: .white.opacity(0.0),  location: 0.0),
-                    .init(color: .white.opacity(0.10), location: 0.45),
-                    .init(color: .white.opacity(0.18), location: 0.5),
-                    .init(color: .white.opacity(0.10), location: 0.55),
+                    .init(color: .white.opacity(0.04), location: 0.25),
+                    .init(color: .white.opacity(0.11), location: 0.42),
+                    .init(color: .white.opacity(0.16), location: 0.50),
+                    .init(color: .white.opacity(0.11), location: 0.58),
+                    .init(color: .white.opacity(0.04), location: 0.75),
                     .init(color: .white.opacity(0.0),  location: 1.0),
                 ],
                 startPoint: .top, endPoint: .bottom
             )
-            // A fixed width, wider than any panel: the band's raster no longer
-            // depends on the panel's width, so the open spring, which resizes
-            // the panel every frame, moves a cached texture instead of
-            // re-rasterizing it. The parent clip cuts it to the shape.
-            .frame(width: Self.bandWidth, height: 110)
-            .blur(radius: 6)
-            // Flatten the blurred band to one offscreen texture (same trick as
-            // the drop shadow in `body`): its content is fixed — a 110pt gradient,
-            // stops in fractions — so the 0.7s sweep animates a cached raster
-            // via the offset transform instead of re-running the radius-6 blur
-            // on every frame of the travel. Pixel-identical.
-            .drawingGroup()
-            .frame(width: geo.size.width)
-            .offset(y: sweep ? travel - 55 : -110)
+            .frame(width: geo.size.width, height: 120)
+            .offset(y: sweep ? travel - 60 : -120)
             .blendMode(.plusLighter)
         }
         .allowsHitTesting(false)
@@ -353,9 +334,11 @@ struct GlassMaterial: View {
 
     /// A soft diagonal **specular gloss** raking across the lower body — the bright
     /// streak of light reflecting off a thick glass slab in the reference. A wide,
-    /// blurred bright band angled across the panel and pushed toward the lower-right,
+    /// soft bright band angled across the panel and pushed toward the lower-right,
     /// kept low and `.plusLighter` so it reads as a gloss on the obsidian rather than
-    /// a white wedge. Clipped to the shape by the parent's mask; purely cosmetic.
+    /// a white wedge. Rendered directly as a smooth multi-stop gradient without an
+    /// offscreen `.drawingGroup()` IOSurface (which previously allocated ~9.76 MB
+    /// per GlassMaterial instance).
     private func diagonalGloss(_ shape: NotchShape) -> some View {
         GeometryReader { geo in
             let w = max(geo.size.width, 1)
@@ -363,27 +346,17 @@ struct GlassMaterial: View {
             LinearGradient(
                 stops: [
                     .init(color: .white.opacity(0.0),  location: 0.0),
-                    .init(color: .white.opacity(0.0),  location: 0.42),
-                    .init(color: .white.opacity(0.06), location: 0.5),
-                    .init(color: .white.opacity(0.10), location: 0.56),
-                    .init(color: .white.opacity(0.0),  location: 0.66),
+                    .init(color: .white.opacity(0.0),  location: 0.36),
+                    .init(color: .white.opacity(0.025), location: 0.44),
+                    .init(color: .white.opacity(0.065), location: 0.50),
+                    .init(color: .white.opacity(0.095), location: 0.55),
+                    .init(color: .white.opacity(0.045), location: 0.62),
+                    .init(color: .white.opacity(0.0),  location: 0.72),
                     .init(color: .white.opacity(0.0),  location: 1.0),
                 ],
                 startPoint: .topLeading, endPoint: .bottomTrailing
             )
-            // Oversize + rotate so the band sweeps the lower-right corner area at a
-            // shallow diagonal, like raking light, then blur it to a soft gloss.
-            // Drawn once at a fixed reference size and stretched to the panel
-            // with a scale transform. A linear gradient between unit points
-            // stretches to exactly the gradient it would draw at the new size,
-            // so only the radius-14 blur is stretched with it, which on a band
-            // this soft does not show. Sized from the panel, the raster changed
-            // on every frame of the open spring and was redrawn on the main
-            // thread each time; at a fixed size it is drawn once.
-            .frame(width: Self.glossReference.width * 1.8, height: Self.glossReference.height * 1.8)
-            .blur(radius: 14)
-            .drawingGroup()
-            .scaleEffect(x: w / Self.glossReference.width, y: h / Self.glossReference.height)
+            .frame(width: w * 1.8, height: h * 1.8)
             .rotationEffect(.degrees(-18))
             .offset(x: w * 0.12, y: h * 0.30)
             .blendMode(.plusLighter)

@@ -492,7 +492,8 @@ web that you only want to try or check → download and run it on the cloud \
 machine, not on this Mac, unless the user asked for it on this Mac.
 - Each cloud browser call takes about 40 seconds. Use action=browse for reading \
 only when read_page cannot read the page (it needs a script to render); a web \
-search goes to web_search when listed, not to a search engine in the cloud \
+search goes to web_search when listed, otherwise to read_page with \
+https://www.bing.com/search?q=<words>; never to a search engine in the cloud \
 browser. Open a page once per answer: to see more of it, use action=page_state \
 find=<words> or action=scroll, or read the saved result file named in the \
 earlier result, instead of opening it again.
@@ -699,11 +700,12 @@ action=write for a new file; prefer these to sed or echo in run_shell.
 selected or attached → current_context first, then answer from what it returns.
 """),
     (["memory"], """
-- Something worth keeping for later conversations (about the user, their work, \
-people, preferences, "remember …") → memory action=write it into your memory \
-folder, then answer as usual. What they say now contradicts a memory file → \
-rewrite that file. "Forget …" → rewrite it, or memory action=delete the file \
-that holds it.
+- `memory` is for facts *you* need to recall in future conversations (about the \
+user, their work, people, preferences, "remember …") → memory action=write it \
+into your memory folder, then answer as usual. What they say now contradicts a \
+memory file → rewrite that file. "Forget …" → rewrite it, or memory action=delete \
+the file that holds it. Do not use `memory` as a log for recurring reports, \
+trackers, or digests meant for the user to read — those belong on a `page`.
 """),
     (["manage_loop"], """
 - Work to do again on a schedule or to watch over time — "every hour check X", \
@@ -714,12 +716,15 @@ it is a reminder. Never say a loop started until the result says so, and then re
 delete or re-time one, action=list first. A stopped loop can still be deleted.
 """),
     (["page"], """
-- Ongoing topics, recurring loop reports, or long structured write-ups that would \
-clutter a chat thread → `page` (action=create, append, update, get, list) publishes \
-a minimalist private web page at `https://<slug>.notch.website`. For a recurring \
-watch or log, prefer `action=append` to keep one living page up to date; put the \
-page URL on its own line in your reply and keep the chat text to one brief line. \
-Never promise to make a page public — only the user can share it.
+- `page` (action=create, append, update, get, list) is for content *the user* \
+will read and revisit at `https://<slug>.notch.website`: ongoing trackers, \
+recurring loop digests/monitors, daily briefs, or long structured write-ups that \
+would clutter a chat thread (as opposed to `memory`, which is only for facts you \
+recall internally). For any ongoing watch, tracker, or multi-round digest, check \
+`action=list` first to reuse an existing page, or `action=create` one (folding in \
+any prior records kept in `memory`), then `action=append` each new update; put \
+the page URL on its own line in your reply and keep the chat text to one brief \
+line. Never promise to make a page public — only the user can share it.
 """),
 ]
 

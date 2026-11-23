@@ -4395,7 +4395,7 @@ struct AnswerCard<Content: View>: View {
 
 /// The glass bubble's surface, or none (a table carries its own box). One view
 /// type either way, so a card gaining its chrome does not rebuild its text.
-private struct OptionalSmokedGlass: ViewModifier {
+struct OptionalSmokedGlass: ViewModifier {
     let radius: CGFloat
     let on: Bool
 

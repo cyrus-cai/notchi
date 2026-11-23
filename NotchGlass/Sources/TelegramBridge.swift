@@ -238,14 +238,22 @@ final class TelegramBridge: ObservableObject {
         Task { await PagesService.shared.syncTelegram(botID: botID, userID: owner) }
     }
 
-    private static func pageWebAppButtons(in text: String) -> [[[String: Any]]] {
-        PagesService.pageURLs(in: text).prefix(3).map { item in
-            let title = PagesService.cachedTitle(forSlug: item.slug) ?? item.slug
-            return [[
-                "text": "↗ \(title)",
-                "web_app": ["url": item.url.absoluteString],
-            ]]
+    private func pageWebAppButtons(in text: String) async -> [[[String: Any]]] {
+        let items = Array(PagesService.pageURLs(in: text).prefix(3))
+        guard !items.isEmpty else { return [] }
+        if let botID, let owner {
+            await PagesService.shared.ensureTelegramSynced(botID: botID, userID: owner)
         }
+        var rows: [[[String: Any]]] = []
+        for item in items {
+            let title = PagesService.cachedTitle(forSlug: item.slug) ?? item.slug
+            let url = (try? await PagesService.shared.accessURL(slug: item.slug)) ?? item.url
+            rows.append([[
+                "text": "↗ \(title)",
+                "web_app": ["url": url.absoluteString],
+            ]])
+        }
+        return rows
     }
 
     // MARK: - Lid
@@ -897,7 +905,10 @@ final class TelegramBridge: ObservableObject {
                     if let sentID { await call("deleteMessage", ["chat_id": chatID, "message_id": sentID]) }
                 } else {
                     let head = firstSegment ? Self.head(of: answer) : ("", "")
-                    _ = await deliver(body: Self.withoutVisualBlocks(segment).trimmingCharacters(in: .whitespacesAndNewlines),
+                    let segmentBody = await PagesService.shared.rewriteWithAccessKeys(
+                        in: Self.withoutVisualBlocks(segment).trimmingCharacters(in: .whitespacesAndNewlines)
+                    )
+                    _ = await deliver(body: segmentBody,
                                       head: head, tail: "", sentID: sentID,
                                       replyTo: replyTo, chatID: chatID, thread: thread)
                     firstSegment = false
@@ -920,7 +931,8 @@ final class TelegramBridge: ObservableObject {
         let (withoutVisuals, charts) = Self.renderVisuals(final)
         let (shownText, photos) = Self.localImages(withoutVisuals)
         let pictures = photos + charts
-        let body = shownText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let rawBody = shownText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let body = rawBody.isEmpty ? "" : await PagesService.shared.rewriteWithAccessKeys(in: rawBody)
         defer {
             // After the text, so the picture lands under the line asking about it.
             if !pictures.isEmpty {
@@ -1029,12 +1041,13 @@ final class TelegramBridge: ObservableObject {
         let asked = String(question.trimmingCharacters(in: .whitespacesAndNewlines).prefix(500))
         guard !body.isEmpty || !pictures.isEmpty else { return }
         setThread(threadID, chat: owner)
-        let pageButtons = Self.pageWebAppButtons(in: answer)
         let previous = chains["\(owner)"]
         chains["\(owner)"] = Task { [weak self] in
             await previous?.value
             guard let self else { return }
-            let parts = body.isEmpty ? [] : Self.split(body)
+            let rewritten = body.isEmpty ? "" : await PagesService.shared.rewriteWithAccessKeys(in: body)
+            let pageButtons = await self.pageWebAppButtons(in: answer)
+            let parts = rewritten.isEmpty ? [] : Self.split(rewritten)
             for (index, part) in parts.enumerated() {
                 let quote = index == 0 && !asked.isEmpty
                 let isLast = index == parts.count - 1
@@ -1861,15 +1874,16 @@ extension TelegramBridge {
             choices[id] = .undo(capture)
             rows.append((id, L("agent.process.undo")))
         }
-        let pageButtons = Self.pageWebAppButtons(in: turn.text)
-        func markup(_ rows: [(UUID, String)]) -> [String: Any] {
-            let callbackRows: [[[String: Any]]] = rows.filter { choices[$0.0] != nil }.map { row in
-                [["text": row.1, "callback_data": "pick|\(row.0.uuidString)|0"]]
-            }
-            return ["inline_keyboard": pageButtons + callbackRows]
-        }
+        let turnText = turn.text
         Task { [weak self] in
             guard let self else { return }
+            let pageButtons = await self.pageWebAppButtons(in: turnText)
+            @MainActor func markup(_ rows: [(UUID, String)]) -> [String: Any] {
+                let callbackRows: [[[String: Any]]] = rows.filter { self.choices[$0.0] != nil }.map { row in
+                    [["text": row.1, "callback_data": "pick|\(row.0.uuidString)|0"]]
+                }
+                return ["inline_keyboard": pageButtons + callbackRows]
+            }
             if !rows.isEmpty || !pageButtons.isEmpty {
                 await self.call("editMessageReplyMarkup", ["chat_id": chatID, "message_id": messageID,
                                                            "reply_markup": markup(rows)])
@@ -2023,18 +2037,30 @@ extension TelegramBridge {
         }
         let (withoutVisuals, charts) = Self.renderVisuals(report)
         let (text, photos) = Self.localImages(withoutVisuals)
-        let body = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let rawBody = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let body = rawBody.isEmpty ? "" : await PagesService.shared.rewriteWithAccessKeys(in: rawBody)
         guard !body.isEmpty || !(photos + charts).isEmpty else {
             await call("sendMessage", ["chat_id": chatID, "text": L("telegram.failed"),
                                        "reply_to_message_id": status ?? replyTo])
             return
         }
-        for part in body.isEmpty ? [] : Self.split(body) {
-            var result = await call("sendMessage", ["chat_id": chatID, "text": TelegramFormat.html(part),
-                                                    "parse_mode": "HTML", "disable_web_page_preview": true,
-                                                    "reply_to_message_id": status ?? replyTo])
+        let pageButtons = await pageWebAppButtons(in: report)
+        let parts = body.isEmpty ? [] : Self.split(body)
+        for (index, part) in parts.enumerated() {
+            let isLast = index == parts.count - 1
+            var params: [String: Any] = ["chat_id": chatID, "text": TelegramFormat.html(part),
+                                         "parse_mode": "HTML", "disable_web_page_preview": true,
+                                         "reply_to_message_id": status ?? replyTo]
+            if isLast && !pageButtons.isEmpty {
+                params["reply_markup"] = ["inline_keyboard": pageButtons]
+            }
+            var result = await call("sendMessage", params)
             if result["ok"] as? Bool != true {
-                result = await call("sendMessage", ["chat_id": chatID, "text": part])
+                var fallback: [String: Any] = ["chat_id": chatID, "text": part]
+                if isLast && !pageButtons.isEmpty {
+                    fallback["reply_markup"] = ["inline_keyboard": pageButtons]
+                }
+                result = await call("sendMessage", fallback)
             }
             if let id = Self.messageID(result) { agentReports["\(chatID):\(id)"] = taskID }
         }

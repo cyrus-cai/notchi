@@ -528,6 +528,14 @@ struct LinkCardView: View {
     @Environment(\.cardWidthFraction) private var cardWidthFraction
 
     var body: some View {
+        if let slug = PagesService.slug(from: url) {
+            NotchiPageCard(url: url, slug: slug, fallbackTitle: title, timestamp: timestamp)
+        } else {
+            standardCard
+        }
+    }
+
+    private var standardCard: some View {
         FractionWidthLayout(fraction: cardWidthFraction, hugs: true) {
             if let still {
                 Button {
@@ -572,6 +580,97 @@ struct LinkCardView: View {
                       let loading = await LinkCardStore.shared.loadingStill(url: url, title: title) {
                 LinkCardStore.shared.remember(size: loading.size, url: url, title: title, large: large)
                 withAnimation(.easeOut(duration: 0.18)) { still = loading }
+            }
+        }
+    }
+}
+
+/// Bespoke card for a Notchi page (`https://<slug>.notch.website`): a compact
+/// warm-ivory paper card matching the webpage's `#fbfbfa` editorial canvas.
+private struct NotchiPageCard: View {
+    let url: URL
+    let slug: String
+    let fallbackTitle: String?
+    let timestamp: Date?
+
+    @ObservedObject private var pages = PagesService.shared
+    @Environment(\.cardWidthFraction) private var cardWidthFraction
+    @State private var hovering = false
+
+    private var summary: PagesService.PageSummary? {
+        pages.pages.first { $0.slug == slug }
+    }
+
+    private var displayTitle: String {
+        summary?.title ?? PagesService.cachedTitle(forSlug: slug) ?? fallbackTitle ?? slug
+    }
+
+    private var isPublic: Bool {
+        summary?.isPublic == true
+    }
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: 18, style: .continuous)
+        let ink = Color(red: 0x1D / 255, green: 0x1D / 255, blue: 0x1F / 255)
+        let muted = Color(red: 0x7A / 255, green: 0x7A / 255, blue: 0x80 / 255)
+        let paperTop = Color(red: 0xFC / 255, green: 0xFB / 255, blue: 0xF8 / 255)
+        let paperBottom = Color(red: 0xF3 / 255, green: 0xF2 / 255, blue: 0xEE / 255)
+
+        FractionWidthLayout(fraction: cardWidthFraction, hugs: true) {
+            Button {
+                LinkGate.shared.open(url)
+            } label: {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(displayTitle)
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(ink)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.leading)
+
+                    HStack(spacing: 4) {
+                        Image(systemName: isPublic ? "globe" : "lock.fill")
+                            .font(.system(size: isPublic ? 9.5 : 8.5, weight: .semibold))
+                            .foregroundStyle(isPublic
+                                ? Color(red: 0x24 / 255, green: 0x8A / 255, blue: 0x3D / 255)
+                                : muted.opacity(0.85))
+                        Text("\(slug).\(PagesService.domain)")
+                            .font(.system(size: 11.5))
+                            .foregroundStyle(muted)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                }
+                .padding(.horizontal, 15)
+                .padding(.vertical, 10)
+                .frame(minWidth: 230, maxWidth: 310, alignment: .leading)
+                .background(
+                    shape.fill(
+                        LinearGradient(
+                            colors: [paperTop, paperBottom],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                    )
+                )
+                .overlay(
+                    shape.strokeBorder(
+                        Color.black.opacity(hovering ? 0.14 : 0.08),
+                        lineWidth: 0.75
+                    )
+                )
+                .shadow(color: Color.black.opacity(hovering ? 0.16 : 0.10),
+                        radius: hovering ? 10 : 7, x: 0, y: hovering ? 4 : 2)
+                .contentShape(shape)
+            }
+            .buttonStyle(PlatePressStyle())
+            .onHover { over in
+                withAnimation(.easeOut(duration: 0.16)) { hovering = over }
+            }
+            .modifier(BubbleHoverTimestamp(date: timestamp))
+        }
+        .task(id: slug) {
+            if summary == nil && PagesService.cachedTitle(forSlug: slug) == nil {
+                _ = try? await PagesService.shared.get(slug: slug, entries: 0)
             }
         }
     }
@@ -1020,24 +1119,26 @@ final class LinkCardStore {
     /// (kimi.com → www.kimi.com: LPError 2), so it is tried once more at the
     /// address the page ended up at; failing that, the card is built from the
     /// head's title, preview image and icon links, then `/favicon.ico`.
+    /// Reads the page's `<head>` directly first (pure URLSession — avoids spinning
+    /// up WebKit via `LPMetadataProvider` for ordinary links). Falls back to
+    /// `LPMetadataProvider` only when direct head parsing yields neither a title
+    /// nor an icon (e.g. JS-only SPAs or Apple Maps deep links).
     private static func fetch(_ url: URL) async -> LPLinkMetadata? {
-        let first = await provide(url)
-        if first?.iconProvider != nil { return first }
-        let head = await PageHead.read(url)
-        if let final = head?.url, final.absoluteString != url.absoluteString,
-           let second = await provide(final), second.iconProvider != nil {
-            second.originalURL = url
-            return second
+        if let head = await PageHead.read(url) {
+            let icon = await head.icon()
+            if head.title != nil || icon != nil {
+                let card = LPLinkMetadata()
+                card.originalURL = url
+                card.url = head.url ?? url
+                card.title = head.title
+                card.iconProvider = icon.map { NSItemProvider(item: $0 as NSData, typeIdentifier: "public.png") }
+                card.imageProvider = head.imageProvider()
+                return card
+            }
         }
-        let icon = await head?.icon()
-        guard first?.title != nil || head?.title != nil || icon != nil else { return first }
-        let card = LPLinkMetadata()
-        card.originalURL = url
-        card.url = first?.url ?? head?.url ?? url
-        card.title = first?.title ?? head?.title
-        card.iconProvider = icon.map { NSItemProvider(item: $0 as NSData, typeIdentifier: "public.png") }
-        card.imageProvider = first?.imageProvider ?? head?.imageProvider()
-        return card
+        let fallback = await provide(url)
+        if fallback?.iconProvider != nil { return fallback }
+        return fallback
     }
 
     private static func provide(_ url: URL) async -> LPLinkMetadata? {
@@ -1070,6 +1171,13 @@ final class LinkCardStore {
     }
 
     private static let recordVersion = 2
+    /// Disk cache bounds for `LinkCards/`: drop records untouched for 30 days
+    /// and evict oldest entries once total size exceeds 10 MB (down to 8 MB).
+    private nonisolated static let diskMaxBytes = 10 * 1024 * 1024
+    private nonisolated static let diskTargetBytes = 8 * 1024 * 1024
+    private nonisolated static let diskMaxAge: TimeInterval = 30 * 24 * 60 * 60
+    private nonisolated static let diskPruneQueue = DispatchQueue(
+        label: "com.notchglass.linkcards-prune", qos: .utility)
 
     private nonisolated static var directory: URL {
         let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
@@ -1086,12 +1194,55 @@ final class LinkCardStore {
     }
 
     private nonisolated static func readRecord(_ url: URL) -> LPLinkMetadata? {
-        guard let data = try? Data(contentsOf: recordURL(url)),
+        let file = recordURL(url)
+        if let attrs = try? FileManager.default.attributesOfItem(atPath: file.path),
+           let mod = attrs[.modificationDate] as? Date,
+           Date().timeIntervalSince(mod) > diskMaxAge {
+            try? FileManager.default.removeItem(at: file)
+            return nil
+        }
+        guard let data = try? Data(contentsOf: file),
               let record = try? JSONDecoder().decode(Record.self, from: data),
               record.version == recordVersion,
               record.icon != nil
         else { return nil }
+        // Touch mtime so active cards stay ahead of LRU eviction.
+        try? FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: file.path)
         return metadata(from: record, original: url)
+    }
+
+    /// Evicts expired (>30 days) and oldest records once `LinkCards/` exceeds 10 MB.
+    nonisolated static func pruneDiskCache() {
+        diskPruneQueue.async {
+            let dir = directory
+            let keys: Set<URLResourceKey> = [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey]
+            guard let files = try? FileManager.default.contentsOfDirectory(
+                at: dir, includingPropertiesForKeys: Array(keys)) else { return }
+            let cutoff = Date().addingTimeInterval(-diskMaxAge)
+            var kept: [(url: URL, size: Int, date: Date)] = []
+            var totalBytes = 0
+            for url in files {
+                let name = url.lastPathComponent
+                guard name.hasSuffix(".json"), name != "sizes.json" else { continue }
+                guard let vals = try? url.resourceValues(forKeys: keys),
+                      vals.isRegularFile == true else { continue }
+                let mod = vals.contentModificationDate ?? .distantPast
+                if mod < cutoff {
+                    try? FileManager.default.removeItem(at: url)
+                    continue
+                }
+                let size = vals.fileSize ?? 0
+                kept.append((url, size, mod))
+                totalBytes += size
+            }
+            guard totalBytes > diskMaxBytes else { return }
+            kept.sort { $0.date < $1.date }
+            for item in kept {
+                guard totalBytes > diskTargetBytes else { break }
+                try? FileManager.default.removeItem(at: item.url)
+                totalBytes -= item.size
+            }
+        }
     }
 
     private nonisolated static func metadata(from record: Record, original: URL) -> LPLinkMetadata {
@@ -1124,6 +1275,7 @@ final class LinkCardStore {
         if let data = try? JSONEncoder().encode(record) {
             try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             try? data.write(to: recordURL(url), options: .atomic)
+            Self.pruneDiskCache()
         }
         return Self.metadata(from: record, original: url)
     }
@@ -1139,7 +1291,8 @@ final class LinkCardStore {
     }
 
     /// The page's preview image as a large card shows it: cut to at most
-    /// `maxImageAspect` tall, or nil when it is too small to show large.
+    /// `maxImageAspect` tall, downscaled to the card's @2x display width (680 px),
+    /// and stored as JPEG so cached link cards stay tens of KB instead of multi-MB PNGs.
     private nonisolated static func previewImage(_ provider: NSItemProvider) async -> NSItemProvider? {
         guard let data = await load(provider)?.data,
               let source = CGImageSourceCreateWithData(data as CFData, nil),
@@ -1156,7 +1309,27 @@ final class LinkCardStore {
             else { return nil }
             cropped = cut
         }
-        guard let png = NSBitmapImageRep(cgImage: cropped).representation(using: .png, properties: [:])
+        let maxWidth: CGFloat = drawWidth * 2
+        var finalImage = cropped
+        if CGFloat(cropped.width) > maxWidth {
+            let scale = maxWidth / CGFloat(cropped.width)
+            let tw = max(1, Int((CGFloat(cropped.width) * scale).rounded()))
+            let th = max(1, Int((CGFloat(cropped.height) * scale).rounded()))
+            if let space = CGColorSpace(name: CGColorSpace.sRGB),
+               let ctx = CGContext(data: nil, width: tw, height: th,
+                                   bitsPerComponent: 8, bytesPerRow: tw * 4,
+                                   space: space,
+                                   bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) {
+                ctx.interpolationQuality = .high
+                ctx.draw(cropped, in: CGRect(x: 0, y: 0, width: tw, height: th))
+                if let scaled = ctx.makeImage() { finalImage = scaled }
+            }
+        }
+        let rep = NSBitmapImageRep(cgImage: finalImage)
+        if let jpeg = rep.representation(using: .jpeg, properties: [.compressionFactor: 0.82]) {
+            return NSItemProvider(item: jpeg as NSData, typeIdentifier: "public.jpeg")
+        }
+        guard let png = rep.representation(using: .png, properties: [:])
         else { return nil }
         return NSItemProvider(item: png as NSData, typeIdentifier: "public.png")
     }

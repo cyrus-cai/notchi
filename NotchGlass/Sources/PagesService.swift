@@ -84,6 +84,9 @@ final class PagesService: ObservableObject {
     @Published private(set) var loading = false
     @Published private(set) var lastError: String?
 
+    private var accessURLs: [String: URL] = [:]
+    private var syncedTelegram: (botID: String, userID: Int64)?
+
     /// Thread-safe title cache so `LinkCardStore` can title private pages
     /// without hitting the network (a private page answers 403 to LPMetadataProvider).
     private nonisolated static let titleLock = NSLock()
@@ -187,6 +190,32 @@ final class PagesService: ObservableObject {
         return data
     }
 
+    private func upsertSummary(slug: String, url: String, title: String?, visibility: String?, createdAt: Double? = nil, updatedAt: Double) {
+        if let i = pages.firstIndex(where: { $0.slug == slug }) {
+            let old = pages[i]
+            pages[i] = PageSummary(
+                slug: slug,
+                url: url,
+                title: title ?? old.title,
+                visibility: visibility ?? old.visibility,
+                createdAt: createdAt ?? old.createdAt,
+                updatedAt: updatedAt
+            )
+        } else if let title {
+            pages.insert(
+                PageSummary(
+                    slug: slug,
+                    url: url,
+                    title: title,
+                    visibility: visibility ?? "private",
+                    createdAt: createdAt ?? updatedAt,
+                    updatedAt: updatedAt
+                ),
+                at: 0
+            )
+        }
+    }
+
     func create(title: String, body: String, slugHint: String? = nil) async throws -> PageWriteResult {
         var payload: [String: Any] = [
             "title": title,
@@ -199,6 +228,8 @@ final class PagesService: ObservableObject {
         let data = try await request("/pages", method: "POST", body: payload)
         let result = try JSONDecoder().decode(PageWriteResult.self, from: data)
         Self.rememberTitle(result.title ?? title, forSlug: result.slug)
+        upsertSummary(slug: result.slug, url: result.url, title: result.title ?? title,
+                      visibility: result.visibility ?? "private", updatedAt: result.updatedAt)
         return result
     }
 
@@ -206,6 +237,8 @@ final class PagesService: ObservableObject {
         let data = try await request("/pages/\(slug)?entries=\(entries)", method: "GET")
         let detail = try JSONDecoder().decode(PageDetail.self, from: data)
         Self.rememberTitle(detail.title, forSlug: detail.slug)
+        upsertSummary(slug: detail.slug, url: detail.url, title: detail.title,
+                      visibility: detail.visibility, createdAt: detail.createdAt, updatedAt: detail.updatedAt)
         return detail
     }
 
@@ -217,6 +250,7 @@ final class PagesService: ObservableObject {
         let data = try await request("/pages/\(slug)", method: "PUT", body: payload)
         let result = try JSONDecoder().decode(PageWriteResult.self, from: data)
         if let title { Self.rememberTitle(title, forSlug: slug) }
+        upsertSummary(slug: result.slug, url: result.url, title: title, visibility: nil, updatedAt: result.updatedAt)
         return result
     }
 
@@ -226,7 +260,9 @@ final class PagesService: ObservableObject {
             "time_zone": TimeZone.current.identifier,
         ]
         let data = try await request("/pages/\(slug)/entries", method: "POST", body: payload)
-        return try JSONDecoder().decode(PageWriteResult.self, from: data)
+        let result = try JSONDecoder().decode(PageWriteResult.self, from: data)
+        upsertSummary(slug: result.slug, url: result.url, title: nil, visibility: nil, updatedAt: result.updatedAt)
+        return result
     }
 
     @discardableResult
@@ -268,6 +304,7 @@ final class PagesService: ObservableObject {
     func delete(slug: String) async throws {
         _ = try await request("/pages/\(slug)", method: "DELETE")
         pages.removeAll { $0.slug == slug }
+        accessURLs.removeValue(forKey: slug)
     }
 
     func mintTicket(slug: String) async throws -> URL {
@@ -277,6 +314,60 @@ final class PagesService: ObservableObject {
             throw PageError.unavailable("Invalid ticket URL.")
         }
         return url
+    }
+
+    /// Returns the page's permanent read-only capability URL (`/#k=<secret>`)
+    /// for mobile chats (Signal, Telegram). Cached in memory per slug.
+    func accessURL(slug: String, rotate: Bool = false) async throws -> URL {
+        if !rotate, let cached = accessURLs[slug] {
+            return cached
+        }
+        let body: [String: Any] = rotate ? ["rotate": true] : [:]
+        let data = try await request("/pages/\(slug)/key", method: "POST", body: body)
+        let response = try JSONDecoder().decode(TicketResponse.self, from: data)
+        guard let url = URL(string: response.url) else {
+            throw PageError.unavailable("Invalid access URL.")
+        }
+        accessURLs[slug] = url
+        return url
+    }
+
+    /// Rewrites bare `https://<slug>.notch.website` URLs owned by this Mac in
+    /// `text` to include their permanent `#k=<secret>` fragment so private pages
+    /// open directly from Signal or Telegram.
+    func rewriteWithAccessKeys(in text: String) async -> String {
+        let found = Self.pageURLs(in: text)
+        guard !found.isEmpty else { return text }
+        var replacements: [String: String] = [:]
+        for item in found {
+            if let url = try? await accessURL(slug: item.slug) {
+                replacements[item.slug] = url.absoluteString
+            }
+        }
+        guard !replacements.isEmpty,
+              let regex = try? NSRegularExpression(
+                pattern: #"https://([a-z0-9](?:[a-z0-9-]{0,46}[a-z0-9])?)\.notch\.website(?:/[^\s)\]"'<>]*)?"#,
+                options: [.caseInsensitive]
+              ) else {
+            return text
+        }
+        let ns = text as NSString
+        let matches = regex.matches(in: text, range: NSRange(location: 0, length: ns.length))
+        var result = text
+        for match in matches.reversed() {
+            let full = ns.substring(with: match.range)
+            let trimmed = full.trimmingCharacters(in: CharacterSet(charactersIn: ".,;:!?)]'\"，。；：！？）"))
+            let trailing = String(full.dropFirst(trimmed.count))
+            guard let url = URL(string: trimmed),
+                  let slug = Self.slug(from: url),
+                  let replacement = replacements[slug],
+                  url.fragment == nil,
+                  url.query == nil,
+                  url.path.isEmpty || url.path == "/" else { continue }
+            guard let range = Range(match.range, in: result) else { continue }
+            result.replaceSubrange(range, with: replacement + trailing)
+        }
+        return result
     }
 
     /// Opens a `<slug>.notch.website` URL in the browser. Mints a one-time owner
@@ -300,13 +391,21 @@ final class PagesService: ObservableObject {
     /// private pages inside Telegram via Mini App `initData` verification.
     func syncTelegram(botID: String, userID: Int64) async {
         guard !botID.isEmpty, userID > 0 else { return }
-        _ = try? await request("/pages/telegram", method: "PUT", body: [
+        if (try? await request("/pages/telegram", method: "PUT", body: [
             "bot_id": botID,
             "user_id": String(userID),
-        ])
+        ])) != nil {
+            syncedTelegram = (botID, userID)
+        }
+    }
+
+    func ensureTelegramSynced(botID: String, userID: Int64) async {
+        if let synced = syncedTelegram, synced.botID == botID, synced.userID == userID { return }
+        await syncTelegram(botID: botID, userID: userID)
     }
 
     func clearTelegram() async {
+        syncedTelegram = nil
         guard NoNoAccount.shared.hasToken else { return }
         _ = try? await request("/pages/telegram", method: "DELETE")
     }

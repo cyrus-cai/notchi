@@ -6247,6 +6247,8 @@ struct NotchBody: View {
                     toggleRoutines: { toggleSidePage(.routines) },
                     copiesOpen: model.showRoutines && model.sidePageTab == .copies,
                     toggleCopies: { toggleSidePage(.copies) },
+                    websitesOpen: model.showRoutines && model.sidePageTab == .websites,
+                    toggleWebsites: { toggleSidePage(.websites) },
                     openCloud: {
                         model.isResultMoreMenuOpen = false
                         model.settingsSection = InlineSettingsView.Section.chat.rawValue
@@ -8436,6 +8438,9 @@ struct ResultTrailingCluster: View {
     /// The side page on its From copies tab, a row in the ⋯ menu under Routines.
     var copiesOpen = false
     var toggleCopies: (() -> Void)? = nil
+    /// The side page on its Websites tab, a row in the ⋯ menu under Sub-thread.
+    var websitesOpen = false
+    var toggleWebsites: (() -> Void)? = nil
     /// The cloud machine's row in the ⋯ menu (`CloudMachineStatusMenuRow`).
     /// With no detach, a ⋯ of its own follows the side-page mark while the
     /// machine is on, as on the top-right card.
@@ -8463,7 +8468,7 @@ struct ResultTrailingCluster: View {
                 more.showsTooltip = false
                 segs.append(more)
             }
-            if detach == nil && (showsCloud || toggleRoutines != nil || toggleCopies != nil) {
+            if detach == nil && (showsCloud || toggleRoutines != nil || toggleCopies != nil || toggleWebsites != nil) {
                 var cloudMore = GlassSegmentCluster.Segment(id: "cloudMore",
                                   engaged: moreOpen,
                                   tooltip: L("nono.more"),
@@ -8484,11 +8489,12 @@ struct ResultTrailingCluster: View {
         ))
     }
 
-    /// The ⋯ menu with no detach to offer: Routines, Sub-thread and the cloud
+    /// The ⋯ menu with no detach to offer: Routines, Sub-thread, Websites and the cloud
     /// machine, as on the top-right card.
     private var cloudMenu: some View {
         let routines = L("routines.title")
         let copies = L("copyThread.tab")
+        let websites = "Websites"
         return VStack(alignment: .leading, spacing: MenuCard.rowSpacing) {
             if toggleRoutines != nil {
                 MenuCardRow(title: routines, selected: routinesOpen) {
@@ -8502,13 +8508,19 @@ struct ResultTrailingCluster: View {
                     toggleCopies()
                 }
             }
+            if let toggleWebsites {
+                MenuCardRow(title: websites, selected: websitesOpen) {
+                    moreOpen = false
+                    toggleWebsites()
+                }
+            }
             if showsCloud {
                 CloudMachineStatusMenuRow(compact: false)
             }
         }
         .padding(MenuCard.cardPad)
         .frame(width: max(MenuCard.pickerCardWidth,
-                          MenuCard.width(titles: [(routines, ""), (copies, "")])),
+                          MenuCard.width(titles: [(routines, ""), (copies, ""), (websites, "")])),
                alignment: .leading)
         .manageMenuCardBackground()
     }
@@ -8518,6 +8530,7 @@ struct ResultTrailingCluster: View {
         let chord = AppShortcutStore.chord(for: .detach).displayString
         let routines = L("routines.title")
         let copies = L("copyThread.tab")
+        let websites = "Websites"
         return VStack(alignment: .leading, spacing: MenuCard.rowSpacing) {
             MenuCardRow(title: title, accessory: chord, selected: false) {
                 moreOpen = false
@@ -8535,12 +8548,18 @@ struct ResultTrailingCluster: View {
                     toggleCopies()
                 }
             }
+            if let toggleWebsites {
+                MenuCardRow(title: websites, selected: websitesOpen) {
+                    moreOpen = false
+                    toggleWebsites()
+                }
+            }
             if showsCloud {
                 CloudMachineStatusMenuRow(compact: false)
             }
         }
         .padding(MenuCard.cardPad)
-        .frame(width: MenuCard.width(titles: [(title, chord), (routines, ""), (copies, "")]))
+        .frame(width: MenuCard.width(titles: [(title, chord), (routines, ""), (copies, ""), (websites, "")]))
         .manageMenuCardBackground()
     }
 
@@ -10919,6 +10938,8 @@ private struct UnifiedIntroLearnMoreCard: View {
 struct RoutinesPanel: View {
     @ObservedObject private var chatLoops = ChatLoopManager.shared
     @ObservedObject private var agentManager = AgentTaskManager.shared
+    @ObservedObject private var pages = PagesService.shared
+    @State private var copiedPageSlug: String?
 
     /// Which page this is: Routines or Sub-thread. Each ⋯ row opens its own.
     var tab: NotchModel.SidePageTab
@@ -10987,6 +11008,10 @@ struct RoutinesPanel: View {
                 sectionHead(L("copyThread.tab"), closes: true)
                 copies()
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            case .websites:
+                sectionHead("Websites", closes: true)
+                websitesBody
+                    .task { await pages.refreshList() }
             }
         }
         .modifier(SidePageChrome(onCard: onCard))
@@ -11014,6 +11039,149 @@ struct RoutinesPanel: View {
                 head
             }
         }
+    }
+
+    // MARK: - Websites tab
+
+    @ViewBuilder
+    private var websitesBody: some View {
+        if pages.loading && pages.pages.isEmpty {
+            ProgressView()
+                .controlSize(.small)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else if pages.pages.isEmpty {
+            Text("No websites yet")
+                .sfFont(Tokens.TypeSize.label)
+                .foregroundStyle(Tokens.text4)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            if onCard {
+                cardWebsites(pages.pages)
+            } else {
+                panelWebsites(pages.pages)
+            }
+            Spacer(minLength: 0)
+        }
+    }
+
+    private func cardWebsites(_ rows: [PagesService.PageSummary]) -> some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 8) {
+                ForEach(rows) { page in
+                    websiteRow(page)
+                        .padding(.horizontal, ChatBubbleChrome.glassHorizontalPad - 12)
+                        .padding(.vertical, ChatBubbleChrome.glassVerticalPad - 10)
+                        .smokedGlass(radius: ChatBubbleChrome.glassCardRadius)
+                }
+            }
+        }
+        .scrollIndicators(.never)
+        .fixedSize(horizontal: false, vertical: true)
+        .frame(width: NotchMetrics.chatWidth * cardFraction)
+    }
+
+    private func panelWebsites(_ rows: [PagesService.PageSummary]) -> some View {
+        let list = VStack(alignment: .leading, spacing: 0) {
+            ForEach(Array(rows.enumerated()), id: \.element.id) { index, page in
+                if index > 0 {
+                    Rectangle().fill(Tokens.hairline).frame(height: 0.5)
+                        .padding(.horizontal, 12)
+                }
+                websiteRow(page)
+            }
+        }
+        return ScrollView { list }
+            .scrollIndicators(.never)
+            .fixedSize(horizontal: false, vertical: true)
+            .background(
+                RoundedRectangle(cornerRadius: Tokens.Radius.menu, style: .continuous)
+                    .fill(Tokens.recessFill)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: Tokens.Radius.menu, style: .continuous)
+                            .strokeBorder(Tokens.recessRim, lineWidth: 0.5)))
+            .clipShape(RoundedRectangle(cornerRadius: Tokens.Radius.menu, style: .continuous))
+    }
+
+    private func websiteRow(_ page: PagesService.PageSummary) -> some View {
+        let updated = websiteRelativeTime(page.updatedAt)
+        return HStack(alignment: .center, spacing: 10) {
+            Button {
+                if let url = page.pageURL { PagesService.shared.open(url) }
+            } label: {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(page.title)
+                        .sfFont(Tokens.TypeSize.label)
+                        .foregroundStyle(Tokens.text1)
+                        .lineLimit(1)
+                    HStack(spacing: 4) {
+                        Image(systemName: page.isPublic ? "globe" : "lock.fill")
+                            .font(.system(size: page.isPublic ? 9.5 : 8.5, weight: .semibold))
+                            .foregroundStyle(page.isPublic ? Color.green.opacity(0.85) : Tokens.text4)
+                        Text("\(page.slug).\(PagesService.domain) · \(updated)")
+                            .sfFont(Tokens.TypeSize.meta)
+                            .foregroundStyle(Tokens.text3)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            Button {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(page.url, forType: .string)
+                copiedPageSlug = page.slug
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                    if copiedPageSlug == page.slug { copiedPageSlug = nil }
+                }
+            } label: {
+                Image(systemName: copiedPageSlug == page.slug ? "checkmark" : "doc.on.doc")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(copiedPageSlug == page.slug ? Color.green.opacity(0.9) : Tokens.text3)
+                    .frame(width: 24, height: 24)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Copy link")
+
+            Button {
+                if let url = page.pageURL { PagesService.shared.open(url) }
+            } label: {
+                Image(systemName: "arrow.up.right")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Tokens.text3)
+                    .frame(width: 24, height: 24)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Open in browser")
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .contextMenu {
+            Button("Open") {
+                if let url = page.pageURL { PagesService.shared.open(url) }
+            }
+            Button("Copy Link") {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(page.url, forType: .string)
+            }
+            Divider()
+            Button(page.isPublic ? "Make Private" : "Share Publicly") {
+                Task { try? await PagesService.shared.setVisibility(slug: page.slug, isPublic: !page.isPublic) }
+            }
+            Button("Delete", role: .destructive) {
+                Task { try? await PagesService.shared.delete(slug: page.slug) }
+            }
+        }
+    }
+
+    private func websiteRelativeTime(_ ms: Double) -> String {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .abbreviated
+        return formatter.localizedString(for: Date(timeIntervalSince1970: ms / 1000), relativeTo: Date())
     }
 
     /// `fills`: the page holds nothing else, so the list scrolls in the

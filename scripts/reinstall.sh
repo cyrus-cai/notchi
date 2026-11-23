@@ -16,7 +16,7 @@ cd "$(dirname "$0")/.."
 
 PROJECT="NotchGlass.xcodeproj"
 SCHEME="NotchGlass"
-CONFIG="Debug"
+CONFIG="${NOTCHI_CONFIG:-Debug}"
 # The Xcode target is still "NotchGlass", but PRODUCT_NAME is "Notchi", so the
 # built bundle and executable are named Notchi — that's what the Dock shows.
 APP_NAME="Notchi.app"

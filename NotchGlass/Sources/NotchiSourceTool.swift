@@ -106,21 +106,51 @@ struct NotchiSourceTool: NotchTool {
 
     private static let lock = CheckoutLock()
 
+    private static var cacheDirectory: URL {
+        FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent(Bundle.main.bundleIdentifier ?? "Notchi")
+            .appendingPathComponent("notchi-source")
+    }
+
+    /// Removes cached source checkouts from previous app versions, keeping only
+    /// `activeRef` (or the running version's tag/branch when nil).
+    static func pruneOldVersions(keeping activeRef: String? = nil, currentVersion: String? = nil) {
+        let caches = cacheDirectory
+        guard let entries = try? FileManager.default.contentsOfDirectory(
+            at: caches, includingPropertiesForKeys: nil) else { return }
+        let keep: Set<String>
+        if let activeRef {
+            keep = [activeRef]
+        } else if let currentVersion {
+            let current = "v\(currentVersion)"
+            let currentReady = caches.appendingPathComponent(current).appendingPathComponent(".ready")
+            if FileManager.default.fileExists(atPath: currentReady.path) {
+                keep = [current]
+            } else {
+                keep = [current, "master"]
+            }
+        } else {
+            return
+        }
+        for url in entries where !keep.contains(url.lastPathComponent) {
+            try? FileManager.default.removeItem(at: url)
+        }
+    }
+
     /// The extracted source of the running version, downloading it the first
     /// time. Falls back to the default branch when the version has no tag
     /// (a local build ahead of the last release).
     static func checkout() async throws -> (URL, String) {
         try await lock.run {
             let version = await MainActor.run { UpdaterService.currentVersion }
-            let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
-                .appendingPathComponent(Bundle.main.bundleIdentifier ?? "Notchi")
-                .appendingPathComponent("notchi-source")
+            let caches = cacheDirectory
             for ref in ["v\(version)", "master"] {
                 let dir = caches.appendingPathComponent(ref)
                 let ready = dir.appendingPathComponent(".ready")
                 // The branch moves; refresh it after a day. A tag never changes.
                 if let attrs = try? FileManager.default.attributesOfItem(atPath: ready.path),
                    ref != "master" || ((attrs[.modificationDate] as? Date).map { Date().timeIntervalSince($0) < 86_400 } ?? false) {
+                    pruneOldVersions(keeping: ref)
                     return (dir, ref)
                 }
                 let url = URL(string: "https://codeload.github.com/\(repo)/tar.gz/\(ref == "master" ? "refs/heads/master" : "refs/tags/\(ref)")")!
@@ -145,6 +175,7 @@ struct NotchiSourceTool: NotchTool {
                                   userInfo: [NSLocalizedDescriptionKey: "Could not unpack the source archive."])
                 }
                 FileManager.default.createFile(atPath: ready.path, contents: nil)
+                pruneOldVersions(keeping: ref)
                 return (dir, ref)
             }
             throw NSError(domain: "notchi_source", code: 2,

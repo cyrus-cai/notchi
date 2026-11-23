@@ -423,19 +423,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // agent run must not wait on it.
         ProxyConfig.warmUp()
 
-        // Warm the ask/note intent engine off the main thread: fetch/load the
-        // embedding model and restore (or fit, first run ~seconds) the per-language
-        // classification heads, so the first keystroke classifies in ~10ms instead
-        // of paying that cost mid-typing. Background priority — typing that lands
-        // before this finishes just reads as unsure → ask default.
-        Task.detached(priority: .background) {
-            await IntentEngine.shared.prepare()
-        }
-
         // Quiet daily update check, deferred past launch so it never competes
         // with first paint. Result only ever surfaces as the gear dot.
         Task { @MainActor in
             try? await Task.sleep(nanoseconds: 3_000_000_000)
+            let runningVersion = UpdaterService.currentVersion
+            Task.detached(priority: .background) {
+                NotchiSourceTool.pruneOldVersions(currentVersion: runningVersion)
+                LinkCardStore.pruneDiskCache()
+            }
             UpdaterService.shared.checkIfDue()
             // Versions the update policy names get the card from the resting
             // notch (see `UpdatePrompt`).
@@ -2311,21 +2307,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .environment(\.notchMetrics, NotchMetrics(
                 canvasWidth: canvasWidth,
                 displayID: id,
-                // The REAL hardware notch height, not the 32pt design constant:
-                // the physical notch is ~37-38pt on notched MacBooks, and the
-                // busy extension sits beside it over visible screen — a drawn
-                // zone even a few px shorter reads as the extension "hanging"
-                // above the notch's bottom edge. The +1 is a
-                // one-sided error margin: measurement/AA residue as DRAWN-TOO-
-                // SHORT shows a step at the junction, while drawn-too-tall just
-                // moves the whole continuous bottom edge down a hair — so bleed
-                // 1pt past the inset and let any residue land on the invisible
-                // side. (Screenshots can't verify this seam — the framebuffer
-                // has no notch — so the margin, not calibration, is the fix.)
                 restHeight: Self.restHeight(of: screen, hasNotch: hasNotch, floating: floating),
                 hasHardwareNotch: hasNotch,
-                // The resting island draws at exactly this width, so it never
-                // overhangs the cutout onto live screen (see `NotchMetrics.restWidth`).
                 hardwareNotchWidth: hardwareNotchWidth,
                 floating: floating
             ))
@@ -2799,10 +2782,11 @@ enum AppIconStyle: String, CaseIterable, Identifiable {
     /// The original tile inverted for dark mode: the off-white paper tile
     /// becomes `ink` (`#26262A`) and the dark mark becomes `eyeInk` (`#ECEBE6`),
     /// matching `eyesDark`'s palette while keeping `AppIcon`'s exact mark
-    /// geometry and edge anti-aliasing.
+    /// geometry and edge anti-aliasing. Rendered at 256×256 px (max Dock @2x
+    /// resolution = 256 KB) instead of 1024×1024 px.
     private static func originalDarkImage() -> NSImage? {
         guard let base = NSImage(named: "AppIcon") else { return nil }
-        let side = 1024
+        let side = 256
         guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
               let ctx = CGContext(
                   data: nil,
@@ -2843,7 +2827,7 @@ enum AppIconStyle: String, CaseIterable, Identifiable {
         }
 
         guard let cgImage = ctx.makeImage() else { return nil }
-        return NSImage(cgImage: cgImage, size: NSSize(width: side, height: side))
+        return NSImage(cgImage: cgImage, size: NSSize(width: 128, height: 128))
     }
 
     private static let originalDark = originalDarkImage()
@@ -2852,42 +2836,64 @@ enum AppIconStyle: String, CaseIterable, Identifiable {
     /// in place of the mark, as wide as the mark was. Light: the original's
     /// colours, dark eyes on the off-white tile. Dark: the same two colours
     /// swapped, with the eyes in the resting notch's ink (`NotchiMarkPose.ink`).
-    /// The tile keeps the 1024px master's shape: it is repainted over the
-    /// master's own pixels (`sourceAtop`), so its outline and corners match.
+    /// Rendered into an explicit 256×256 px CGContext (256 KB) rather than a
+    /// 1024pt block-backed NSImage (which allocated 2048×2048 px = 16 MB @2x).
     private static func eyesImage(dark: Bool) -> NSImage? {
         guard let base = NSImage(named: "AppIcon") else { return nil }
-        let side: CGFloat = 1024
+        let px = 256
+        let side = CGFloat(px)
+        guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
+              let ctx = CGContext(
+                  data: nil,
+                  width: px,
+                  height: px,
+                  bitsPerComponent: 8,
+                  bytesPerRow: px * 4,
+                  space: colorSpace,
+                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+              )
+        else { return nil }
+
         let paper = NSColor(srgbRed: 247 / 255, green: 245 / 255, blue: 241 / 255, alpha: 1)
         let ink = NSColor(srgbRed: 38 / 255, green: 38 / 255, blue: 42 / 255, alpha: 1)
         let eyeInk = NSColor(srgbRed: 0xEC / 255, green: 0xEB / 255, blue: 0xE6 / 255, alpha: 1)
         let tile = dark ? ink : paper
         let eyes = dark ? eyeInk : ink
-        let unit: CGFloat = 442 / NotchiBlob.markWidth
-        return NSImage(size: NSSize(width: side, height: side), flipped: true) { rect in
-            guard let ctx = NSGraphicsContext.current?.cgContext else { return false }
-            base.draw(in: rect)
-            ctx.setBlendMode(.sourceAtop)
-            ctx.setFillColor(tile.cgColor)
-            ctx.fill(rect)
-            ctx.setBlendMode(.normal)
-            let c = CGPoint(x: rect.midX, y: rect.midY)
-            for b in NotchiForm.restingEyes where b.alpha > 0.01 {
-                let w = CGFloat(b.w) * unit, h = CGFloat(b.h) * unit
-                let cap = min(w, h) / 2
-                func r(_ v: Double) -> CGFloat { min(CGFloat(v) * unit, cap) }
-                let shape = UnevenRoundedRectangle(
-                    cornerRadii: .init(topLeading: r(b.tl), bottomLeading: r(b.bl),
-                                       bottomTrailing: r(b.br), topTrailing: r(b.tr)),
-                    style: .continuous
-                ).path(in: CGRect(x: -w / 2, y: -h / 2, width: w, height: h))
-                let move = CGAffineTransform(translationX: c.x + CGFloat(b.x) * unit,
-                                             y: c.y + CGFloat(b.y) * unit)
-                ctx.addPath(shape.applying(move).cgPath)
-                ctx.setFillColor(eyes.cgColor)
-                ctx.fillPath()
-            }
-            return true
+        let unit: CGFloat = (442 * (side / 1024)) / NotchiBlob.markWidth
+
+        // Flip vertically to match the original flipped NSImage drawing coordinates.
+        ctx.translateBy(x: 0, y: side)
+        ctx.scaleBy(x: 1, y: -1)
+
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(cgContext: ctx, flipped: true)
+        let rect = NSRect(x: 0, y: 0, width: side, height: side)
+        base.draw(in: rect)
+        NSGraphicsContext.restoreGraphicsState()
+
+        ctx.setBlendMode(.sourceAtop)
+        ctx.setFillColor(tile.cgColor)
+        ctx.fill(rect)
+        ctx.setBlendMode(.normal)
+        let c = CGPoint(x: rect.midX, y: rect.midY)
+        for b in NotchiForm.restingEyes where b.alpha > 0.01 {
+            let w = CGFloat(b.w) * unit, h = CGFloat(b.h) * unit
+            let cap = min(w, h) / 2
+            func r(_ v: Double) -> CGFloat { min(CGFloat(v) * unit, cap) }
+            let shape = UnevenRoundedRectangle(
+                cornerRadii: .init(topLeading: r(b.tl), bottomLeading: r(b.bl),
+                                   bottomTrailing: r(b.br), topTrailing: r(b.tr)),
+                style: .continuous
+            ).path(in: CGRect(x: -w / 2, y: -h / 2, width: w, height: h))
+            let move = CGAffineTransform(translationX: c.x + CGFloat(b.x) * unit,
+                                         y: c.y + CGFloat(b.y) * unit)
+            ctx.addPath(shape.applying(move).cgPath)
+            ctx.setFillColor(eyes.cgColor)
+            ctx.fillPath()
         }
+
+        guard let cgImage = ctx.makeImage() else { return nil }
+        return NSImage(cgImage: cgImage, size: NSSize(width: 128, height: 128))
     }
 
     private static let eyesLight = eyesImage(dark: false)

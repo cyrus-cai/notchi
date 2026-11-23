@@ -4,6 +4,7 @@ import CoreImage.CIFilterBuiltins
 import Foundation
 import IOKit.pwr_mgt
 import SwiftUI
+import SystemConfiguration
 import UniformTypeIdentifiers
 
 /// Notchi over Signal, backed by a local `signal-cli` JSON-RPC daemon.
@@ -118,6 +119,8 @@ final class SignalBridge: ObservableObject {
     private var daemonAwake: Awake?
     private var daemonProcess: Process?
     private var daemonStdin: FileHandle?
+    private var activeProxyURL: String?
+    private var proxyStore: SCDynamicStore?
     private var linkTask: Task<Void, Never>?
     private var installProcess: Process?
 
@@ -221,10 +224,20 @@ final class SignalBridge: ObservableObject {
 
     /// At app quit: terminate any running child processes cleanly.
     func stop() {
+        stopWatchingSystemProxy()
         cancelLink()
         stopDaemon()
         if let p = installProcess, p.isRunning { p.terminate() }
         installProcess = nil
+    }
+
+    /// Restarts the running `signal-cli` daemon when the resolved proxy changes
+    /// (Settings → General proxy field or macOS system proxy toggle).
+    func reloadForProxyChange() {
+        guard daemonTask != nil else { return }
+        let next = ProxyConfig.resolved()?.url
+        guard next != activeProxyURL else { return }
+        startDaemon(ensureGroup: isPaired)
     }
 
     /// Begins setup: ensures the single multi-account `signal-cli jsonRpc`
@@ -553,6 +566,7 @@ final class SignalBridge: ObservableObject {
 
     private func startDaemon(ensureGroup: Bool) {
         stopDaemon()
+        startWatchingSystemProxy()
         daemonTask = Task { [weak self] in
             var backoff: UInt64 = 2
             var shouldEnsure = ensureGroup
@@ -577,6 +591,7 @@ final class SignalBridge: ObservableObject {
     private func stopDaemon() {
         daemonTask?.cancel()
         daemonTask = nil
+        activeProxyURL = nil
         terminateDaemonProcess()
     }
 
@@ -594,14 +609,15 @@ final class SignalBridge: ObservableObject {
     }
 
     private func runDaemonSession(cli: String, ensureGroup: Bool) async {
-        // Multi-account JSON-RPC mode: one JVM handles linking, cleanup, groups, and messaging.
-        let p = ShellEnvironment.makeProcess(cli, ["jsonRpc"])
+        // Multi-account JSON-RPC mode: one process handles linking, cleanup, groups, and messaging.
+        let proxy = ProxyConfig.resolved()
+        activeProxyURL = proxy?.url
+        let p = Self.makeSignalProcess(cli, ["jsonRpc"], proxy: proxy)
         let inPipe = Pipe()
         let outPipe = Pipe()
-        let errPipe = Pipe()
         p.standardInput = inPipe
         p.standardOutput = outPipe
-        p.standardError = errPipe
+        p.standardError = FileHandle.nullDevice
 
         daemonProcess = p
         daemonStdin = inPipe.fileHandleForWriting
@@ -639,6 +655,91 @@ final class SignalBridge: ObservableObject {
                 self.terminateDaemonProcess()
                 done.resume()
             }
+        }
+    }
+
+    // MARK: - Proxy Support
+
+    /// Builds a `signal-cli` process configured with Java/GraalVM proxy system
+    /// properties. `signal-cli`'s underlying `libsignal` ignores `HTTP(S)_PROXY`
+    /// and macOS system proxy settings, so HTTP/SOCKS proxies must be passed as
+    /// `-D...` properties (leading CLI args for Homebrew's GraalVM native binary,
+    /// or `JAVA_OPTS` for JVM wrapper script installs).
+    private static func makeSignalProcess(_ cli: String, _ arguments: [String],
+                                          proxy: ProxyConfig.Resolved?) -> Process {
+        let props = proxyProperties(for: proxy)
+        guard !props.isEmpty else {
+            return ShellEnvironment.makeProcess(cli, arguments)
+        }
+        if isShellScript(cli) {
+            let p = ShellEnvironment.makeProcess(cli, arguments)
+            var env = p.environment ?? [:]
+            let existing = env["JAVA_OPTS"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let joined = props.joined(separator: " ")
+            env["JAVA_OPTS"] = existing.isEmpty ? joined : "\(existing) \(joined)"
+            p.environment = env
+            return p
+        }
+        return ShellEnvironment.makeProcess(cli, props + arguments)
+    }
+
+    private static func proxyProperties(for proxy: ProxyConfig.Resolved?) -> [String] {
+        guard let proxy,
+              let url = URL(string: proxy.url),
+              let host = url.host, !host.isEmpty
+        else { return [] }
+        let port = url.port ?? (proxy.isSOCKS ? 1080 : 80)
+        var props: [String] = []
+        if proxy.isSOCKS {
+            props.append("-DsocksProxyHost=\(host)")
+            props.append("-DsocksProxyPort=\(port)")
+            if let user = url.user, !user.isEmpty {
+                props.append("-Djava.net.socks.username=\(user)")
+            }
+            if let pass = url.password, !pass.isEmpty {
+                props.append("-Djava.net.socks.password=\(pass)")
+            }
+        } else {
+            props.append("-Dhttp.proxyHost=\(host)")
+            props.append("-Dhttp.proxyPort=\(port)")
+            props.append("-Dhttps.proxyHost=\(host)")
+            props.append("-Dhttps.proxyPort=\(port)")
+            if let user = url.user, !user.isEmpty {
+                props.append("-Dhttp.proxyUser=\(user)")
+                props.append("-Dhttps.proxyUser=\(user)")
+            }
+            if let pass = url.password, !pass.isEmpty {
+                props.append("-Dhttp.proxyPassword=\(pass)")
+                props.append("-Dhttps.proxyPassword=\(pass)")
+            }
+        }
+        return props
+    }
+
+    private static func isShellScript(_ path: String) -> Bool {
+        guard let fh = FileHandle(forReadingAtPath: path) else { return false }
+        defer { try? fh.close() }
+        guard let head = try? fh.read(upToCount: 2), head.count == 2 else { return false }
+        return head[0] == 0x23 && head[1] == 0x21 // "#!"
+    }
+
+    private func startWatchingSystemProxy() {
+        guard proxyStore == nil else { return }
+        var context = SCDynamicStoreContext(version: 0, info: nil, retain: nil, release: nil, copyDescription: nil)
+        guard let store = SCDynamicStoreCreate(nil, "com.notchglass.signal.proxy" as CFString, { _, _, _ in
+            Task { @MainActor in
+                SignalBridge.shared.reloadForProxyChange()
+            }
+        }, &context) else { return }
+        SCDynamicStoreSetNotificationKeys(store, ["State:/Network/Global/Proxies" as CFString] as CFArray, nil)
+        SCDynamicStoreSetDispatchQueue(store, DispatchQueue.main)
+        proxyStore = store
+    }
+
+    private func stopWatchingSystemProxy() {
+        if let store = proxyStore {
+            SCDynamicStoreSetDispatchQueue(store, nil)
+            proxyStore = nil
         }
     }
 
@@ -680,8 +781,8 @@ final class SignalBridge: ObservableObject {
                 return
             }
 
-            // 2. Reuse an existing active solo group named "Notchi" (e.g. after reinstall).
-            if let existing = groups.first(where: { g in
+            // 2. Reuse the most recent active solo group named "Notchi" (e.g. after reinstall).
+            if let existing = groups.last(where: { g in
                 (g["name"] as? String) == "Notchi" && isActiveSoloNotchi(g)
             }), let id = existing["id"] as? String, !id.isEmpty {
                 notchiGroupID = id
@@ -696,7 +797,6 @@ final class SignalBridge: ObservableObject {
         }
 
         // 3. Create a fresh solo group named "Notchi" with Notchi's two-eyes avatar.
-        notchiGroupID = nil
         var params: [String: Any] = [
             "account": account,
             "name": "Notchi",
@@ -827,9 +927,12 @@ final class SignalBridge: ObservableObject {
         }
 
         var response = await rpc("send", params)
-        // If sending to the Notchi group failed (e.g. user disbanded/left the group),
-        // recreate a fresh Notchi group and retry once.
-        if response["error"] != nil, notchiGroupID != nil, allowGroupRecreate {
+        // If sending to the Notchi group failed because the group itself is gone
+        // or invalid (not a transient network/timeout error), recreate a fresh
+        // Notchi group and retry once.
+        if let error = response["error"] as? [String: Any],
+           notchiGroupID != nil, allowGroupRecreate,
+           Self.isGroupInvalidError(error) {
             await ensureNotchiGroup(forceCreate: true)
             if let freshGroup = notchiGroupID, !freshGroup.isEmpty {
                 params["groupId"] = freshGroup
@@ -851,6 +954,12 @@ final class SignalBridge: ObservableObject {
             return ts
         }
         return nil
+    }
+
+    private static func isGroupInvalidError(_ error: [String: Any]) -> Bool {
+        let msg = ((error["message"] as? String) ?? "").lowercased()
+        let hints = ["group not found", "unknown group", "not a member", "invalid group", "blocked", "permission"]
+        return hints.contains(where: { msg.contains($0) })
     }
 
     private func sendTyping() async {
@@ -1170,7 +1279,8 @@ final class SignalBridge: ObservableObject {
         let (withoutVisuals, charts) = TelegramBridge.renderVisuals(whole)
         let (shownText, photos) = TelegramBridge.localImages(withoutVisuals)
         let pictures = photos + charts
-        let body = shownText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let rawBody = shownText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let body = rawBody.isEmpty ? "" : await PagesService.shared.rewriteWithAccessKeys(in: rawBody)
 
         defer {
             for chart in charts { try? FileManager.default.removeItem(at: chart) }
@@ -1254,7 +1364,8 @@ final class SignalBridge: ObservableObject {
             await previous?.value
             guard let self else { return }
             defer { for chart in charts { try? FileManager.default.removeItem(at: chart) } }
-            let parts = body.isEmpty ? [] : TelegramBridge.split(body)
+            let rewritten = body.isEmpty ? "" : await PagesService.shared.rewriteWithAccessKeys(in: body)
+            let parts = rewritten.isEmpty ? [] : TelegramBridge.split(rewritten)
             if parts.isEmpty {
                 let prefix = asked.isEmpty ? "" : "› \(asked)"
                 if let ts = await self.sendNoteToSelf(prefix, attachments: pictures.map(\.path)) {
@@ -1563,7 +1674,8 @@ final class SignalBridge: ObservableObject {
         let (text, photos) = TelegramBridge.localImages(withoutVisuals)
         let pictures = photos + charts
         defer { for chart in charts { try? FileManager.default.removeItem(at: chart) } }
-        let body = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let rawBody = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let body = rawBody.isEmpty ? "" : await PagesService.shared.rewriteWithAccessKeys(in: rawBody)
         guard !body.isEmpty || !pictures.isEmpty else {
             _ = await sendNoteToSelf(L("signal.failed"), quoteTimestamp: replyTo)
             return

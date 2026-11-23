@@ -125,6 +125,22 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.9.44",
+            date: "2026-11-23",
+            headline: "Notchi uses 71% less memory now.",
+            heroAssetName: "WhatsNew0944Promo",
+            blurb: "Resident memory dropped from 540 MB to 155 MB over long sessions, with peak usage down 63%, so Notchi stays light even when left running all day.",
+            improvements: [
+                "Cached link previews are compressed and old previews and version caches are cleaned up automatically.",
+                "Copy replies now use your active model instead of switching to a separate background model.",
+                "Signal now follows your macOS system proxy and Settings proxy, reconnecting automatically on changes.",
+                "Cloud browser tasks avoid slow search pages and reconnect to running sessions faster.",
+            ],
+            fixes: [
+                "Fixed Signal creating duplicate \"Notchi\" chats on transient network errors.",
+            ]
+        ),
+        Entry(
             version: "0.9.43",
             date: "2026-11-22",
             headline: "Notchi now works in Signal.",

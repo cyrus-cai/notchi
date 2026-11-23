@@ -413,6 +413,7 @@ struct MenuBarChat: View {
     private var cardMoreMenu: some View {
         let routines = L("routines.title")
         let copies = L("copyThread.tab")
+        let websites = "Websites"
         return VStack(alignment: .leading, spacing: MenuCard.rowSpacing) {
             MenuCardRow(title: routines,
                         selected: model.showRoutines && model.sidePageTab == .routines) {
@@ -424,13 +425,18 @@ struct MenuBarChat: View {
                 model.isCardMoreMenuOpen = false
                 openSidePage(.copies)
             }
+            MenuCardRow(title: websites,
+                        selected: model.showRoutines && model.sidePageTab == .websites) {
+                model.isCardMoreMenuOpen = false
+                openSidePage(.websites)
+            }
             if CloudMachineStatusMenuRow.isShown {
                 CloudMachineStatusMenuRow(compact: false)
             }
         }
         .padding(MenuCard.cardPad)
         .frame(width: max(MenuCard.pickerCardWidth,
-                          MenuCard.width(titles: [(routines, ""), (copies, "")])),
+                          MenuCard.width(titles: [(routines, ""), (copies, ""), (websites, "")])),
                alignment: .leading)
         .manageMenuCardBackground()
     }

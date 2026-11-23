@@ -241,8 +241,8 @@ final class RequestAudit: @unchecked Sendable {
     /// file. The pair bounds both the file and how far back the chart can page.
     private let maxEntries = 1000
     private let maxAge: TimeInterval = 90 * 24 * 60 * 60
-    private let lock = NSLock()
-    private var entries: [Entry] = []
+    /// Serial queue that owns all reads and writes of `requests.json` so the
+    /// full 1,000-entry array never needs to stay resident in memory.
     private let writes = DispatchQueue(label: "com.notchglass.request-audit")
 
     /// Same directory, same best-effort write as `DiagnosticsLog`.
@@ -266,9 +266,7 @@ final class RequestAudit: @unchecked Sendable {
         return payloads
     }()
 
-    private init() {
-        load()
-    }
+    private init() {}
 
     // MARK: - Recording
 
@@ -291,15 +289,13 @@ final class RequestAudit: @unchecked Sendable {
     }
 
     fileprivate func append(_ entry: Entry, request: URLRequest?, payload: [String: Any]?) {
-        lock.lock()
-        let before = Set(entries.map(\.id))
-        entries.append(entry)
-        prune(&entries, now: entry.at)
-        let snapshot = entries
-        let dropped = before.subtracting(snapshot.map(\.id))
-        lock.unlock()
-
         writes.async { [fileURL, payloadDirectory] in
+            var current = self.loadFromDisk()
+            let before = Set(current.map(\.id))
+            current.append(entry)
+            self.prune(&current, now: entry.at)
+            let dropped = before.subtracting(current.map(\.id))
+
             if let dir = payloadDirectory {
                 // Parsed and pretty-printed here, on the write queue: a chat body
                 // is the whole conversation, and the request that sent it, or
@@ -308,6 +304,7 @@ final class RequestAudit: @unchecked Sendable {
                 if let kept, let payloadData = try? JSONSerialization.data(
                     withJSONObject: kept,
                     options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]) {
+                    try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
                     try? payloadData.write(to: dir.appendingPathComponent("\(entry.id.uuidString).json"),
                                            options: .atomic)
                 }
@@ -315,19 +312,19 @@ final class RequestAudit: @unchecked Sendable {
                     try? FileManager.default.removeItem(at: dir.appendingPathComponent("\(id.uuidString).json"))
                 }
             }
-            guard let url = fileURL,
-                  let data = try? JSONEncoder().encode(snapshot) else { return }
-            try? data.write(to: url, options: .atomic)
-        }
-        DispatchQueue.main.async {
-            NotificationCenter.default.post(name: RequestAudit.didChange, object: nil)
+            if let url = fileURL, let data = try? JSONEncoder().encode(current) {
+                try? data.write(to: url, options: .atomic)
+            }
+            DispatchQueue.main.async {
+                NotificationCenter.default.post(name: RequestAudit.didChange, object: nil)
+            }
         }
     }
 
-    /// Oldest first, newest last.
+    /// Oldest first, newest last. Loaded on demand from disk so the audit log
+    /// costs zero resident RAM while Settings → Audit is closed.
     var recent: [Entry] {
-        lock.lock(); defer { lock.unlock() }
-        return entries
+        writes.sync { loadFromDisk() }
     }
 
     /// What was sent for one record, pretty-printed JSON. Nil when no copy was
@@ -340,16 +337,12 @@ final class RequestAudit: @unchecked Sendable {
     }
 
     func clear() {
-        lock.lock()
-        entries.removeAll()
-        lock.unlock()
         writes.async { [fileURL, payloadDirectory] in
             if let dir = payloadDirectory { try? FileManager.default.removeItem(at: dir) }
-            guard let url = fileURL else { return }
-            try? FileManager.default.removeItem(at: url)
-        }
-        DispatchQueue.main.async {
-            NotificationCenter.default.post(name: RequestAudit.didChange, object: nil)
+            if let url = fileURL { try? FileManager.default.removeItem(at: url) }
+            DispatchQueue.main.async {
+                NotificationCenter.default.post(name: RequestAudit.didChange, object: nil)
+            }
         }
     }
 
@@ -462,14 +455,14 @@ final class RequestAudit: @unchecked Sendable {
 
     // MARK: - Persistence
 
-    private func load() {
+    private func loadFromDisk() -> [Entry] {
         guard let url = fileURL,
               let data = try? Data(contentsOf: url),
               let restored = try? JSONDecoder().decode([Entry].self, from: data)
-        else { return }
+        else { return [] }
         var kept = Array(restored.suffix(maxEntries))
         prune(&kept, now: Date())
-        entries = kept
+        return kept
     }
 
     /// Drop the tail past the count cap and anything past the age cap. Oldest

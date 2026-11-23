@@ -99,27 +99,37 @@ final class Localization: ObservableObject {
         didSet {
             guard language != oldValue else { return }
             AppLanguage.current = language
+            reloadActiveTable()
         }
     }
 
+    private let tableLock = NSLock()
+    private var activeLocale: Locale = .en
+    private var activeTable: [String: String]? = nil
+
     private init() {
         language = AppLanguage.current
+        reloadActiveTable()
+    }
+
+    private func reloadActiveTable() {
+        let resolved = language.resolved
+        tableLock.lock()
+        defer { tableLock.unlock() }
+        if activeLocale == resolved, activeTable != nil || resolved == .en { return }
+        activeLocale = resolved
+        // Only the active language table is kept in memory; switching drops the old one.
+        activeTable = resolved == .en ? nil : Strings.table(for: resolved)
     }
 
     /// Look up `key` in the active language, falling back to English, then to the
     /// key itself (so a missing entry is visible in development rather than blank).
     func string(_ key: String) -> String {
-        let table: [String: String]
-        switch language.resolved {
-        case .en:     table = Strings.en
-        case .zhHans: table = Strings.zhHans
-        case .zhHant: table = Strings.zhHant
-        case .ja:     table = Strings.ja
-        case .ko:     table = Strings.ko
-        case .fr:     table = Strings.fr
-        case .es:     table = Strings.es
-        }
-        return table[key] ?? Strings.en[key] ?? key
+        tableLock.lock()
+        let table = activeTable
+        tableLock.unlock()
+        if let value = table?[key] { return value }
+        return Strings.en[key] ?? key
     }
 }
 
@@ -151,6 +161,18 @@ func L(_ key: String, _ args: CVarArg...) -> String {
 /// "macOS", language names shown in their own script) are intentionally absent —
 /// they read the same in every language and stay hardcoded at the call site.
 enum Strings {
+    static func table(for locale: Localization.Locale) -> [String: String] {
+        switch locale {
+        case .en:     return en
+        case .zhHans: return zhHans
+        case .zhHant: return zhHant
+        case .ja:     return ja
+        case .ko:     return ko
+        case .fr:     return fr
+        case .es:     return es
+        }
+    }
+
     // MARK: English (source of truth)
     static let en: [String: String] = [
         "license.buyShort": "Buy",
@@ -1215,7 +1237,7 @@ enum Strings {
     ]
 
     // MARK: 简体中文
-    static let zhHans: [String: String] = [
+    static var zhHans: [String: String] { [
         "license.buyShort": "购买",
         "license.offer.title": "购买 Notchi 授权",
         "license.state.activated": "已激活",
@@ -2250,10 +2272,10 @@ enum Strings {
         "general.shortcut.doubleTapRightCommand": "双击右 Command",
         "general.shortcut.leftGlyph": "左 %@",
         "general.shortcut.rightGlyph": "右 %@",
-    ]
+    ] }
 
     // MARK: 繁體中文
-    static let zhHant: [String: String] = [
+    static var zhHant: [String: String] { [
         "license.buyShort": "購買",
         "license.offer.title": "購買 Notchi 授權",
         "license.state.activated": "已啟用",
@@ -3287,10 +3309,10 @@ enum Strings {
         "general.shortcut.doubleTapRightCommand": "按兩下右 Command",
         "general.shortcut.leftGlyph": "左 %@",
         "general.shortcut.rightGlyph": "右 %@",
-    ]
+    ] }
 
     // MARK: 日本語
-    static let ja: [String: String] = [
+    static var ja: [String: String] { [
         "license.buyShort": "購入",
         "license.offer.title": "Notchi ライセンスを購入",
         "license.state.activated": "有効",
@@ -4308,10 +4330,10 @@ enum Strings {
         "general.shortcut.doubleTapRightCommand": "右 Command を2回押す",
         "general.shortcut.leftGlyph": "左 %@",
         "general.shortcut.rightGlyph": "右 %@",
-    ]
+    ] }
 
     // MARK: 한국어
-    static let ko: [String: String] = [
+    static var ko: [String: String] { [
         "license.buyShort": "구매",
         "license.offer.title": "Notchi 라이선스 구매",
         "license.state.activated": "활성화됨",
@@ -5328,17 +5350,10 @@ enum Strings {
         "general.shortcut.doubleTapRightCommand": "오른쪽 Command 두 번 누르기",
         "general.shortcut.leftGlyph": "왼쪽 %@",
         "general.shortcut.rightGlyph": "오른쪽 %@",
-    ]
-
-    // French and Spanish start with the English catalog so newly introduced keys
-    // remain legible until their native copy is added. Every shipped key can
-    // therefore be resolved in both languages.
-    private static func localized(_ overrides: [String: String]) -> [String: String] {
-        en.merging(overrides) { _, translation in translation }
-    }
+    ] }
 
     // MARK: Français
-    static let fr: [String: String] = localized([
+    static var fr: [String: String] { [
         "license.buyShort": "Acheter",
         "license.offer.title": "Achetez une licence Notchi",
         "license.state.activated": "Activée",
@@ -5667,10 +5682,10 @@ enum Strings {
         "audit.range.all": "Tout", "audit.range.empty": "Aucune requête sur cette période.", "audit.details": "Détails",
         "audit.source": "Envoyé à", "audit.status": "Statut", "audit.tokens": "Jetons", "audit.tokensValue": "%1$@ entrée, %2$@ sortie", "audit.started": "Début", "audit.duration": "Durée", "audit.ttfb": "TTFB", "audit.generation": "Génération", "audit.throughput": "Débit", "audit.throughputValue": "%1$@ tok/s", "audit.status.completed": "Terminé", "audit.status.failed": "Échec", "audit.status.stopped": "Arrêté", "audit.defaultModel": "Par défaut", "audit.detail.request": "Requête", "audit.detail.tool": "Outil", "audit.viewRawData": "Données d’origine",
         "audit.from": "Origine", "audit.call.query": "Recherche", "audit.call.url": "URL", "audit.call.command": "Commande", "audit.call.path": "Chemin", "audit.call.pattern": "Motif", "audit.call.input": "Entrée", "audit.modelID": "ID du modèle", "audit.attempts": "Tentatives", "audit.error": "Erreur", "audit.surface.ask": "Question", "audit.surface.shortcut": "Raccourci de prompt", "audit.surface.forceTouch": "Force Touch", "audit.surface.window": "Fenêtre de conversation", "audit.surface.naming": "Nom du raccourci", "audit.surface.title": "Titre du fil", "audit.surface.suggest": "Question suggérée", "audit.surface.memory": "Mémoire", "audit.surface.copy": "Réponse à une copie", "audit.surface.sense": "Vérification de copie", "audit.surface.react": "Réaction", "audit.surface.linkcheck": "Vérification de lien", "audit.surface.followup": "Vérification de suivi", "audit.surface.memorycheck": "Vérification de mémoire",
-    ])
+    ] }
 
     // MARK: Español
-    static let es: [String: String] = localized([
+    static var es: [String: String] { [
         "license.buyShort": "Comprar",
         "license.offer.title": "Compra una licencia de Notchi",
         "license.state.activated": "Activada",
@@ -5974,5 +5989,5 @@ enum Strings {
         "audit.range.all": "Todo", "audit.range.empty": "No hay solicitudes en este periodo.", "audit.details": "Detalles",
         "audit.source": "Enviado a", "audit.status": "Estado", "audit.tokens": "Tokens", "audit.tokensValue": "%1$@ entrada, %2$@ salida", "audit.started": "Inicio", "audit.duration": "Duración", "audit.ttfb": "TTFB", "audit.generation": "Generación", "audit.throughput": "Rendimiento", "audit.throughputValue": "%1$@ tok/s", "audit.status.completed": "Completada", "audit.status.failed": "Fallida", "audit.status.stopped": "Detenida", "audit.defaultModel": "Predeterminado", "audit.detail.request": "Petición", "audit.detail.tool": "Herramienta", "audit.viewRawData": "Datos originales",
         "audit.from": "Origen", "audit.call.query": "Consulta", "audit.call.url": "URL", "audit.call.command": "Comando", "audit.call.path": "Ruta", "audit.call.pattern": "Patrón", "audit.call.input": "Entrada", "audit.modelID": "ID del modelo", "audit.attempts": "Intentos", "audit.error": "Error", "audit.surface.ask": "Pregunta", "audit.surface.shortcut": "Atajo de prompt", "audit.surface.forceTouch": "Force Touch", "audit.surface.window": "Ventana de conversación", "audit.surface.naming": "Nombre del atajo", "audit.surface.title": "Título del hilo", "audit.surface.suggest": "Pregunta sugerida", "audit.surface.memory": "Memoria", "audit.surface.copy": "Respuesta a una copia", "audit.surface.sense": "Comprobación de copia", "audit.surface.react": "Reacción", "audit.surface.linkcheck": "Comprobación de enlace", "audit.surface.followup": "Comprobación de seguimiento", "audit.surface.memorycheck": "Comprobación de memoria",
-    ])
+    ] }
 }

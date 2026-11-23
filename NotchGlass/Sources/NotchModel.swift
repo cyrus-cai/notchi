@@ -13,7 +13,96 @@ import os             // copyTiming — how long each step of a handled copy tak
 /// the loader can stay `nonisolated` — a thumbnail is read from wherever the view or
 /// a background sweep happens to run. `NSCache` is thread-safe and evicts under
 /// memory pressure, so a big archive can't pin every screenshot it ever saw in RAM.
-private let historyImageCache = NSCache<NSString, NSImage>()
+private let historyImageCache: NSCache<NSString, NSImage> = {
+    let cache = NSCache<NSString, NSImage>()
+    cache.countLimit = 40
+    cache.totalCostLimit = 8 * 1024 * 1024
+    return cache
+}()
+
+/// On-disk per-thread storage for `HistoryItem.turns` (`Application Support/Notch/HistoryTurns/<id>.json`).
+/// Keeping full transcripts out of `NotchModel.history` drops tens of MB of resident
+/// `Swift.StringStorage` and `Turn` arrays while remaining transparent to every reader
+/// via `HistoryItem.conversation`.
+private enum HistoryTurnStore {
+    private final class Box: NSObject {
+        let turns: [NotchModel.Turn]
+        init(_ turns: [NotchModel.Turn]) { self.turns = turns }
+    }
+
+    private nonisolated(unsafe) static let cache: NSCache<NSString, Box> = {
+        let c = NSCache<NSString, Box>()
+        c.countLimit = 6
+        return c
+    }()
+
+    nonisolated static var directory: URL {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory,
+                                            in: .userDomainMask).first!
+        return base.appendingPathComponent("Notch", isDirectory: true)
+            .appendingPathComponent("HistoryTurns", isDirectory: true)
+    }
+
+    nonisolated static func fileURL(for id: UUID) -> URL {
+        directory.appendingPathComponent(id.uuidString + ".json")
+    }
+
+    nonisolated static func load(id: UUID) -> [NotchModel.Turn]? {
+        let key = id.uuidString as NSString
+        if let hit = cache.object(forKey: key) { return hit.turns }
+        guard let turns = loadUncached(id: id) else { return nil }
+        cache.setObject(Box(turns), forKey: key)
+        return turns
+    }
+
+    nonisolated static func loadUncached(id: UUID) -> [NotchModel.Turn]? {
+        guard let data = try? Data(contentsOf: fileURL(for: id)),
+              let turns = try? JSONDecoder().decode([NotchModel.Turn].self, from: data)
+        else { return nil }
+        return turns
+    }
+
+    @discardableResult
+    nonisolated static func save(_ turns: [NotchModel.Turn], for id: UUID) -> Bool {
+        guard let data = try? JSONEncoder().encode(turns) else { return false }
+        let url = fileURL(for: id)
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        guard (try? data.write(to: url, options: .atomic)) != nil else { return false }
+        cache.setObject(Box(turns), forKey: id.uuidString as NSString)
+        return true
+    }
+
+    nonisolated static func delete(ids: [UUID]) {
+        guard !ids.isEmpty else { return }
+        for id in ids {
+            cache.removeObject(forKey: id.uuidString as NSString)
+        }
+        DispatchQueue.global(qos: .utility).async {
+            for id in ids {
+                try? FileManager.default.removeItem(at: fileURL(for: id))
+            }
+        }
+    }
+
+    nonisolated static func prune(keeping ids: Set<UUID>) {
+        guard let names = try? FileManager.default.contentsOfDirectory(atPath: directory.path)
+        else { return }
+        let cutoff = Date().addingTimeInterval(-3600)
+        for name in names where name.hasSuffix(".json") {
+            let stem = String(name.dropLast(5))
+            if let uuid = UUID(uuidString: stem), ids.contains(uuid) { continue }
+            let url = directory.appendingPathComponent(name)
+            let written = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?
+                .contentModificationDate
+            if let written, written > cutoff { continue }
+            try? FileManager.default.removeItem(at: url)
+        }
+    }
+
+    nonisolated static func clearMemoryCache() {
+        cache.removeAllObjects()
+    }
+}
 
 /// Decodes a JSON array element-by-element, dropping any element that fails to
 /// decode instead of failing the whole array. Used for persisted history so one
@@ -416,10 +505,17 @@ final class NotchModel: ObservableObject {
         var q: String
         var a: String
         var t: Date
-        /// The full conversation, so reopening a recent item restores every turn
-        /// (not just the first Q/A). Optional for backward-compatible decoding of
-        /// items saved before multi-turn — those fall back to `[q, a]`.
+        /// The full conversation, kept in memory only while freshly mutated;
+        /// persisted to `HistoryTurns/<id>.json` and offloaded (`turns = nil`,
+        /// `storedTurnsOnDisk = true`) so old transcripts stay out of RAM.
         var turns: [Turn]? = nil
+        /// True when the full `turns` live on disk in `HistoryTurnStore`.
+        var storedTurnsOnDisk: Bool = false
+        /// Cached lightweight metadata extracted before offloading `turns`, so
+        /// list rendering and image pruning never need to read transcripts from disk.
+        var storedIsLoop: Bool? = nil
+        var storedLoopBorn: Bool? = nil
+        var storedImageFiles: [String]? = nil
         /// A short title summarizing the actual conversation content. Generated
         /// asynchronously after the first answer so the recent list can show the
         /// topic (e.g. "小米高管") instead of a generic first prompt (e.g.
@@ -429,17 +525,26 @@ final class NotchModel: ObservableObject {
         /// otherwise the first user message for backward compatibility.
         var displayTitle: String { loopBorn ? q : title ?? q }
         /// A thread with loop rounds. Its row carries the Loop tag.
-        var isLoop: Bool { (turns ?? []).contains { $0.loopRound != nil } }
+        var isLoop: Bool {
+            if let turns { return turns.contains { $0.loopRound != nil } }
+            return storedIsLoop ?? false
+        }
         /// A thread the loop itself started. Its row shows the loop's prompt,
         /// not a generated title. A loop running in an existing conversation
         /// keeps that conversation's title.
-        var loopBorn: Bool { turns?.first?.loopRound != nil }
+        var loopBorn: Bool {
+            if let turns { return turns.first?.loopRound != nil }
+            return storedLoopBorn ?? false
+        }
 
         /// Every image attached anywhere in this conversation, in turn order — a
         /// screenshot an Ask rode in on, the shots pasted into an agent task. The
         /// Recent / archive rows preview the first one; the transcript shows them
         /// all on the turn they belong to.
-        var imageFiles: [String] { (turns ?? []).flatMap(\.imageFiles) }
+        var imageFiles: [String] {
+            if let turns { return turns.flatMap(\.imageFiles) }
+            return storedImageFiles ?? []
+        }
 
         /// Where this captured line actually went. `.ask` is an AI Q&A and `.agent`
         /// a finished Codex/Claude run — both are threads that reopen; `.note`/
@@ -553,16 +658,40 @@ final class NotchModel: ObservableObject {
         /// started any other way, are `false`.
         var mainThread: Bool = false
 
-        /// The turns to restore on reopen: the saved thread when present, else a
-        /// two-turn thread rebuilt from the legacy `q`/`a` fields. A note/reminder
+        /// The turns to restore on reopen: the saved thread when present (in
+        /// memory or lazy-loaded from `HistoryTurnStore`), else a two-turn
+        /// thread rebuilt from the legacy `q`/`a` fields. A note/reminder
         /// capture has no conversation at all — never synthesize a ghost assistant
         /// bubble for it.
         var conversation: [Turn] {
             guard source.isThread else { return [] }
-            return turns ?? [
+            if let turns { return turns }
+            if storedTurnsOnDisk, let loaded = HistoryTurnStore.load(id: id) {
+                return loaded
+            }
+            return [
                 Turn(role: "user", text: q),
                 Turn(role: "assistant", text: a),
             ]
+        }
+
+        /// Extracts lightweight list metadata from `turns` and truncates the
+        /// duplicate full-answer copy in `a` once turns are backed on disk.
+        mutating func syncMetadataFromTurns() {
+            guard let turns else { return }
+            storedIsLoop = turns.contains { $0.loopRound != nil }
+            storedLoopBorn = turns.first?.loopRound != nil
+            let imgs = turns.flatMap(\.imageFiles)
+            storedImageFiles = imgs.isEmpty ? nil : imgs
+        }
+
+        mutating func stripTurnsAfterDiskSave() {
+            syncMetadataFromTurns()
+            storedTurnsOnDisk = true
+            turns = nil
+            if a.count > 240 {
+                a = String(a.prefix(240))
+            }
         }
 
         init(id: UUID = UUID(), q: String, a: String, t: Date,
@@ -588,7 +717,8 @@ final class NotchModel: ObservableObject {
         // cleanly with no migration. `id`/`q`/`a`/`t` are required — every saved
         // item has always had them.
         enum CodingKeys: String, CodingKey {
-            case id, q, a, t, turns, title, source, origin, link, agentOutcome, agentResume,
+            case id, q, a, t, turns, storedTurnsOnDisk, storedIsLoop, storedLoopBorn, storedImageFiles,
+                 title, source, origin, link, agentOutcome, agentResume,
                  agentInterrupted, agentSeen, failed, outOfCredit, licenseRequired, mainThread
         }
 
@@ -599,6 +729,10 @@ final class NotchModel: ObservableObject {
             a      = try c.decode(String.self, forKey: .a)
             t      = try c.decode(Date.self,   forKey: .t)
             turns  = try c.decodeIfPresent([Turn].self,  forKey: .turns)
+            storedTurnsOnDisk = try c.decodeIfPresent(Bool.self, forKey: .storedTurnsOnDisk) ?? false
+            storedIsLoop      = try c.decodeIfPresent(Bool.self, forKey: .storedIsLoop)
+            storedLoopBorn    = try c.decodeIfPresent(Bool.self, forKey: .storedLoopBorn)
+            storedImageFiles  = try c.decodeIfPresent([String].self, forKey: .storedImageFiles)
             title  = try c.decodeIfPresent(String.self,  forKey: .title)
             source = try c.decodeIfPresent(Source.self,  forKey: .source) ?? .ask
             origin = try c.decodeIfPresent(Origin.self, forKey: .origin)
@@ -631,7 +765,13 @@ final class NotchModel: ObservableObject {
             if let title, title.localizedCaseInsensitiveContains(needle) { return true }
             if q.localizedCaseInsensitiveContains(needle) { return true }
             if a.localizedCaseInsensitiveContains(needle) { return true }
-            return (turns ?? []).contains { $0.text.localizedCaseInsensitiveContains(needle) }
+            if let turns {
+                return turns.contains { $0.text.localizedCaseInsensitiveContains(needle) }
+            }
+            if storedTurnsOnDisk, let diskTurns = HistoryTurnStore.loadUncached(id: id) {
+                return diskTurns.contains { $0.text.localizedCaseInsensitiveContains(needle) }
+            }
+            return false
         }
 
         /// Squeeze a stored field onto ONE line: the digest is line-per-row, so a
@@ -862,7 +1002,7 @@ final class NotchModel: ObservableObject {
     /// tabs (`sidePageTab`): Routines, and the thread copies answer in.
     @Published var showRoutines = false
     @Published var sidePageTab: SidePageTab = .copies
-    enum SidePageTab { case routines, copies }
+    enum SidePageTab { case routines, copies, websites }
 
     /// Whether the message tones play: sending, each reply bubble landing, and
     /// a reaction. One switch for the whole app — the notch and every detached
@@ -3520,6 +3660,8 @@ final class NotchModel: ObservableObject {
         hasUsedToolThisRound = false
         pinnedThinkingWord = nil
         pinnedThinkingOrb = .composing
+        thinking = false
+        thinkingAnswerID = nil
     }
 
     /// The first-token freeze: stop the mood-word rotation (the pre-stream wait
@@ -3540,11 +3682,20 @@ final class NotchModel: ObservableObject {
     /// non-nil label means a tool is running — which also latches the round into "word
     /// mode" so that after the tool clears, the wait shows the mood word (not back to
     /// bare dots). `nil` clears the live line, falling back to the mood word.
-    func setThinkingActivity(_ label: String?, orb: OrbState = .composing) {
+    func setThinkingActivity(_ label: String?, orb: OrbState = .composing, for answerID: UUID? = nil) {
+        if let answerID, answerID != thinkingAnswerID {
+            updateRuntimeTurn(answerID) { turn in
+                turn.toolActivity = label
+                turn.thinkingOrbState = label == nil ? .composing : orb
+            }
+            return
+        }
         if label != nil { hasUsedToolThisRound = true }
         thinkingActivity = label
         thinkingActivityOrb = orb
-        if let thinkingAnswerID { mirrorThinkingState(for: thinkingAnswerID) }
+        if let targetID = answerID ?? thinkingAnswerID {
+            mirrorThinkingState(for: targetID)
+        }
     }
 
     /// Copy the panel's live wait state onto the answer turn itself. The turn is
@@ -6335,7 +6486,7 @@ final class NotchModel: ObservableObject {
         var threadRows: [(date: Date, row: HistoryDigestRow)] = []
         if query.kind == nil || query.kind == HistoryItem.Source.ask.rawValue {
             for item in items where item.mainThread {
-                let turns = item.turns ?? []
+                let turns = item.conversation
                 // The question being answered now is not history yet.
                 let end = item.id == currentThread ? max(0, turns.count - 2) : turns.count
                 for i in 0..<end where turns[i].role == "user" && !turns[i].isLocal {
@@ -6694,10 +6845,13 @@ final class NotchModel: ObservableObject {
     private func reactToGuideLine(_ id: UUID, threadID: UUID, emoji: String) {
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
             guard let self else { return }
-            if let h = self.history.firstIndex(where: { $0.id == threadID }),
-               let t = self.history[h].turns?.firstIndex(where: { $0.id == id }) {
-                self.history[h].turns?[t].reaction = emoji
-                self.saveHistory()
+            if let h = self.history.firstIndex(where: { $0.id == threadID }) {
+                var thread = self.history[h].conversation
+                if let t = thread.firstIndex(where: { $0.id == id }) {
+                    thread[t].reaction = emoji
+                    self.history[h].turns = thread
+                    self.saveHistory()
+                }
             }
             guard let i = self.turns.firstIndex(where: { $0.id == id }) else { return }
             withAnimation(.spring(response: 0.35, dampingFraction: 0.7)) {
@@ -6809,7 +6963,7 @@ final class NotchModel: ObservableObject {
         if let i = history.firstIndex(where: { $0.id == threadID }) {
             var settled = answer
             settled.streaming = false
-            history[i].turns = (history[i].turns ?? []) + [question, settled]
+            history[i].turns = history[i].conversation + [question, settled]
             history[i].a = reply
             saveHistory()
         }
@@ -6987,7 +7141,7 @@ final class NotchModel: ObservableObject {
         if let i = history.firstIndex(where: { $0.id == threadID }) {
             var settled = answer
             settled.streaming = false
-            history[i].turns = (history[i].turns ?? []) + [question, settled]
+            history[i].turns = history[i].conversation + [question, settled]
             history[i].a = settled.text
             saveHistory()
         }
@@ -7266,7 +7420,7 @@ final class NotchModel: ObservableObject {
                 turn.streaming = false
                 return turn
             }
-            history[i].turns = (history[i].turns ?? []) + settled
+            history[i].turns = history[i].conversation + settled
             if let last = settled.last(where: { $0.role == "assistant" && !$0.text.isEmpty }) {
                 history[i].a = last.text
             }
@@ -8324,7 +8478,10 @@ final class NotchModel: ObservableObject {
     /// resolution live in `ProxyConfig`; this only publishes the field the
     /// settings row binds to.
     @Published var proxyURL: String = ProxyConfig.manual {
-        didSet { ProxyConfig.manual = proxyURL }
+        didSet {
+            ProxyConfig.manual = proxyURL
+            SignalBridge.shared.reloadForProxyChange()
+        }
     }
 
     /// A personal preference the user set in Settings (XII-137), appended after
@@ -8601,7 +8758,7 @@ final class NotchModel: ObservableObject {
         }
         // No eyes while the model decides: a copy it then leaves alone must not
         // light the notch for nothing. They come out once there is work to do.
-        let service = backgroundService(ai)
+        let service = ai
         let memory = UserMemory.shared
         let remembers = ClipboardHistory.shared.recording
         let now = Date()
@@ -11393,7 +11550,7 @@ final class NotchModel: ObservableObject {
     /// The ⌘ card's facts for such a thread: a stopped loop.
     func dismissedAgentLoopInfo(_ id: UUID) -> LoopMenuInfo? {
         guard let found = dismissedAgentLoop(id) else { return nil }
-        let rounds = (found.item.turns ?? []).compactMap(\.loopRound).max() ?? 1
+        let rounds = found.item.conversation.compactMap(\.loopRound).max() ?? 1
         return LoopMenuInfo(
             id: id,
             intervalMinutes: AgentTaskManager.shared.stoppedLoopInterval(taskID: id)
@@ -14411,8 +14568,7 @@ final class NotchModel: ObservableObject {
     /// thinking, whether or not its panel is still on screen.
     private func endThinking(for id: UUID) {
         guard thinkingAnswerID == id else { return }
-        thinking = false
-        thinkingAnswerID = nil
+        if thinking { thinking = false }
     }
 
     /// Clear the `streaming` flag on the assistant turn (its caret/typing cue can
@@ -14422,7 +14578,7 @@ final class NotchModel: ObservableObject {
         guard let i = turns.firstIndex(where: { $0.id == id }) else { return }
         turns[i].streaming = false
         if turns[i].sentAt == nil { turns[i].sentAt = Date() }
-        setThinkingActivity(nil)
+        setThinkingActivity(nil, for: id)
     }
 
     /// Funnel the harness's transient tool-activity label (e.g. "Searching the web…")
@@ -14430,7 +14586,7 @@ final class NotchModel: ObservableObject {
     /// rather than rendering as a second, parallel line. `nil` falls back to the word.
     private func updateActivity(id: UUID, label: String?, orb: OrbState) {
         guard isOnScreen(answerID: id) else { return }
-        setThinkingActivity(label, orb: orb)
+        setThinkingActivity(label, orb: orb, for: id)
     }
 
     /// Append a search round's sources to the on-screen assistant turn (deduped by
@@ -15711,6 +15867,7 @@ final class NotchModel: ObservableObject {
         // prune in `mergeLoadedHistory`, which then finds nothing referencing it.)
         Self.deleteHistoryImages(doomed.flatMap(\.imageFiles))
         let doomedIDs = Set(doomed.map(\.id))
+        HistoryTurnStore.delete(ids: Array(doomedIDs))
         history.removeAll { doomedIDs.contains($0.id) }
         saveHistory()
 
@@ -15734,6 +15891,7 @@ final class NotchModel: ObservableObject {
               !isProtectedMainThread(item) else { return }
         let removedVisibleIndex = recentVisible.firstIndex(where: { $0.id == id })
         Self.deleteHistoryImages(item.imageFiles)
+        HistoryTurnStore.delete(ids: [id])
         history.removeAll { $0.id == id }
         saveHistory()
         ChatLoopManager.shared.forgetStopped(onThread: id)
@@ -15840,7 +15998,9 @@ final class NotchModel: ObservableObject {
     nonisolated static func historyImage(named name: String) -> NSImage? {
         if let cached = historyImageCache.object(forKey: name as NSString) { return cached }
         guard let image = NSImage(contentsOf: historyImageURL(name)), image.isValid else { return nil }
-        historyImageCache.setObject(image, forKey: name as NSString)
+        let rep = image.representations.first
+        let pixels = max(1, (rep?.pixelsWide ?? Int(image.size.width)) * (rep?.pixelsHigh ?? Int(image.size.height)))
+        historyImageCache.setObject(image, forKey: name as NSString, cost: pixels * 4)
         return image
     }
 
@@ -15852,6 +16012,13 @@ final class NotchModel: ObservableObject {
                 try? FileManager.default.removeItem(at: historyImageURL(name))
             }
         }
+    }
+
+    /// Drops evictable in-memory image and transcript caches once the panel has
+    /// been resting quietly for a few seconds.
+    func releaseIdleCaches() {
+        historyImageCache.removeAllObjects()
+        HistoryTurnStore.clearMemoryCache()
     }
 
     /// Sweep images no saved row references any more — the residue of a crash between
@@ -15922,8 +16089,10 @@ final class NotchModel: ObservableObject {
             // reference is residue (a crash between writing the JPEG and persisting
             // the row, a Clear that landed before the load) — sweep it.
             let referenced = Set(history.flatMap(\.imageFiles))
+            let keptIDs = Set(history.map(\.id))
             DispatchQueue.global(qos: .utility).async {
                 Self.pruneHistoryImages(keeping: referenced)
+                HistoryTurnStore.prune(keeping: keptIDs)
             }
         }
         guard !loaded.isEmpty else { return }
@@ -15985,17 +16154,36 @@ final class NotchModel: ObservableObject {
     }
 
     nonisolated private static func readHistoryFromDisk() -> [HistoryItem] {
+        var items: [HistoryItem]
+        var needsRewrite = false
         if let data = try? Data(contentsOf: historyFileURL) {
-            return decodeHistory(data)
+            items = decodeHistory(data)
+        } else if let data = UserDefaults.standard.data(forKey: historyKey) {
+            // No archive file yet: migrate the legacy UserDefaults blob (where the
+            // archive lived through 0.1.13) into the file, and only then drop the
+            // defaults copy so the plist shrinks back to settings-sized.
+            items = decodeHistory(data)
+            if writeHistoryToDisk(items) {
+                UserDefaults.standard.removeObject(forKey: historyKey)
+            }
+            needsRewrite = false
+        } else {
+            return []
         }
-        // No archive file yet: migrate the legacy UserDefaults blob (where the
-        // archive lived through 0.1.13) into the file, and only then drop the
-        // defaults copy so the plist shrinks back to settings-sized. If the file
-        // write fails the blob stays put and the next launch retries.
-        guard let data = UserDefaults.standard.data(forKey: historyKey) else { return [] }
-        let items = decodeHistory(data)
-        if writeHistoryToDisk(items) {
-            UserDefaults.standard.removeObject(forKey: historyKey)
+
+        // Offload any inline turns into per-thread files under `HistoryTurns/`
+        // so resident RAM only holds lightweight index rows.
+        for i in items.indices {
+            if let inlineTurns = items[i].turns,
+               !inlineTurns.contains(where: \.streaming) {
+                if HistoryTurnStore.save(inlineTurns, for: items[i].id) {
+                    items[i].stripTurnsAfterDiskSave()
+                    needsRewrite = true
+                }
+            }
+        }
+        if needsRewrite {
+            _ = writeHistoryToDisk(items)
         }
         return items
     }
@@ -16017,12 +16205,36 @@ final class NotchModel: ObservableObject {
 
     @discardableResult
     nonisolated private static func writeHistoryToDisk(_ items: [HistoryItem]) -> Bool {
-        guard let data = try? JSONEncoder().encode(items) else { return false }
+        var compact = items
+        for i in compact.indices {
+            if let inlineTurns = compact[i].turns {
+                if HistoryTurnStore.save(inlineTurns, for: compact[i].id) {
+                    compact[i].stripTurnsAfterDiskSave()
+                }
+            }
+        }
+        guard let data = try? JSONEncoder().encode(compact) else { return false }
         let url = historyFileURL
         try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
                                                  withIntermediateDirectories: true)
         // Atomic, so a crash mid-write can never leave a truncated archive.
         return (try? data.write(to: url, options: .atomic)) != nil
+    }
+
+    /// After a snapshot has been persisted to disk, drop inline `turns` from
+    /// inactive history rows whose turns haven't changed since the snapshot.
+    private func offloadPersistedTurns(matching savedSignatures: [(id: UUID, count: Int, lastID: UUID?, lastLen: Int)]) {
+        guard !savedSignatures.isEmpty else { return }
+        let map = Dictionary(uniqueKeysWithValues: savedSignatures.map { ($0.id, $0) })
+        for i in history.indices {
+            let id = history[i].id
+            guard id != threadHistoryID, detachedThreadStores[id] == nil,
+                  let sig = map[id], let current = history[i].turns,
+                  current.count == sig.count,
+                  current.last?.id == sig.lastID,
+                  (current.last?.text.count ?? 0) == sig.lastLen else { continue }
+            history[i].stripTurnsAfterDiskSave()
+        }
     }
 
     private func saveHistory() {
@@ -16035,7 +16247,17 @@ final class NotchModel: ObservableObject {
                 // Value-type snapshot on the main actor; the encode + write of the
                 // full archive happens on the utility queue.
                 let snapshot = self.history
-                Self.historyIO.async { Self.writeHistoryToDisk(snapshot) }
+                let sigs: [(id: UUID, count: Int, lastID: UUID?, lastLen: Int)] = snapshot.compactMap { item in
+                    guard let t = item.turns else { return nil }
+                    return (item.id, t.count, t.last?.id, t.last?.text.count ?? 0)
+                }
+                Self.historyIO.async { [weak self] in
+                    let ok = Self.writeHistoryToDisk(snapshot)
+                    guard ok, !sigs.isEmpty else { return }
+                    DispatchQueue.main.async {
+                        self?.offloadPersistedTurns(matching: sigs)
+                    }
+                }
             }
         }
         pendingHistorySave = work
@@ -16057,9 +16279,17 @@ final class NotchModel: ObservableObject {
         pendingHistorySave?.cancel()
         pendingHistorySave = nil
         let snapshot = history
-        Self.historyIO.async {
-            Self.writeHistoryToDisk(snapshot)
+        let sigs: [(id: UUID, count: Int, lastID: UUID?, lastLen: Int)] = snapshot.compactMap { item in
+            guard let t = item.turns else { return nil }
+            return (item.id, t.count, t.last?.id, t.last?.text.count ?? 0)
+        }
+        Self.historyIO.async { [weak self] in
+            let ok = Self.writeHistoryToDisk(snapshot)
             completion()
+            guard ok, !sigs.isEmpty else { return }
+            DispatchQueue.main.async {
+                self?.offloadPersistedTurns(matching: sigs)
+            }
         }
     }
 

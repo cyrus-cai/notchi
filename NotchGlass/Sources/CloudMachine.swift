@@ -604,6 +604,7 @@ struct CloudMachineTool: NotchTool {
         case "browse":
             guard var url = Self.text(input, "url") else { return "Error: url is required." }
             if !url.contains("://") && !url.hasPrefix("data:") { url = "https://" + url }
+            if let refusal = Self.searchInBrowser(url) { return refusal }
             job["url"] = url
         case "click", "fill", "select", "show_element":
             guard let index else { return "Error: index is required." }
@@ -678,6 +679,39 @@ struct CloudMachineTool: NotchTool {
         if raw == "~" { return "/data/home" }
         if raw.hasPrefix("~/") { return "/data/home/" + raw.dropFirst(2) }
         return "/data/home/" + raw
+    }
+
+    /// Search URLs refused once by `searchInBrowser`. A second browse of the
+    /// same URL goes through: read_page may have been blocked there.
+    private static var refusedSearches = Set<String>()
+
+    /// A refusal for opening a search engine's result page in the cloud
+    /// browser. On 2026-11-21 a model opened google.com/search 17 times and on
+    /// 2026-11-22 duckduckgo.com/html 4 times this way, about 44 s each, after
+    /// the system prompt sent searches to web_search; web_search was not listed
+    /// on that account. read_page reads a Bing result page in about 1 s.
+    static func searchInBrowser(_ url: String) -> String? {
+        guard let parts = URLComponents(string: url), let host = parts.host?.lowercased() else { return nil }
+        let path = parts.path.lowercased()
+        let engines: [(host: String, paths: [String])] = [
+            ("google.", ["/search"]), ("bing.com", ["/search"]), ("duckduckgo.com", ["/", "/html", "/html/", "/lite", "/lite/"]),
+            ("search.yahoo.com", ["/search"]), ("search.brave.com", ["/search"]), ("baidu.com", ["/s"]),
+            ("yandex.", ["/search", "/search/"]), ("startpage.com", ["/do/search", "/sp/search"]),
+        ]
+        guard engines.contains(where: { host.contains($0.host) && $0.paths.contains(path) }) else { return nil }
+        let query = parts.queryItems?.first { ["q", "p", "wd", "query", "text"].contains($0.name) }?.value ?? ""
+        guard !query.isEmpty else { return nil }
+        if refusedSearches.contains(url) { return nil }
+        refusedSearches.insert(url)
+        var bing = URLComponents(string: "https://www.bing.com/search")!
+        bing.queryItems = [URLQueryItem(name: "q", value: query), URLQueryItem(name: "mkt", value: "en-US")]
+        return """
+        Not opened: a search in the cloud browser takes about 40 seconds. Use \
+        web_search when it is listed; otherwise read_page url=\(bing.string ?? "https://www.bing.com/search?q=…") \
+        (about 1 second). Open the result pages with read_page too. Only if \
+        read_page returns an error for this search, browse the same URL again \
+        and it will open.
+        """
     }
 
     /// A command whose only job is reading public web pages: curl or wget a URL
@@ -1138,7 +1172,22 @@ enum CloudDesktopBridge {
       });
     }
 
+    // True when the server's socket accepts a connection. The server only
+    // listens after the MCP child answered initialize, and removes the socket
+    // when that child exits, so an accepted connection means it is up.
+    function listening() {
+      return new Promise((resolve) => {
+        const conn = net.createConnection(SOCK);
+        conn.on('connect', () => { conn.destroy(); resolve(true); });
+        conn.on('error', () => resolve(false));
+      });
+    }
+
     async function connected() {
+      // A list_apps call took 16 s on every browse on 2026-11-22 (the
+      // `connect` step in cloud-browser-timing.log); the socket check is enough
+      // for a running server.
+      if (await listening()) return;
       try { return await ask({ tool: 'list_apps', args: {} }); } catch {}
       spawn(process.execPath, [process.argv[1], 'serve'], {
         detached: true, stdio: 'ignore', env: process.env,
@@ -1712,6 +1761,10 @@ enum CloudDesktopBridge {
 
     // get_app_state calls and their milliseconds in the last readState.
     let lastReads = [];
+    // Tabs in the window's tab strip at the last readState. Every browse opens
+    // a new tab and none is closed; logged to see whether the slow
+    // get_app_state grows with them.
+    let lastTabs = 0;
     async function readState(app) {
       let state = '';
       lastReads = [];
@@ -1725,6 +1778,7 @@ enum CloudDesktopBridge {
         await sleep(1500);
       }
       fs.writeFileSync(stateFile(app), state);
+      lastTabs = (state.match(/^\s*\d+ page tab(?! list)\b/gm) || []).length;
       return compact(isChromium(app) ? pageOnly(state) : state);
     }
 
@@ -1767,6 +1821,7 @@ enum CloudDesktopBridge {
           let state = await readState(app);
           t = mark('readState', t);
           timing.reads = lastReads;
+          timing.tabs = lastTabs;
           if (before && !job.verified && plainState(state) === before) {
             lines.push('The page is the same as before this click: the click did not take effect. '
               + 'Do not assume it worked; check the element is on screen (action=scroll), then try its label, '

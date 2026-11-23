@@ -65,13 +65,10 @@ actor IntentEngine {
         let examples: IntentExampleSet
         var state: State = .idle
         var head: LogisticHead?
-        /// The training embeddings, kept for the kNN vote (see `classify`). The
-        /// logistic head carves one global plane; the neighbor vote captures the
-        /// local structure of two classes that are each a *bag* of genres
-        /// (todos/logs/lists vs. questions/imperatives). Their average beats
-        /// either alone on held-out data.
-        var noteVectors: [[Double]] = []
-        var askVectors: [[Double]] = []
+        /// The training embeddings, kept in Float32 for the kNN vote (see `classify`)
+        /// to halve memory versus Double with identical cosine ranking.
+        var noteVectors: [[Float]] = []
+        var askVectors: [[Float]] = []
 
         init?(language: NLLanguage, examples: IntentExampleSet) {
             guard let embedding = NLContextualEmbedding(language: language) else { return nil }
@@ -84,6 +81,10 @@ actor IntentEngine {
     private var cjk: Space?
     private var latin: Space?
     private var prepared = false
+    /// Unloads NLContextualEmbedding + kNN vectors after idle inactivity so
+    /// Copy Sense's fallback does not pin CoreNLP/Espresso in RAM permanently.
+    private var idleUnloadTask: Task<Void, Never>?
+    private static let idleUnloadDelayNanoseconds: UInt64 = 180 * 1_000_000_000
 
     /// Recent verdicts by exact text — typing is incremental, but deletes and
     /// IME candidate cycling revisit the same string constantly. Tiny LRU.
@@ -103,30 +104,60 @@ actor IntentEngine {
     private var llmResolverChecked = false
 
     init() {
-        cjk = Space(language: .simplifiedChinese, examples: IntentExamples.chinese)
-        latin = Space(language: .english, examples: IntentExamples.english)
+        // Spaces are created lazily when `classify(_:)` or `prepare()` runs.
+    }
+
+    private func space(forCJK isCJK: Bool) -> Space? {
+        if isCJK {
+            if cjk == nil {
+                cjk = Space(language: .simplifiedChinese, examples: IntentExamples.chinese)
+            }
+            return cjk
+        } else {
+            if latin == nil {
+                latin = Space(language: .english, examples: IntentExamples.english)
+            }
+            return latin
+        }
+    }
+
+    private func scheduleIdleUnload() {
+        idleUnloadTask?.cancel()
+        idleUnloadTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: Self.idleUnloadDelayNanoseconds)
+            guard !Task.isCancelled else { return }
+            await self?.unloadSpaces()
+        }
+    }
+
+    private func unloadSpaces() {
+        cjk?.embedding.unload()
+        latin?.embedding.unload()
+        cjk = nil
+        latin = nil
+        prepared = false
+        idleUnloadTask = nil
     }
 
     // MARK: - Prepare (assets → load → train-or-restore the heads)
 
     /// Bring both spaces up: download embedding assets if the OS hasn't already,
     /// load the models, and fit (or restore from disk) the logistic heads. Safe
-    /// to call repeatedly; runs once. Kick this off in the background at app
-    /// launch — classification quietly returns `.empty` until it lands.
-    ///
-    /// `useDiskCache: false` is for the offline evaluation harness, which trains
-    /// on deliberate subsets and must not poison the real cache.
+    /// to call repeatedly; runs once.
     func prepare(useDiskCache: Bool = true) async {
         guard !prepared else { return }
         prepared = true
-        for space in [cjk, latin].compactMap({ $0 }) {
+        for space in [space(forCJK: true), space(forCJK: false)].compactMap({ $0 }) {
             await prepareSpace(space, useDiskCache: useDiskCache)
         }
+        scheduleIdleUnload()
     }
 
     /// Evaluation entry: rebuild the spaces around injected example sets (e.g. a
     /// train split) and fit fresh heads, bypassing the disk cache entirely.
     func prepareForEvaluation(chinese: IntentExampleSet, english: IntentExampleSet) async {
+        idleUnloadTask?.cancel()
+        idleUnloadTask = nil
         cjk = Space(language: .simplifiedChinese, examples: chinese)
         latin = Space(language: .english, examples: english)
         cache = [:]; cacheOrder = []
@@ -160,8 +191,8 @@ actor IntentEngine {
            let model = try? PropertyListDecoder().decode(FittedModel.self, from: data),
            model.head.weights.count == space.embedding.dimension * 2 {
             space.head = model.head
-            space.noteVectors = model.noteVectors
-            space.askVectors = model.askVectors
+            space.noteVectors = model.noteVectors.map { $0.map(Float.init) }
+            space.askVectors = model.askVectors.map { $0.map(Float.init) }
             space.state = .ready
             return
         }
@@ -176,8 +207,8 @@ actor IntentEngine {
         }
         let head = LogisticHead.fit(positives: noteVectors, negatives: askVectors)
         space.head = head
-        space.noteVectors = noteVectors
-        space.askVectors = askVectors
+        space.noteVectors = noteVectors.map { $0.map(Float.init) }
+        space.askVectors = askVectors.map { $0.map(Float.init) }
         space.state = .ready
 
         if useDiskCache {
@@ -219,20 +250,23 @@ actor IntentEngine {
 
     // MARK: - Classify (the hot path)
 
-    /// Score one line. Synchronous compute (~1 ms: one transformer embed + one
-    /// dot product) but actor-isolated, so callers hop off the main thread by
-    /// construction. Returns `.empty` (→ caller defaults to Ask) whenever there's
-    /// no usable model — not ready yet, assets unavailable, embedding error.
-    func classify(_ raw: String) -> Reading {
+    /// Score one line. Lazily loads only the needed script space (CJK or Latin)
+    /// on first fallback use, and schedules idle unloading afterwards so the
+    /// embedding model does not stay resident in RAM when Jev handles Copy Sense.
+    func classify(_ raw: String) async -> Reading {
         let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return .empty }
         if let hit = cache[text] { return hit }
 
-        let space = Self.routesToCJK(text) ? cjk : latin
-        guard let space, space.state == .ready, let head = space.head,
+        guard let space = space(forCJK: Self.routesToCJK(text)) else { return .empty }
+        if space.state == .idle {
+            await prepareSpace(space, useDiskCache: true)
+        }
+        guard space.state == .ready, let head = space.head,
               let vector = sentenceVector(text, space: space) else {
             return .empty
         }
+        scheduleIdleUnload()
 
         let p = 0.5 * head.probability(vector)
               + 0.5 * Self.neighborVote(vector, space: space) // both P(note)
@@ -250,18 +284,19 @@ actor IntentEngine {
     /// ~11 ms the embedding itself costs.
     private static func neighborVote(_ vector: [Double], space: Space,
                                      k: Int = 9) -> Double {
+        let vecF = vector.map(Float.init)
         var scored: [(sim: Double, isNote: Bool)] = []
         scored.reserveCapacity(space.noteVectors.count + space.askVectors.count)
-        let n = vDSP_Length(vector.count)
+        let n = vDSP_Length(vecF.count)
         for v in space.noteVectors {
-            var sim = 0.0
-            vDSP_dotprD(v, 1, vector, 1, &sim, n)
-            scored.append((sim, true))
+            var sim: Float = 0
+            vDSP_dotpr(v, 1, vecF, 1, &sim, n)
+            scored.append((Double(sim), true))
         }
         for v in space.askVectors {
-            var sim = 0.0
-            vDSP_dotprD(v, 1, vector, 1, &sim, n)
-            scored.append((sim, false))
+            var sim: Float = 0
+            vDSP_dotpr(v, 1, vecF, 1, &sim, n)
+            scored.append((Double(sim), false))
         }
         let top = scored.sorted { $0.sim > $1.sim }.prefix(k)
         // Sharpen: similarities cluster high, so vote on (sim − margin)₊.
