@@ -545,7 +545,16 @@ struct NotchBody: View {
         // `focused` — so the caret would be left nowhere and the user would have to
         // click before typing the next line. Re-arm on the way into a result too.
         .onChange(of: model.mode) { _, newMode in
-            if model.open, newMode == .idle || newMode == .result {
+            // Skip focus handoff while a thread pull/collapse animation is in
+            // flight — `makeFirstResponder` + IME activation mid-motion stalls
+            // the collapse spring. Focus is armed cleanly once the pull settles.
+            if model.open, !model.threadPulling, newMode == .idle || newMode == .result {
+                refocusInput()
+            }
+        }
+        .onChange(of: model.threadPulling) { wasPulling, isPulling in
+            if wasPulling, !isPulling, model.open,
+               model.mode == .idle || model.mode == .result {
                 refocusInput()
             }
         }
@@ -608,6 +617,39 @@ struct NotchBody: View {
         // re-folds too — same reason, without waiting for `turns` to empty.
         .onChange(of: model.fromPromptShortcut) { _, isShortcut in
             if isShortcut { followUpExpanded = false }
+        }
+        .onChange(of: model.pendingFollowUpScreenshot?.id) { _, _ in
+            guard let payload = model.pendingFollowUpScreenshot else { return }
+            model.pendingFollowUpScreenshot = nil
+            withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
+                if model.agentDetailTaskID != nil {
+                    if agentDetailFollowUpImages.count < NotchModel.composeImageLimit {
+                        agentDetailFollowUpImages.append(payload.image)
+                    }
+                } else if model.isSplitFollowUpActive {
+                    if splitFollowUpImages.count < NotchModel.composeImageLimit {
+                        splitFollowUpImages.append(payload.image)
+                    }
+                } else {
+                    model.attachCapturedScreenshot(image: payload.image, fallbackText: nil)
+                }
+                if model.open { refocusInput() }
+            }
+        }
+        .onChange(of: model.inputFocusNonce) { _, _ in
+            if model.open {
+                refocusInput()
+            }
+        }
+        .onChange(of: model.showSettings) { wasOpen, isOpen in
+            if wasOpen && !isOpen && model.open {
+                refocusInput()
+            }
+        }
+        .onChange(of: model.isScreenCaptureOpen) { wasCapturing, nowCapturing in
+            if wasCapturing && !nowCapturing && model.open {
+                refocusInput()
+            }
         }
         .onAppear {
             if model.open {
@@ -921,7 +963,6 @@ struct NotchBody: View {
         !model.agentComposeActive
             && !model.usingPromptShortcutContext
             && model.promptShortcutMode == nil
-            && model.selectionContext == nil
             && model.loopIntervalMinutes == nil
             && model.askComposeImages.isEmpty
             && model.droppedFiles.isEmpty
@@ -1006,9 +1047,33 @@ struct NotchBody: View {
                     .frame(width: resultStackWidth, alignment: .leading)
             }
             .equatable(),
-            frost: RevealStill(key: RevealThreadKey(turns: resting, measures: false)) {
-                revealThread(resting, in: live ?? item.conversation, measures: false)
-                    .frame(width: resultStackWidth, alignment: .leading)
+            frost: RevealStill(key: RevealFrostKey(turns: resting,
+                                                   width: resultStackWidth,
+                                                   height: peekHeight,
+                                                   floating: metrics.floating)) {
+                let peekAlpha: CGFloat = metrics.floating ? 0.65 : 0.85
+                let peekBlurRadius: CGFloat = metrics.floating ? 9 : 6
+                let frostSolidUntil: CGFloat = metrics.floating ? 0.7 : 0.45
+                let frostClearAt: CGFloat = metrics.floating ? 1 : 0.9
+                Color.clear
+                    .frame(width: resultStackWidth, height: peekHeight)
+                    .overlay(alignment: .bottomLeading) {
+                        revealThread(resting, in: live ?? item.conversation, measures: false)
+                            .frame(width: resultStackWidth, alignment: .leading)
+                    }
+                    .clipped()
+                    .mask(ThreadRevealFade(length: peekHeight, alpha: peekAlpha))
+                    .drawingGroup()
+                    .blur(radius: peekBlurRadius)
+                    .mask(
+                        LinearGradient(
+                            stops: [
+                                .init(color: .black, location: 0),
+                                .init(color: .black, location: frostSolidUntil),
+                                .init(color: .clear, location: frostClearAt),
+                                .init(color: .clear, location: 1),
+                            ],
+                            startPoint: .top, endPoint: .bottom))
             }
             .equatable())
         .contentShape(Rectangle())
@@ -1041,12 +1106,14 @@ struct NotchBody: View {
         // A pull draws the copy marks the result page draws. The one under the
         // newest turn is not in the peek, so it grows in with the pull below
         // the stack (`RevealCopyMarkTail`) and the turns above rise to make room.
+        let drawnThread = thread.filter(\.isDrawn)
         let marks = measures
-            ? model.copyThreadMarks(for: thread.filter(\.isDrawn), in: model.threadPullItemID) : [:]
+            ? model.copyThreadMarks(for: drawnThread, in: model.threadPullItemID) : [:]
         let lastID = turns.last?.id
         let tail = lastID.flatMap { marks[$0] }
+        let drawnCount = drawnThread.count
         let record = { (height: CGFloat) in
-            revealThreadPartial = turns.count < thread.filter(\.isDrawn).count
+            revealThreadPartial = turns.count < drawnCount
             revealThreadHeight = height
             measuredAnswerHeight = height
             model.lastMeasuredAnswerHeight = height
@@ -1081,14 +1148,31 @@ struct NotchBody: View {
         .padding(.trailing, 8)
     }
 
-    /// The turns a pull lays out: the newest, enough to fill the result page's
-    /// scroller several times over, not a long main thread's whole history.
-    /// Fewer than that means the whole thread.
-    /// The same turns the result page mounts when it opens (`threadWindowStart`),
-    /// so the page the pull hands over to draws exactly what the pull drew.
+    /// The turns a pull/collapse lays out: only enough newest turns to safely
+    /// fill the non-scrolling reveal viewport (~343pt max, budgeted to ~520pt).
+    /// Building 10 turns / 3000 chars of offscreen markdown + LinkCards on the
+    /// first frame of `beginThreadCollapse()` stalled the main thread for ~0.5s
+    /// even though everything above the top ~343pt is clipped out of sight.
     private static func revealTurns(of thread: [NotchModel.Turn]) -> [NotchModel.Turn] {
         let visible = thread.filter(\.isDrawn)
-        return Array(visible[threadWindowStart(of: visible, before: visible.endIndex)...])
+        guard !visible.isEmpty else { return [] }
+        var start = visible.endIndex
+        var estimatedHeight: CGFloat = 0
+        var count = 0
+        while start > 0 {
+            start -= 1
+            count += 1
+            let turn = visible[start]
+            let charBudget = turn.role == "user"
+                ? min(turn.text.count, foldedQuestionCharacters) : turn.text.count
+            // Conservative lower-bound height per turn: bubble chrome + spacing (~48pt),
+            // wrapped lines (~20pt per 28 chars), plus any embedded link/card chrome.
+            let lines = CGFloat(max(1, (charBudget + 27) / 28))
+            let hasLink = turn.text.contains("http://") || turn.text.contains("https://")
+            estimatedHeight += 36 + lines * 18 + (hasLink ? 64 : 0)
+            if count >= 8 || estimatedHeight >= 540 { break }
+        }
+        return Array(visible[start...])
     }
 
     /// The pull follows the fingers point for point: the distance that reaches
@@ -1101,26 +1185,47 @@ struct NotchBody: View {
         model.threadPullSpan = min(max(opened - rest, 160), 420)
     }
 
-    /// The follow-up row as the result page will mount it, for the second half
-    /// of a pull: the same `ComposerBox` with the same placeholder, tint and
-    /// focus look, but it never takes the caret or a click — the idle prompt
-    /// keeps both until the real row replaces this one at the end of the pull.
+    /// Lightweight visual twin of the follow-up `ComposerBox` for the second half
+    /// of a pull. Avoids mounting a second AppKit `PromptField` (`NSTextView`)
+    /// during gesture tracking while matching the exact pill geometry, fill, rim,
+    /// and text/placeholder styling.
     private var followUpStandIn: some View {
-        HStack(alignment: .bottom, spacing: 8) {
-            ComposerBox(
-                text: .constant(model.text),
-                focusTrigger: false,
-                focused: focused,
-                pulse: AnyHashable(model.effectiveSubmitPanel),
-                pulseTint: model.submitInk,
-                slotFloor: Self.splitRailChip - 12,
-                onSubmit: {},
-                placeholder: { followUpPlaceholderLabel },
-                trailing: {
-                    if followUpHasDraft {
-                        SendButton(compact: true) {}
+        let slotFloor = Self.splitRailChip - 12
+        let fieldHeight = PromptField.lineHeight(for: Self.followUpFontSize)
+        let rowHeight = max(slotFloor, fieldHeight)
+        let shape = NotchBody.composerShape(height: rowHeight + 12)
+        return HStack(alignment: .bottom, spacing: 8) {
+            HStack(alignment: .bottom, spacing: 6) {
+                ZStack(alignment: .leading) {
+                    if model.text.isEmpty {
+                        followUpPlaceholderLabel
+                            .sfFont(Self.followUpFontSize)
+                            .foregroundStyle(Tokens.placeholder)
+                            .lineLimit(1)
+                            .padding(.leading, PromptField.textInset)
+                    } else {
+                        Text(model.text)
+                            .sfFont(Self.followUpFontSize)
+                            .foregroundStyle(Tokens.text1)
+                            .lineLimit(1)
+                            .padding(.leading, PromptField.textInset)
                     }
-                })
+                }
+                .frame(maxWidth: .infinity, minHeight: rowHeight, maxHeight: rowHeight, alignment: .leading)
+
+                if followUpHasDraft {
+                    SendButton(compact: true) {}
+                        .frame(height: slotFloor)
+                }
+            }
+            .padding(.leading, 13)
+            .padding(.trailing, 6)
+            .padding(.vertical, 6)
+            .background(shape.fill(focused ? Tokens.recessFillLit : Tokens.recessFill))
+            .clipShape(shape)
+            .overlay(
+                shape.strokeBorder(focused ? Tokens.recessRimLit : Tokens.recessRim, lineWidth: 0.5)
+            )
             .frame(maxWidth: .infinity)
         }
     }
@@ -1724,6 +1829,10 @@ struct NotchBody: View {
             card: {
                 AnyView(AttachMenuCard(
                     filesTitle: L(model.agentComposeActive ? "attach.photos" : "attach.files"),
+                    onScreenshot: {
+                        model.isAttachMenuOpen = false
+                        model.captureScreenshotForCurrentComposer()
+                    },
                     onFiles: {
                         model.isAttachMenuOpen = false
                         model.pickAttachmentFiles()
@@ -3388,8 +3497,12 @@ struct NotchBody: View {
                 .padding(.bottom, -5)
         }
         .onAppear {
+            model.isSplitFollowUpActive = true
             normalizeSplitHistorySelection()
             model.markAgentSeen(id: selectedID)
+        }
+        .onDisappear {
+            model.isSplitFollowUpActive = false
         }
         .onChange(of: visibleIDs) { _, ids in
             normalizeSplitHistorySelection(visibleIDs: ids)
@@ -8275,6 +8388,7 @@ struct IdleTrailingCluster: View {
 /// The + chip's card: the Ask model menu's rows, width and padding.
 struct AttachMenuCard: View {
     let filesTitle: String
+    let onScreenshot: () -> Void
     let onFiles: () -> Void
     let onFolder: () -> Void
 
@@ -8282,8 +8396,9 @@ struct AttachMenuCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: MenuCard.rowSpacing) {
-            row(0, title: filesTitle, symbol: "paperclip", action: onFiles)
-            row(1, title: L("attach.folder"), symbol: "folder", action: onFolder)
+            row(0, title: L("attach.screenshot"), symbol: "camera.viewfinder", action: onScreenshot)
+            row(1, title: filesTitle, symbol: "paperclip", action: onFiles)
+            row(2, title: L("attach.folder"), symbol: "folder", action: onFolder)
         }
         .padding(MenuCard.cardPad)
         .frame(width: MenuCard.pickerCardWidth, alignment: .leading)
@@ -9267,6 +9382,14 @@ private final class MenuCardAnchorView: NSView {
     /// What a click outside the card reports to — see `installDismissMonitors`.
     private var onDismiss: ((Bool) -> Void)?
     private var clickMonitors: [Any] = []
+    private var hoverMonitors: [Any] = []
+    private var isNested = false
+    /// Last explicit mouse-acceptance state pushed to a nested panel. Kept as
+    /// an optional so the first update always calls `ignoresMouseEvents = ...`
+    /// explicitly (leaving it unset on a clear `NSPanel` triggers WindowServer
+    /// alpha hit-testing, which lets scroll gestures fall through to the app
+    /// underneath).
+    private var nestedAcceptsMouse: Bool?
     /// The host window's move/resize notifications. The card is a child window
     /// holding an ABSOLUTE screen frame, so anything that shifts the anchor
     /// without re-running this probe's `layout()` — the island animating open,
@@ -9337,6 +9460,8 @@ private final class MenuCardAnchorView: NSView {
         // over that card's right edge. Left unset, the margin's clear pixels
         // pass the pointer through to the rows underneath.
         let nested = host is MenuCardPanel
+        isNested = nested
+        nestedAcceptsMouse = nil
         // Two top-level cards at once means two views opened from one shared
         // flag: each takes a click in the other as a click outside it. Logged
         // as a fault so it shows in Console the first time it happens.
@@ -9362,6 +9487,7 @@ private final class MenuCardAnchorView: NSView {
         if !nested { Self.current = self }
         TooltipOverlayGate.enter()
         installDismissMonitors()
+        installNestedHoverMonitors()
         installFrameObservers(on: host, panel: panel)
         NSAnimationContext.runAnimationGroup { ctx in
             ctx.duration = 0.12
@@ -9371,7 +9497,10 @@ private final class MenuCardAnchorView: NSView {
 
     func closeMenu() {
         removeDismissMonitors()
+        removeNestedHoverMonitors()
         removeFrameObservers()
+        isNested = false
+        nestedAcceptsMouse = nil
         if Self.current === self { Self.current = nil }
         guard let panel else { return }
         TooltipOverlayGate.exit()
@@ -9436,6 +9565,42 @@ private final class MenuCardAnchorView: NSView {
     private func removeDismissMonitors() {
         clickMonitors.forEach(NSEvent.removeMonitor)
         clickMonitors.removeAll()
+    }
+
+    /// A nested submenu's transparent shadow margin overlaps the parent card's
+    /// right edge, so `ignoresMouseEvents` cannot stay `false` unconditionally.
+    /// Leaving it unset makes macOS alpha-hit-test the clear panel, which lets
+    /// scroll gestures over translucent glass fall through to the app behind it.
+    /// Toggle `ignoresMouseEvents` explicitly from the pointer's position against
+    /// the inset card rect: solid inside the card, pass-through in the margin.
+    private func installNestedHoverMonitors() {
+        guard isNested, hoverMonitors.isEmpty else { return }
+        let mask: NSEvent.EventTypeMask = [.mouseMoved, .leftMouseDragged, .scrollWheel]
+        if let global = NSEvent.addGlobalMonitorForEvents(matching: mask, handler: { [weak self] _ in
+            self?.updateNestedMouseAcceptance()
+        }) {
+            hoverMonitors.append(global)
+        }
+        if let local = NSEvent.addLocalMonitorForEvents(matching: mask, handler: { [weak self] event in
+            self?.updateNestedMouseAcceptance()
+            return event
+        }) {
+            hoverMonitors.append(local)
+        }
+    }
+
+    private func removeNestedHoverMonitors() {
+        hoverMonitors.forEach(NSEvent.removeMonitor)
+        hoverMonitors.removeAll()
+    }
+
+    private func updateNestedMouseAcceptance() {
+        guard isNested, let panel else { return }
+        let cardFrame = panel.frame.insetBy(dx: Self.shadowMargin, dy: Self.shadowMargin)
+        let inside = cardFrame.contains(NSEvent.mouseLocation)
+        guard nestedAcceptsMouse != inside else { return }
+        nestedAcceptsMouse = inside
+        panel.ignoresMouseEvents = !inside
     }
 
     /// Take the menu down for a click that isn't part of using it. Two clicks are
@@ -9529,6 +9694,7 @@ private final class MenuCardAnchorView: NSView {
                            visible.maxX - size.width + margin - 8)
         }
         panel.setFrame(NSRect(origin: origin, size: size), display: true)
+        updateNestedMouseAcceptance()
     }
 
     override func layout() {
@@ -10213,6 +10379,13 @@ fileprivate struct RevealThreadKey: Equatable {
     var measures: Bool
 }
 
+fileprivate struct RevealFrostKey: Equatable {
+    var turns: [NotchModel.Turn]
+    var width: CGFloat
+    var height: CGFloat
+    var floating: Bool
+}
+
 /// A view that redraws only when `key` changes. The reveal hands its parts in
 /// through these, so an animation frame — which recomputes the reveal's
 /// geometry — doesn't re-run the bodies of everything inside it.
@@ -10261,19 +10434,15 @@ fileprivate struct ThreadRevealTop<Header: View, Thread: View, Frost: View>: Vie
     let thread: Thread
     let frost: Frost
 
-    /// The peek's own fade (clear at the top to this at the bottom) and frost.
+    /// The peek's own fade (clear at the top to this at the bottom).
     private var peekAlpha: CGFloat { floating ? 0.65 : 0.85 }
-    private var peekBlurRadius: CGFloat { floating ? 9 : 6 }
-    /// Where the frost's mask starts to fall off, and where it reaches clear.
-    private var frostSolidUntil: CGFloat { floating ? 0.7 : 0.45 }
-    private var frostClearAt: CGFloat { floating ? 1 : 0.9 }
 
     var body: some View {
         let p = active ? min(max(live.progress, 0), 1) : 0
         let frostOpacity = 1 - revealSmoothstep(0, 0.2, p)
         VStack(alignment: .leading, spacing: 0) {
             Color.clear.frame(height: revealLerp(0, targets.headerSlot, p))
-            ZStack(alignment: .bottom) {
+            ZStack(alignment: .bottomLeading) {
                 Color.clear
                     .frame(maxWidth: .infinity)
                     .frame(height: revealLerp(peekHeight, targets.viewport, p))
@@ -10281,28 +10450,15 @@ fileprivate struct ThreadRevealTop<Header: View, Thread: View, Frost: View>: Vie
                     .clipped()
                     .mask(ThreadRevealFade(length: revealLerp(peekHeight, targets.fade, p),
                                            alpha: revealLerp(peekAlpha, 1, p)))
-                if frostOpacity > 0 {
-                    // The peek's frost, the same recipe as `progressiveTopBlur`:
-                    // the faded peek, blurred, masked to deepen toward the top.
-                    Color.clear
-                        .frame(maxWidth: .infinity)
-                        .frame(height: peekHeight)
-                        .overlay(alignment: .bottomLeading) { frost }
-                        .clipped()
-                        .mask(ThreadRevealFade(length: peekHeight, alpha: peekAlpha))
-                        .drawingGroup()
-                        .blur(radius: peekBlurRadius)
-                        .mask(
-                            LinearGradient(
-                                stops: [
-                                    .init(color: .black, location: 0),
-                                    .init(color: .black, location: frostSolidUntil),
-                                    .init(color: .clear, location: frostClearAt),
-                                    .init(color: .clear, location: 1),
-                                ],
-                                startPoint: .top, endPoint: .bottom))
-                        .opacity(frostOpacity)
-                }
+                // Keep `frost` mounted across the whole pull/collapse so
+                // collapsing past p = 0.2 modulates opacity smoothly instead of
+                // building and blurring the texture mid-animation.
+                Color.clear
+                    .frame(maxWidth: .infinity)
+                    .frame(height: peekHeight)
+                    .overlay(alignment: .bottomLeading) { frost }
+                    .clipped()
+                    .opacity(frostOpacity)
             }
             .allowsHitTesting(false)
         }
@@ -10486,6 +10642,7 @@ struct WelcomeLicenseCard: View {
     @ObservedObject var model: NotchModel
     @ObservedObject private var license = NotchiLicense.shared
     @Environment(\.cardWidthFraction) private var cardWidthFraction
+    @Environment(\.chatBubbleGlass) private var onDesktop
     @State private var hovering = false
 
     var body: some View {
@@ -10522,6 +10679,7 @@ struct WelcomeLicenseCard: View {
                 .frame(minWidth: 220, alignment: .leading)
                 .licenseChipSurface(shape, hovered: hovering)
                 .clipShape(shape)
+                .modifier(OptionalSmokedGlass(radius: ChatBubbleChrome.cardRadius, on: onDesktop))
                 .contentShape(shape)
             }
             .buttonStyle(PlatePressStyle())
@@ -11113,16 +11271,16 @@ struct RoutinesPanel: View {
                         .sfFont(Tokens.TypeSize.label)
                         .foregroundStyle(Tokens.text1)
                         .lineLimit(1)
-                    HStack(spacing: 4) {
-                        Image(systemName: page.isPublic ? "globe" : "lock.fill")
-                            .font(.system(size: page.isPublic ? 9.5 : 8.5, weight: .semibold))
-                            .foregroundStyle(page.isPublic ? Color.green.opacity(0.85) : Tokens.text4)
-                        Text("\(page.slug).\(PagesService.domain) · \(updated)")
-                            .sfFont(Tokens.TypeSize.meta)
-                            .foregroundStyle(Tokens.text3)
+                    HStack(spacing: 0) {
+                        Text("\(page.slug).\(PagesService.domain)")
                             .lineLimit(1)
                             .truncationMode(.middle)
+                        Text(page.isPublic ? " · \(updated) · Public" : " · \(updated)")
+                            .lineLimit(1)
+                            .fixedSize()
                     }
+                    .sfFont(Tokens.TypeSize.meta)
+                    .foregroundStyle(Tokens.text3)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .contentShape(Rectangle())

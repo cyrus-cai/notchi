@@ -125,6 +125,17 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.9.45",
+            date: "2026-11-24",
+            improvements: [
+                "Opening the notch and pulling or collapsing threads is faster and smoother.",
+                "Model menus now show a single No Credit footer with an Add button instead of repeating the badge on every model.",
+                "Cloud browser tasks automatically close old tabs so long browsing sessions stay fast.",
+                "Moved the proactive notebook link under Proactive in Settings and added a Pages management row.",
+                "Improved scrolling inside nested submenus so scroll gestures no longer pass through to the window behind Notchi.",
+            ]
+        ),
+        Entry(
             version: "0.9.44",
             date: "2026-11-23",
             headline: "Notchi uses 71% less memory now.",

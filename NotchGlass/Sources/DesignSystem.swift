@@ -719,13 +719,35 @@ struct ScrollEdgeFade: ViewModifier {
                 // overlap and punch a hole through a short area.
                 let ft = min(topFade / length, 0.45)
                 let fb = min(bottomFade / length, 0.45)
+                // Smooth cubic ease-in-out taper at each enabled edge so scrolling
+                // text dissolves softly into the glass without duplicating the
+                // scroll subtree for an offscreen blur pass.
+                let stops: [Gradient.Stop] = {
+                    var result: [Gradient.Stop] = []
+                    if top && ft > 0 {
+                        let samples: [CGFloat] = [0, 0.25, 0.5, 0.75, 1]
+                        for t in samples {
+                            let alpha = Double(t * t * (3 - 2 * t))
+                            result.append(.init(color: .black.opacity(alpha), location: ft * t))
+                        }
+                    } else {
+                        result.append(.init(color: .black, location: 0))
+                    }
+                    if bottom && fb > 0 {
+                        let start = 1 - fb
+                        let samples: [CGFloat] = [0, 0.25, 0.5, 0.75, 1]
+                        for t in samples {
+                            let u = 1 - t
+                            let alpha = Double(u * u * (3 - 2 * u))
+                            result.append(.init(color: .black.opacity(alpha), location: start + fb * t))
+                        }
+                    } else {
+                        result.append(.init(color: .black, location: 1))
+                    }
+                    return result
+                }()
                 LinearGradient(
-                    stops: [
-                        .init(color: .black.opacity(top ? 0 : 1), location: 0),
-                        .init(color: .black, location: top ? ft : 0),
-                        .init(color: .black, location: bottom ? 1 - fb : 1),
-                        .init(color: .black.opacity(bottom ? 0 : 1), location: 1),
-                    ],
+                    stops: stops,
                     startPoint: axis == .vertical ? .top : .leading,
                     endPoint: axis == .vertical ? .bottom : .trailing
                 )
@@ -801,157 +823,38 @@ extension View {
 /// the band's deepest reach short of the runway height; see `immersiveBlurReach`
 /// for the exact budget.
 struct ProgressiveTopBlur: ViewModifier {
-    /// Height of the blur band, in points, measured from the top edge down.
-    /// Below this the content is fully sharp.
     var height: CGFloat
-    /// Peak blur radius at the very top edge.
     var maxRadius: CGFloat = 7
 
     func body(content: Content) -> some View {
-        // `.overlay` (taking the content's own size, so it never disturbs layout)
-        // lays a blurred copy on top, so a row scrolling up INTO the band reads as
-        // frosting out. That only haloes if a resting row sits inside the band —
-        // which the caller prevents by keeping the band above the first row (see the
-        // doc comment). Within the runway there is no text to brighten.
-        content.overlay(
-            GeometryReader { geo in
-                let h = max(geo.size.height, 1)
-                // The blur band as a fraction of the view height, clamped so it
-                // never swallows the whole region on a short view.
-                let band = min(height / h, 0.9)
-                // ONE blurred copy: every copy rebuilds the whole list on the main
-                // thread at mount, and a stack of them stalled click-to-expand on a
-                // long history. The gradient MASK below carries the ramp, so a single
-                // uniform blur reads the same. `.drawingGroup()` flattens this copy into a
-                // single Metal texture so the blur runs on a cached raster (constant
-                // cost, independent of row count) rather than re-rasterizing the live
-                // tree every frame — safe here because this overlay copy never
-                // hit-tests or animates the rows; the live, sharp `content` underneath
-                // owns all interaction.
-                content
-                    .drawingGroup()
-                    .blur(radius: maxRadius)
-                    .mask(
-                        LinearGradient(
-                            stops: [
-                                .init(color: .black, location: 0),
-                                .init(color: .black, location: max(band - band * 0.5, 0)),
-                                .init(color: .clear, location: band),
-                                .init(color: .clear, location: 1),
-                            ],
-                            startPoint: .top, endPoint: .bottom
-                        )
-                    )
-                    // The frost base must not intercept clicks — the live, sharp
-                    // content on top owns all hit-testing (taps on rows).
-                    .allowsHitTesting(false)
-            }
-        )
+        // Duplicating a live ScrollView into a `.drawingGroup().blur(...)` overlay
+        // rebuilt the entire subtree twice on mount and rasterized a full-viewport
+        // offscreen blur that did not even track the real scroll offset. The smooth
+        // cubic `ScrollEdgeFade` carries the edge dissolve at native 120Hz.
+        content
     }
 }
 
-/// **Both** runways frosted in ONE copy of the content — use this instead of
-/// stacking `progressiveTopBlur` + `progressiveBottomBlur` whenever the two
-/// bands share a radius.
-///
-/// Why it exists: each progressive blur overlays a *rebuilt* copy of the content
-/// (that's how the blurred layer is produced), so stacking the two modifiers
-/// doesn't cost 2 copies — it costs **4**. The bottom modifier's `content` is
-/// already `original + top-blur-overlay`, i.e. two instantiations, and it
-/// overlays a second copy of that pair. On a long thread every one of those
-/// copies re-runs the full view build + text layout of every turn on the main
-/// thread the instant the view mounts, which is what made opening a long agent
-/// record stall. One modifier = 2 instantiations (the live one plus its single
-/// blurred copy), rendering identically: the gradient mask below simply carries
-/// both tapers — opaque at each edge, clear across the middle — instead of one.
 struct ProgressiveEdgeBlur: ViewModifier {
-    /// Band heights in points, measured inward from each edge.
     var topHeight: CGFloat
     var bottomHeight: CGFloat
-    /// Peak blur radius at each edge. **Equal radii collapse to a single copy**
-    /// — one blurred layer carrying both tapers in its mask. Unequal radii need
-    /// two blurred layers, but they're laid as *siblings over the same base*,
-    /// never nested, so it's 3 instantiations rather than the stacked pair's 4.
     var topRadius: CGFloat = 7
     var bottomRadius: CGFloat = 7
 
     func body(content: Content) -> some View {
-        content.overlay(bands(content))
-    }
-
-    /// The blurred copies alone, to lay over `content`.
-    @ViewBuilder
-    func bands<V: View>(_ content: V) -> some View {
-        if topRadius == bottomRadius {
-            band(content, top: true, bottom: true, radius: topRadius)
-        } else {
-            // Both layers copy the ORIGINAL `content`, not each other's result.
-            // (Blurring the top layer along with the content in the bottom band is
-            // a no-op anyway: the top layer's own mask is already clear down there.)
-            ZStack {
-                band(content, top: true, bottom: false, radius: topRadius)
-                band(content, top: false, bottom: true, radius: bottomRadius)
-            }
-        }
-    }
-
-    /// One flattened, blurred copy of the content, masked to the requested edge
-    /// band(s) — opaque at the edge, tapering to clear at the band's inner lip.
-    private func band<V: View>(_ content: V, top: Bool, bottom: Bool,
-                               radius: CGFloat) -> some View {
-        GeometryReader { geo in
-            let h = max(geo.size.height, 1)
-            // Clamp each band to under half the view so the two tapers can never
-            // cross and blur the whole region on a short viewport.
-            let t = top ? min(topHeight / h, 0.45) : 0
-            let b = bottom ? min(bottomHeight / h, 0.45) : 0
-            content
-                .drawingGroup()
-                .blur(radius: radius)
-                .mask(
-                    LinearGradient(
-                        stops: [
-                            .init(color: top ? .black : .clear, location: 0),
-                            .init(color: top ? .black : .clear, location: max(t - t * 0.5, 0)),
-                            .init(color: .clear, location: t),
-                            .init(color: .clear, location: max(1 - b, t)),
-                            .init(color: bottom ? .black : .clear, location: min(1 - b + b * 0.5, 1)),
-                            .init(color: bottom ? .black : .clear, location: 1),
-                        ],
-                        startPoint: .top, endPoint: .bottom
-                    )
-                )
-                .allowsHitTesting(false)
-        }
+        content
     }
 }
 
-/// Mount/unmount `ProgressiveEdgeBlur` (the merged partner to
-/// `ConditionalTopBlur` / `ConditionalBottomBlur`), so a resting or streaming
-/// surface pays for no blurred copy at all.
 struct ConditionalEdgeBlur: ViewModifier {
     var active: Bool
     var topHeight: CGFloat
     var bottomHeight: CGFloat
     var topRadius: CGFloat = 7
-    /// Defaults to `topRadius` — leave it off whenever both edges share a radius,
-    /// which is what lets the two bands ride one blurred copy.
     var bottomRadius: CGFloat? = nil
 
-    /// `content` keeps one position in the tree whether or not the bands are
-    /// up; only the overlay mounts and unmounts. Branching on `active` around
-    /// `content` gave it two identities, so a flip rebuilt everything inside:
-    /// the thread's ScrollView came back at offset 0 when a stream ended and
-    /// showed the oldest mounted turns before scrolling back to the bottom.
     func body(content: Content) -> some View {
-        content.overlay {
-            if active {
-                ProgressiveEdgeBlur(topHeight: topHeight, bottomHeight: bottomHeight,
-                                    topRadius: topRadius,
-                                    bottomRadius: bottomRadius ?? topRadius)
-                    .bands(content)
-            }
-        }
+        content
     }
 }
 
@@ -995,70 +898,31 @@ extension View {
 /// the manage bar), and tapers fully to clear before it touches the last row's
 /// resting position. At idle no row is inside the band, so nothing haloes.
 struct ProgressiveBottomBlur: ViewModifier {
-    /// Height of the blur band, in points, measured from the bottom edge up.
-    /// Above this the content is fully sharp.
     var height: CGFloat
-    /// Peak blur radius at the very bottom edge.
     var maxRadius: CGFloat = 7
 
     func body(content: Content) -> some View {
-        // Mirror of `ProgressiveTopBlur`: ONE flattened blurred copy, gradient-masked
-        // to the bottom band. See the top variant for why.
-        content.overlay(
-            GeometryReader { geo in
-                let h = max(geo.size.height, 1)
-                let band = min(height / h, 0.9)
-                content
-                    .drawingGroup()
-                    .blur(radius: maxRadius)
-                    .mask(
-                        LinearGradient(
-                            stops: [
-                                .init(color: .clear, location: 0),
-                                .init(color: .clear, location: 1 - band),
-                                .init(color: .black, location: min(1 - band + band * 0.5, 1)),
-                                .init(color: .black, location: 1),
-                            ],
-                            startPoint: .top, endPoint: .bottom
-                        )
-                    )
-                    .allowsHitTesting(false)
-            }
-        )
+        content
     }
 }
 
-/// Apply `ProgressiveBottomBlur` only when `active`, mounting/unmounting the blur
-/// stack (mirror of `ConditionalTopBlur`) so the compact list never pays for it.
 struct ConditionalBottomBlur: ViewModifier {
     var active: Bool
     var height: CGFloat
     var maxRadius: CGFloat = 7
 
     func body(content: Content) -> some View {
-        if active {
-            content.progressiveBottomBlur(height: height, maxRadius: maxRadius)
-        } else {
-            content
-        }
+        content
     }
 }
 
-/// Apply `ProgressiveTopBlur` only when `active` — and, crucially, mount/unmount
-/// the blur stack rather than just zeroing its radius, so the compact list never
-/// pays for the extra renders. A plain `if active` inside a `ViewModifier` would
-/// change the view's identity; wrapping the toggle here keeps it contained.
 struct ConditionalTopBlur: ViewModifier {
     var active: Bool
     var height: CGFloat
     var maxRadius: CGFloat = 7
 
     func body(content: Content) -> some View {
-        if active {
-            content.progressiveTopBlur(height: height, maxRadius: maxRadius)
-        } else {
-            content
-        }
+        content
     }
 }
 

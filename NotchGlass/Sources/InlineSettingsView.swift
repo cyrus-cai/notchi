@@ -10,21 +10,22 @@ import UserNotifications
 
 /// The protected capabilities Notchi's tools use, as listed in General.
 private enum SystemPermission: CaseIterable, Hashable {
-    case accessibility, notifications, location, calendar, reminders, contacts, photos
+    case accessibility, screenRecording, notifications, location, calendar, reminders, contacts, photos
     case notes, mail, music
 
     var labelKey: String {
         switch self {
-        case .accessibility: return "permissions.accessibility"
-        case .notifications: return "permissions.notifications"
-        case .location:      return "permissions.location"
-        case .calendar:      return "permissions.calendar"
-        case .reminders:     return "permissions.reminders"
-        case .contacts:      return "permissions.contacts"
-        case .photos:        return "permissions.photos"
-        case .notes:         return "permissions.notes"
-        case .mail:          return "permissions.mail"
-        case .music:         return "permissions.music"
+        case .accessibility:   return "permissions.accessibility"
+        case .screenRecording: return "permissions.screenRecording"
+        case .notifications:   return "permissions.notifications"
+        case .location:        return "permissions.location"
+        case .calendar:        return "permissions.calendar"
+        case .reminders:       return "permissions.reminders"
+        case .contacts:        return "permissions.contacts"
+        case .photos:          return "permissions.photos"
+        case .notes:           return "permissions.notes"
+        case .mail:            return "permissions.mail"
+        case .music:           return "permissions.music"
         }
     }
 
@@ -42,6 +43,7 @@ private enum SystemPermission: CaseIterable, Hashable {
     var privacyAnchor: String {
         switch self {
         case .accessibility:         return "Privacy_Accessibility"
+        case .screenRecording:       return "Privacy_ScreenCapture"
         case .notifications:         return ""
         case .location:              return "Privacy_LocationServices"
         case .calendar:              return "Privacy_Calendars"
@@ -183,6 +185,7 @@ private struct ConnectorTableRow: View {
     let connector: MCPConnector
     @ObservedObject var auth: MCPConnectorAuth
     @ObservedObject var hub: MCPHub
+    var onConnect: () -> Void
     @Environment(\.settingsMetrics) private var metrics
     @State private var hovering = false
 
@@ -197,6 +200,9 @@ private struct ConnectorTableRow: View {
                     .font(.sf(Tokens.TypeSize.form))
                     .foregroundStyle(Tokens.text1)
                     .lineLimit(1)
+                if connector.composio {
+                    InlineSettingsView.NewBadge(text: "Third-party", tint: Tokens.text2)
+                }
                 Spacer(minLength: 12)
                 Group {
                     if connected {
@@ -211,7 +217,7 @@ private struct ConnectorTableRow: View {
                     } else if auth.isWaiting(connector.id) {
                         TelegramStepPill(title: L("connector.cancel")) { auth.cancel() }
                     } else {
-                        TelegramStepPill(title: L("connector.connect")) { auth.connect(connector) }
+                        TelegramStepPill(title: L("connector.connect")) { onConnect() }
                     }
                 }
                 .frame(width: 104, alignment: .trailing)
@@ -382,6 +388,7 @@ struct InlineSettingsView: View {
     /// The open group in the connectors table. One tab shows one category's
     /// rows, so the table keeps a single heading over a short list.
     @State private var connectorCategory: MCPConnector.Category = .docs
+    @State private var pendingThirdPartyConnector: MCPConnector? = nil
     @ObservedObject private var clipboardHistory = ClipboardHistory.shared
     /// Memory files as edited on the Memory page, by file name. Seeded from
     /// disk on first read; each edit is written straight back.
@@ -655,7 +662,7 @@ struct InlineSettingsView: View {
             case .balances:   return L("nono.balances")
             case .privacy:    return L("nono.privacy.title")
             case .memory:     return L("memory.title")
-            case .pages:      return "Pages"
+            case .pages:      return L("pages.title")
             case .whatsNew:   return L("whatsnew.title")
             }
         }
@@ -701,6 +708,7 @@ struct InlineSettingsView: View {
     /// the status item immediately.
     @State private var menuBarIconVisibility: MenuBarIconVisibility = .current
     @State private var menuBarCardPlacement: MenuBarCardPlacement = .current
+    @State private var screenshotDestination: ScreenshotDestination = .current
 
     /// Whether the app launches itself at login — seeded from the live system
     /// login-item status (`SMAppService`), not `UserDefaults`. Writes go through
@@ -748,6 +756,7 @@ struct InlineSettingsView: View {
     /// panel key catcher.
     @State private var summonHotKey: SummonHotKey = .current
     @State private var cardHotKey: SummonHotKey = .card
+    @State private var screenshotHotKey: SummonHotKey = .screenshot
     @State private var appShortcuts: [AppShortcutAction: ShortcutChord] = AppShortcutStore.current
     /// User-authored global bindings are intentionally only a shortcut and one
     /// prompt. Their UUID exists solely so SwiftUI and AppDelegate can track rows.
@@ -759,6 +768,7 @@ struct InlineSettingsView: View {
     /// The summon row's "Reset to" menu card.
     @State private var summonResetMenuOpen = false
     @State private var cardResetMenuOpen = false
+    @State private var screenshotResetMenuOpen = false
     @State private var promptTemplates = RemoteModelManifest.promptTemplates
     @State private var selectedPromptTemplateCategory = ""
     @State private var hoveredPromptTemplateID: String?
@@ -1113,9 +1123,49 @@ struct InlineSettingsView: View {
                 .padding(.top, -NotchBody.panelPadding)
                 .padding(.bottom, -NotchBody.panelPadding)
                 .transition(.opacity.combined(with: .scale(scale: 0.96)))
+            } else if let connector = pendingThirdPartyConnector {
+                ConfirmationDialogOverlay(onDismiss: { pendingThirdPartyConnector = nil }) {
+                    VStack(spacing: 12) {
+                        Text(L("connector.thirdParty.title", connector.title))
+                            .font(.sf(Tokens.TypeSize.reading, weight: .medium))
+                            .foregroundStyle(Tokens.text1)
+                            .multilineTextAlignment(.center)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Text(L("connector.thirdParty.body", connector.title))
+                            .font(.sf(Tokens.TypeSize.meta))
+                            .foregroundStyle(Tokens.text2)
+                            .multilineTextAlignment(.center)
+                            .fixedSize(horizontal: false, vertical: true)
+                        UnderlineLink(title: L("connector.thirdParty.privacy"), external: true) {
+                            if let url = URL(string: "https://composio.dev/privacy") {
+                                NSWorkspace.shared.open(url)
+                            }
+                        }
+                        HStack(spacing: 10) {
+                            ConfirmDialogButton(title: L("connector.thirdParty.confirm"), kind: .neutral) {
+                                let target = connector
+                                pendingThirdPartyConnector = nil
+                                connectorAuth.connect(target)
+                            }
+                            ConfirmDialogButton(title: L("clear.cancel"), kind: .quiet) {
+                                pendingThirdPartyConnector = nil
+                            }
+                        }
+                        .padding(.top, 2)
+                    }
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 18)
+                    .frame(maxWidth: 300)
+                }
+                .padding(.horizontal, -NotchBody.panelPadding)
+                .padding(.top, -NotchBody.panelPadding)
+                .padding(.bottom, -NotchBody.panelPadding)
+                .transition(.opacity.combined(with: .scale(scale: 0.96)))
             }
         }
         .animation(.easeOut(duration: 0.16), value: model.confirmingDisconnect)
+        .animation(.easeOut(duration: 0.16), value: pendingThirdPartyConnector?.id)
+        .holdsPanelWhilePresented(pendingThirdPartyConnector != nil)
         .animation(.easeOut(duration: 0.16), value: memoryForgetTarget)
         .animation(.easeOut(duration: 0.16), value: telegramConfirmForget)
         .animation(.easeOut(duration: 0.16), value: signalConfirmForget)
@@ -1410,18 +1460,18 @@ struct InlineSettingsView: View {
             case .license:
                 licensePane
             case .chat:
-                // Four groups: what the answers say and do, what is remembered,
-                // what starts a conversation from a copy, and the sounds.
+                // Three clear groups: how Notchi answers and follows up,
+                // tools it can publish or run with, and what triggers a chat
+                // from copied text.
                 Text(L("chat.group.answers"))
                     .settingsHeading()
                 customInstructionsRow
                 suggestFollowUpRow
-                proactiveRow
-                if proactive.level != .off {
-                    UnderlineLink(title: L("proactive.notebook.open"), external: true) { proactive.openNotebook() }
-                }
-                lidClosedRow
-                UnderlineLink(title: "Manage Pages") { open(.pages) }
+                proactiveSection
+                Text(L("chat.group.tools"))
+                    .settingsHeading()
+                    .padding(.top, metrics.groupHeadingGap)
+                pagesRow
                 if DebugFeatureFlags.cloudMachine {
                     cloudMachineSection
                 }
@@ -1484,6 +1534,7 @@ struct InlineSettingsView: View {
                     .padding(.top, metrics.groupHeadingGap)
                 menuBarIconRow
                 menuBarCardPlacementRow
+                screenshotDestinationRow
                 jevAutoPinRow
                 Text(L("chat.group.effects"))
                     .settingsHeading()
@@ -1494,13 +1545,23 @@ struct InlineSettingsView: View {
                     telegramSection
                     signalSection
                 }
+                Text(L("channels.group.background"))
+                    .settingsHeading()
+                    .padding(.top, metrics.groupHeadingGap)
+                lidClosedRow
             case .connect:
                 // One tab per group that has connectors, then that group's rows:
                 // the tab is the heading, so each row needs no caption of its own.
                 VStack(alignment: .leading, spacing: 6) {
                     connectorCategoryTabs
                     ForEach(MCPConnector.all.filter { $0.category == activeConnectorCategory }) { connector in
-                        ConnectorTableRow(connector: connector, auth: connectorAuth, hub: mcp)
+                        ConnectorTableRow(connector: connector, auth: connectorAuth, hub: mcp) {
+                            if connector.composio {
+                                pendingThirdPartyConnector = connector
+                            } else {
+                                connectorAuth.connect(connector)
+                            }
+                        }
                     }
                 }
                 .animation(.easeOut(duration: 0.18), value: activeConnectorCategory)
@@ -3431,13 +3492,16 @@ struct InlineSettingsView: View {
     private func nonoCreditRow(_ snapshot: NoNoAccount.Snapshot) -> some View {
         HStack(alignment: .center, spacing: 8) {
             nonoFigure(snapshot, prominent: true)
-            if !showingAmount {
+            if showingAmount {
+                addCreditButton(bought: snapshot.credit.grantedUSD)
+                    .padding(.leading, 4)
+            } else {
                 ChipLink(title: L("nono.add")) { showingAmount = true }
                     .padding(.leading, 4)
             }
-            addCreditButton(bought: snapshot.credit.grantedUSD)
-                .padding(.leading, 4)
         }
+        .animation(reduceMotion ? nil : .spring(response: 0.34, dampingFraction: 0.82),
+                   value: showingAmount)
     }
 
     /// One row of the wallet's lineup: the name the picker already uses, and
@@ -4941,6 +5005,23 @@ struct InlineSettingsView: View {
         .padding(.vertical, 6)
     }
 
+    /// Where global screenshots fly into and open when Notchi is closed.
+    private var screenshotDestinationRow: some View {
+        settingRow(label: L("screenshot.destination"), aligned: true) {
+            GlassMenu(
+                title: screenshotDestination.label,
+                items: ScreenshotDestination.allCases.map { dest in
+                    GlassMenuItem(title: dest.label, selected: dest == screenshotDestination) {
+                        guard dest != screenshotDestination else { return }
+                        Haptics.levelChange()
+                        screenshotDestination = dest
+                        ScreenshotDestination.current = dest
+                    }
+                }
+            )
+        }
+    }
+
     private func selectMenuBarIconVisibility(_ newValue: MenuBarIconVisibility) {
         guard newValue != menuBarIconVisibility else { return }
         menuBarIconVisibility = newValue
@@ -5548,6 +5629,8 @@ struct InlineSettingsView: View {
         switch permission {
         case .accessibility:
             return AXIsProcessTrusted() ? .granted : .notDetermined
+        case .screenRecording:
+            return CGPreflightScreenCaptureAccess() ? .granted : .notDetermined
         case .calendar:
             switch EKEventStore.authorizationStatus(for: .event) {
             case .authorized, .fullAccess: return .granted
@@ -5612,6 +5695,10 @@ struct InlineSettingsView: View {
     /// grants it; the rest raise the system prompt and re-read the state after.
     private func requestPermission(_ permission: SystemPermission) {
         let current = permissionStatus[permission] ?? .checking
+        if permission == .screenRecording {
+            ScreenPermissionGuideController.shared.showScreenRecordingGuide()
+            return
+        }
         if current == .denied || current == .limited || permission == .accessibility {
             openSettings(for: permission)
             return
@@ -5625,7 +5712,7 @@ struct InlineSettingsView: View {
             Task { @MainActor in refreshPermissions(launchingApps: false) }
         }
         switch permission {
-        case .accessibility:
+        case .accessibility, .screenRecording:
             PermissionPromptGate.exit()
         case .notifications:
             UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in reread() }
@@ -5978,6 +6065,17 @@ struct InlineSettingsView: View {
         }
     }
 
+    /// How often Notchi writes first (`ProactiveLevel`), with its notebook link
+    /// tucked right underneath so the two read as one setting.
+    private var proactiveSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            proactiveRow
+            if proactive.level != .off {
+                UnderlineLink(title: L("proactive.notebook.open"), external: true) { proactive.openNotebook() }
+            }
+        }
+    }
+
     /// How often Notchi writes first (`ProactiveLevel`). One menu of four
     /// levels, like `copySenseRow`'s three states. Picking a level other than
     /// Off asks for Calendar and Reminders access, which the messages read.
@@ -5991,6 +6089,13 @@ struct InlineSettingsView: View {
                     if level != .off { proactive.requestAccess() }
                 }
             })
+        }
+    }
+
+    /// Pages published at `*.notch.website`; opens the manager sub-page.
+    private var pagesRow: some View {
+        settingRow(label: L("pages.title"), info: L("pages.hint"), aligned: true) {
+            TelegramStepPill(title: L("pages.manage")) { open(.pages) }
         }
     }
 
@@ -7226,6 +7331,7 @@ struct InlineSettingsView: View {
             promptShortcutsGroup
             ForEach(Array(AppShortcutReference.groups(
                 summonHotKey: summonHotKey,
+                screenshotHotKey: screenshotHotKey,
                 shortcuts: appShortcuts
             ).enumerated()),
                     id: \.offset) { _, group in
@@ -7263,6 +7369,7 @@ struct InlineSettingsView: View {
         .onReceive(NotificationCenter.default.publisher(for: .summonHotKeyChanged)) { _ in
             summonHotKey = .current
             cardHotKey = .card
+            screenshotHotKey = .screenshot
         }
         .onReceive(NotificationCenter.default.publisher(for: .appShortcutsChanged)) { _ in
             appShortcuts = AppShortcutStore.current
@@ -8511,8 +8618,12 @@ struct InlineSettingsView: View {
             // is a Reset To menu instead of a one-way default reset. Other editable
             // chords keep the compact reset affordance when they differ from
             // their shipped value.
-            if target == .summon || target == .card {
-                let menuOpen = target == .summon ? $summonResetMenuOpen : $cardResetMenuOpen
+            if target == .summon || target == .card || target == .screenshot {
+                let menuOpen: Binding<Bool> = switch target {
+                case .summon: $summonResetMenuOpen
+                case .card: $cardResetMenuOpen
+                default: $screenshotResetMenuOpen
+                }
                 Button { menuOpen.wrappedValue.toggle() } label: {
                     Text(L("general.shortcut.resetTo"))
                         .font(.sf(Tokens.TypeSize.meta, weight: .regular))
@@ -8521,7 +8632,11 @@ struct InlineSettingsView: View {
                         .frame(minHeight: 24)
                 }
                 .buttonStyle(ShortcutChipStyle(rest: 0.055, restStroke: 0.1))
-                .glassMenuCard(open: menuOpen, items: [
+                .glassMenuCard(open: menuOpen, items: (target == .screenshot ? [
+                    GlassMenuItem(title: L("general.shortcut.bothOption")) {
+                        restoreModifierTrigger(target, UInt32(optionKey), side: .both)
+                    },
+                ] : []) + [
                     GlassMenuItem(title: L("general.shortcut.doubleTapCommand")) {
                         restoreModifierTrigger(target, UInt32(cmdKey), side: .either)
                     },
@@ -8580,6 +8695,9 @@ struct InlineSettingsView: View {
                 if target == .card, cardHotKey.enabled {
                     Button(L("general.shortcut.disable")) { commitCardHotKey(.cardDefaultConfig) }
                 }
+                if target == .screenshot, screenshotHotKey.enabled {
+                    Button(L("general.shortcut.disable")) { disableScreenshotHotKey() }
+                }
             }
         }
         .animation(.easeOut(duration: 0.16), value: shortcutIsModified(target))
@@ -8591,6 +8709,8 @@ struct InlineSettingsView: View {
             return summonHotKey != .defaultConfig
         case .card:
             return cardHotKey.enabled
+        case .screenshot:
+            return screenshotHotKey != .screenshotDefaultConfig
         case .action(let action):
             return (appShortcuts[action] ?? action.defaultChord) != action.defaultChord
         case .prompt:
@@ -8608,7 +8728,7 @@ struct InlineSettingsView: View {
         let appOwner: String? = switch target {
         case .summon:
             AppShortcutStore.conflictOwner(for: chord, editingSummon: true)
-        case .card:
+        case .card, .screenshot:
             AppShortcutStore.conflictOwner(for: chord)
         case .action(let action):
             AppShortcutStore.conflictOwner(for: chord, editingAction: action)
@@ -8619,6 +8739,9 @@ struct InlineSettingsView: View {
 
         if target != .card, cardHotKey.enabled, cardHotKey.chord == chord {
             return L("shortcuts.card")
+        }
+        if target != .screenshot, screenshotHotKey.enabled, screenshotHotKey.chord == chord {
+            return L("shortcuts.screenshotGlobal")
         }
 
         let editingPromptID: UUID? = if case .prompt(let id) = target { id } else { nil }
@@ -8654,13 +8777,15 @@ struct InlineSettingsView: View {
                 && summonHotKey.modifiers == chord.modifiers
         case .card:
             cardHotKey.enabled && !cardHotKey.isDoubleTap && cardHotKey.chord == chord
+        case .screenshot:
+            screenshotHotKey.enabled && !screenshotHotKey.isDoubleTap && screenshotHotKey.chord == chord
         case .prompt(let id):
             promptShortcuts.first(where: { $0.id == id })?.shortcut == chord
         case .action:
             true
         }
         let needsGlobalProbe: Bool = switch target {
-        case .summon, .card, .prompt: true
+        case .summon, .card, .screenshot, .prompt: true
         case .action: false
         }
         if needsGlobalProbe, !unchangedGlobal,
@@ -8682,10 +8807,13 @@ struct InlineSettingsView: View {
             commitCardHotKey(SummonHotKey(keyCode: chord.keyCode,
                                           modifiers: chord.modifiers,
                                           enabled: true))
+        case .screenshot:
+            commitScreenshotHotKey(SummonHotKey(keyCode: chord.keyCode,
+                                                modifiers: chord.modifiers,
+                                                enabled: true))
         case .action(let action):
             AppShortcutStore.set(chord, for: action)
             appShortcuts[action] = chord
-            // The ask-about-screen chord is global; AppDelegate re-registers it.
             NotificationCenter.default.post(name: .appShortcutsChanged, object: nil)
         case .prompt(let id):
             guard let index = promptShortcuts.firstIndex(where: { $0.id == id }) else { return }
@@ -8721,6 +8849,11 @@ struct InlineSettingsView: View {
             recordingShortcut = nil
             commitCardHotKey(SummonHotKey(keyCode: 0, modifiers: 0,
                                           doubleTapModifier: modifier, enabled: true))
+        case .screenshot:
+            shortcutHints[target] = nil
+            recordingShortcut = nil
+            commitScreenshotHotKey(SummonHotKey(keyCode: 0, modifiers: 0,
+                                                doubleTapModifier: modifier, enabled: true))
         case .prompt(let id):
             guard let index = promptShortcuts.firstIndex(where: { $0.id == id }) else { return }
             shortcutHints[target] = nil
@@ -8741,18 +8874,19 @@ struct InlineSettingsView: View {
             commitSummonHotKey(.defaultConfig)
         case .card:
             commitCardHotKey(.cardDefaultConfig)
+        case .screenshot:
+            commitScreenshotHotKey(.screenshotDefaultConfig)
         case .action(let action):
             AppShortcutStore.reset(action)
             appShortcuts[action] = action.defaultChord
-            // The ask-about-screen chord is global; AppDelegate re-registers it.
             NotificationCenter.default.post(name: .appShortcutsChanged, object: nil)
         case .prompt:
             break
         }
     }
 
-    /// Summon and the top-right card share the same modifier-only presets.
-    /// Left ⌘ on one and right ⌘ on the other do not conflict.
+    /// Summon, the top-right card, and screenshot share the same modifier-only
+    /// presets. Left ⌘ on one and right ⌘ on another do not conflict.
     private func restoreModifierTrigger(_ target: EditableShortcut,
                                         _ modifier: UInt32,
                                         side: ModifierSide) {
@@ -8760,9 +8894,12 @@ struct InlineSettingsView: View {
         let config = SummonHotKey(keyCode: 0, modifiers: 0,
                                   doubleTapModifier: modifier,
                                   doubleTapSide: side, enabled: true)
-        let other: SummonHotKey = target == .summon ? cardHotKey : summonHotKey
-        let otherOwner = L(target == .summon ? "shortcuts.card" : "shortcuts.summon")
-        var owner: String? = config.doubleTapOverlaps(other) ? otherOwner : nil
+        let peers: [(EditableShortcut, SummonHotKey, String)] = [
+            (.summon, summonHotKey, L("shortcuts.summon")),
+            (.card, cardHotKey, L("shortcuts.card")),
+            (.screenshot, screenshotHotKey, L("shortcuts.screenshotGlobal")),
+        ]
+        var owner: String? = peers.first { $0.0 != target && config.doubleTapOverlaps($0.1) }?.2
         if owner == nil,
            promptShortcuts.contains(where: { $0.shortcut?.doubleTapModifier == modifier }) {
             owner = L("shortcuts.promptAction")
@@ -8772,20 +8909,30 @@ struct InlineSettingsView: View {
             return
         }
         shortcutHints[target] = nil
-        if target == .summon {
+        switch target {
+        case .summon:
             commitSummonHotKey(config)
-        } else {
+        case .card:
             commitCardHotKey(config)
+        case .screenshot:
+            commitScreenshotHotKey(config)
+        default:
+            break
         }
     }
 
     private func turnOffGlobalShortcut(_ target: EditableShortcut) {
-        if target == .summon {
+        switch target {
+        case .summon:
             disableSummonHotKey()
-        } else {
+        case .screenshot:
+            disableScreenshotHotKey()
+        case .card:
             recordingShortcut = nil
             shortcutHints[.card] = nil
             commitCardHotKey(.cardDefaultConfig)
+        default:
+            break
         }
     }
 
@@ -8797,9 +8944,23 @@ struct InlineSettingsView: View {
         commitSummonHotKey(off)
     }
 
+    private func disableScreenshotHotKey() {
+        recordingShortcut = nil
+        shortcutHints[.screenshot] = nil
+        var off = screenshotHotKey
+        off.enabled = false
+        commitScreenshotHotKey(off)
+    }
+
     private func commitCardHotKey(_ newValue: SummonHotKey) {
         cardHotKey = newValue
         SummonHotKey.card = newValue
+        NotificationCenter.default.post(name: .summonHotKeyChanged, object: nil)
+    }
+
+    private func commitScreenshotHotKey(_ newValue: SummonHotKey) {
+        screenshotHotKey = newValue
+        SummonHotKey.screenshot = newValue
         NotificationCenter.default.post(name: .summonHotKeyChanged, object: nil)
     }
 

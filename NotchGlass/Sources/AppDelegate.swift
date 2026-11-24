@@ -16,6 +16,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var panels: [CGDirectDisplayID: NotchPanel] = [:]
     private let model = NotchModel(ai: AppDelegate.makeService())
     private var openObserver: AnyCancellable?
+    private var inputFocusObserver: AnyCancellable?
     private var pageRepaintObserver: AnyCancellable?
     /// Watches the Force Touch pause so it can end itself when the window lapses.
     private var forceTouchPauseObserver: AnyCancellable?
@@ -178,8 +179,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var summonHotKey: HotKey?
     private var cardHotKey: HotKey?
     private var cardDoubleTap: DoubleTapModifierMonitor?
-    /// The global "ask about an area of the screen" chord (`AppShortcutAction.askScreen`).
-    private var askScreenHotKey: HotKey?
+    /// The global "take a screenshot and ask Notchi" shortcut (`SummonHotKey.screenshot`).
+    private var screenshotHotKey: HotKey?
+    private var screenshotDoubleTap: DoubleTapModifierMonitor?
+    private var screenshotBothSides: BothSidesModifierMonitor?
     private var summonDoubleTap: DoubleTapModifierMonitor?
     /// Every complete user-authored `[shortcut, prompt]` binding. The closure for
     /// each registration captures only its stable id and reads the current prompt
@@ -363,6 +366,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Trace the click level's press → unfurl path (see `ClickOpenProbe`) —
         // temporary instrumentation for the "sometimes takes two clicks" report.
         ClickOpenProbe.shared.start(model: model)
+
+        // Local-only UI smoothness & responsiveness monitor (FPS, hitch rate,
+        // open latency, main-thread stalls → Application Support/Notchi/perf-metrics.json).
+        ClientPerfMonitor.shared.start(model: model)
 
         // Build the open panel once, unseen, after launch has settled, so the
         // first click doesn't stall on it (see `NotchModel.prewarmPanel`).
@@ -587,6 +594,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         pageRepaintObserver = model.objectWillChange
             .debounce(for: .milliseconds(450), scheduler: DispatchQueue.main)
             .sink { [weak self] _ in self?.recompositePanels() }
+        inputFocusObserver = model.$inputFocusNonce
+            .dropFirst()
+            .sink { [weak self] _ in
+                guard let self else { return }
+                DispatchQueue.main.async {
+                    guard self.model.open else { return }
+                    let target = self.model.activeDisplay.flatMap { self.panels[$0] }
+                        ?? self.preferredScreen()?.displayID.flatMap { self.panels[$0] }
+                        ?? self.panels.values.first
+                    for p in self.panels.values where p !== target && p.isKeyWindow {
+                        p.resignKey()
+                    }
+                    NSApp.activate(ignoringOtherApps: true)
+                    target?.makeKeyAndOrderFront(nil)
+                }
+            }
         openObserver = model.$open
             .combineLatest(model.$activeDisplay)
             .removeDuplicates(by: ==)
@@ -632,8 +655,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                             self.appToRestoreOnClose = front
                         }
                         // Long-running agent: piggyback the daily update check on
-                        // panel opens so it still happens without relaunches.
-                        UpdaterService.shared.checkIfDue()
+                        // panel opens so it still happens without relaunches, deferred
+                        // past the open spring so it doesn't tax the unfurl frames.
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                            UpdaterService.shared.checkIfDue()
+                        }
                     }
                 } else {
                     for p in self.panels.values {
@@ -1421,15 +1447,66 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// (Re)register the global chord that selects an area of the screen and
-    /// attaches it to an ask.
+    /// Resolves which display to capture and which surface (notch vs. top-right
+    /// menu bar card) the screenshot should fly into and open.
+    private func resolveFullScreenScreenshotTargets() -> (captureDisplay: CGDirectDisplayID?, targetDisplay: CGDirectDisplayID?) {
+        let screen = NSScreen.containing(NSEvent.mouseLocation) ?? preferredScreen()
+        let captureID = screen?.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID
+
+        if model.open, let active = model.activeDisplay {
+            return (captureID, active)
+        }
+
+        let useMenuBar: Bool
+        switch ScreenshotDestination.current {
+        case .auto:
+            useMenuBar = (screen?.safeAreaInsets.top ?? 0) <= 0
+        case .notch:
+            useMenuBar = false
+        case .menuBar:
+            useMenuBar = true
+        }
+
+        if useMenuBar,
+           let screen,
+           let cardPanel = panels[NotchModel.menuBarCardDisplay] {
+            position(cardPanel, on: screen, id: NotchModel.menuBarCardDisplay)
+            return (captureID, NotchModel.menuBarCardDisplay)
+        }
+        return (captureID, captureID ?? displayForSummon())
+    }
+
+    /// (Re)register the global "capture full screen and ask Notchi" shortcut.
     private func registerAskScreenHotKey() {
-        askScreenHotKey = nil
-        guard NotchModel.screenAreaAskEnabled, !ShortcutRecording.isActive else { return }
-        let chord = AppShortcutStore.chord(for: .askScreen)
-        askScreenHotKey = HotKey(keyCode: chord.keyCode, modifiers: chord.modifiers) { [weak self] in
+        screenshotHotKey = nil
+        screenshotDoubleTap = nil
+        screenshotBothSides = nil
+        let config = SummonHotKey.screenshot
+        guard config.enabled, !ShortcutRecording.isActive else { return }
+        let fire: () -> Void = { [weak self] in
             guard let self, !self.openLockedPromptIfLocked() else { return }
-            self.model.askAboutScreenArea(on: self.displayForSummon())
+            let targets = self.resolveFullScreenScreenshotTargets()
+            self.model.captureFullScreenForCurrentComposer(
+                on: targets.captureDisplay,
+                targetDisplay: targets.targetDisplay,
+                openIfClosed: true
+            )
+        }
+        if config.isBothSides {
+            screenshotBothSides = BothSidesModifierMonitor(
+                carbonModifier: config.doubleTapModifier,
+                action: fire
+            )
+        } else if config.isDoubleTap {
+            screenshotDoubleTap = DoubleTapModifierMonitor(
+                carbonModifier: config.doubleTapModifier,
+                side: config.doubleTapSide,
+                action: fire
+            )
+        } else {
+            screenshotHotKey = HotKey(keyCode: config.keyCode,
+                                      modifiers: config.modifiers,
+                                      action: fire)
         }
     }
 
@@ -1468,6 +1545,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// "disabled" takes effect: when the config is off we just clear both refs.
     private func registerSummonHotKey() {
         registerCardHotKey()
+        registerAskScreenHotKey()
         summonHotKey = nil
         summonDoubleTap = nil
         let config = SummonHotKey.current

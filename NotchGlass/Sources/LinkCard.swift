@@ -627,18 +627,18 @@ private struct NotchiPageCard: View {
                         .lineLimit(2)
                         .multilineTextAlignment(.leading)
 
-                    HStack(spacing: 4) {
-                        Image(systemName: isPublic ? "globe" : "lock.fill")
-                            .font(.system(size: isPublic ? 9.5 : 8.5, weight: .semibold))
-                            .foregroundStyle(isPublic
-                                ? Color(red: 0x24 / 255, green: 0x8A / 255, blue: 0x3D / 255)
-                                : muted.opacity(0.85))
+                    HStack(spacing: 0) {
                         Text("\(slug).\(PagesService.domain)")
-                            .font(.system(size: 11.5))
-                            .foregroundStyle(muted)
                             .lineLimit(1)
                             .truncationMode(.middle)
+                        if isPublic {
+                            Text(" · Public")
+                                .lineLimit(1)
+                                .fixedSize()
+                        }
                     }
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(muted)
                 }
                 .padding(.horizontal, 15)
                 .padding(.vertical, 10)

@@ -693,19 +693,10 @@ struct NotchiPagesPane: View {
     private func row(for page: PagesService.PageSummary) -> some View {
         HStack(alignment: .center, spacing: 10) {
             VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 6) {
-                    Text(page.title)
-                        .font(.system(size: 13, weight: .medium))
-                        .lineLimit(1)
-                    Text(page.isPublic ? "Public" : "Private")
-                        .font(.system(size: 10.5, weight: .medium))
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 1.5)
-                        .background(page.isPublic ? Color.green.opacity(0.16) : Color.primary.opacity(0.07),
-                                    in: Capsule())
-                        .foregroundStyle(page.isPublic ? Color.green : Color.secondary)
-                }
-                Text("\(page.slug).\(PagesService.domain) · \(relativeTime(page.updatedAt))")
+                Text(page.title)
+                    .font(.system(size: 13, weight: .medium))
+                    .lineLimit(1)
+                Text("\(page.slug).\(PagesService.domain) · \(relativeTime(page.updatedAt))\(page.isPublic ? " · Public" : "")")
                     .font(.system(size: 11.5))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)

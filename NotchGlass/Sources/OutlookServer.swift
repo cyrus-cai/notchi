@@ -18,10 +18,7 @@ final class MCPLocalTransport: MCPTransport, @unchecked Sendable {
 
     /// The local server for a connector that has one.
     static func server(for spec: MCPServerSpec) -> MCPLocalServer? {
-        switch spec.oauthConnector {
-        case "outlook": return OutlookServer()
-        default: return nil
-        }
+        return nil
     }
 
     func request(_ method: String, params: [String: Any]?, timeout: TimeInterval) async throws -> [String: Any] {

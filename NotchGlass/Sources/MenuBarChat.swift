@@ -497,11 +497,15 @@ struct MenuBarChat: View {
         .padding(.leading, 10)
         .padding(.trailing, 4)
         .background {
-            Capsule(style: .continuous)
-                .fill(colorScheme == .light ? Color.white.opacity(0.92) : Color.black.opacity(0.7))
-                .padding(-4)
-                .blur(radius: 8)
-                .allowsHitTesting(false)
+            ZStack {
+                BackdropBlur(radius: 12, spot: true)
+                    .padding(-Self.chipBlurSpread)
+                Capsule(style: .continuous)
+                    .fill(colorScheme == .light ? Color.white.opacity(0.92) : Color.black.opacity(0.7))
+                    .padding(-4)
+                    .blur(radius: 8)
+            }
+            .allowsHitTesting(false)
         }
     }
 
@@ -872,7 +876,7 @@ struct MenuBarChat: View {
     private var bottomRowMenuOpen: Bool {
         model.showModelPicker || model.showAskModelPicker || model.showAgentPicker
             || model.showAgentFolderPicker || model.showLoopIntervalPicker
-            || model.isAttachMenuOpen || model.isFolderPickerOpen
+            || model.isAttachMenuOpen || model.isFolderPickerOpen || model.isScreenCaptureOpen
     }
 }
 

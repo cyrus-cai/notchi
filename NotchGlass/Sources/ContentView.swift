@@ -242,6 +242,12 @@ struct ContentView: View {
                 }
                 return true
             }
+            // ⌘⇧S captures an interactive screenshot into the active composer.
+            if AppShortcutStore.matches(.askScreen, event: event),
+               !model.showSettings, !model.showWhatsNew {
+                model.captureScreenshotForCurrentComposer()
+                return true
+            }
             // ⌘P (and ⌘D) pins/unpins the panel — the keyboard twin of the pin
             // button, which the result header, the idle prompt and the Settings
             // header all carry. Pinned → the panel stays open when the pointer

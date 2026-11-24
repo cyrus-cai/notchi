@@ -1585,8 +1585,13 @@ enum CloudDesktopBridge {
     // click changed anything.
     const plainState = (s) => s.replace(/^(\s*)\d+ /gm, '$1');
 
+    // Characters in each MCP reply during perform. A click's perform step took
+    // as long as one get_app_state (21 to 29 s) on 2026-11-23; a reply as long
+    // as a page tree means the MCP server reads the tree inside click too.
+    const replyChars = [];
     async function tool(name, args) {
       const { text, failed } = textOf(await ask({ tool: name, args }));
+      if (name !== 'get_app_state') replyChars.push(`${name}:${text.length}`);
       if (failed) throw new Error(`${name}: ${text}`);
       return text;
     }
@@ -1657,6 +1662,7 @@ enum CloudDesktopBridge {
             '--disable-features=Translate', '--password-store=basic', `--user-data-dir=${PROFILE}`, job.url,
           ], { detached: true, stdio: 'ignore', env: desktopEnv }).unref();
           await sleep(4000);
+          if (isChromium(app)) job.closedTabs = await closeOldTabs(app);
           return `Opened ${job.url}.`;
         }
         case 'state':
@@ -1759,11 +1765,39 @@ enum CloudDesktopBridge {
       }
     }
 
+    // Tabs kept open after a browse: the new page and the three before it.
+    const KEEP_TABS = 4;
+
+    // Closes the oldest tabs of the browser window after a browse. Every browse
+    // opens a new tab and nothing closed them: the window held 88 to 95 tabs on
+    // 2026-11-22 and 2026-11-23, and each get_app_state took 21 to 31 s, inside
+    // click as well, so one click cost 56 to 61 s. The model only works in the
+    // newest tab; older ones are never read again.
+    // The count comes from the state read before this browse plus the tab just
+    // opened. Tabs are closed from the left (oldest first) with ctrl+1 ctrl+w,
+    // then ctrl+9 returns to the last tab. Skipped when more than one Chromium
+    // window is open, since the count then may not belong to the focused window.
+    async function closeOldTabs(app) {
+      let before = 0;
+      try {
+        before = (fs.readFileSync(stateFile(app), 'utf8').match(/^\s*\d+ page tab(?! list)\b/gm) || []).length;
+      } catch { return 0; }
+      const closes = before + 1 - KEEP_TABS;
+      if (closes <= 0) return 0;
+      const windows = (await xdo(['search', '--onlyvisible', '--name', ' - Chromium$'])).out.split('\n').filter(Boolean);
+      if (windows.length !== 1) return 0;
+      await xdo(['windowactivate', '--sync', windows[0]]);
+      const keys = [];
+      for (let i = 0; i < closes; i++) keys.push('ctrl+1', 'ctrl+w');
+      await xdo(['key', '--clearmodifiers', '--delay', '60', ...keys, 'ctrl+9']);
+      await sleep(800);
+      return closes;
+    }
+
     // get_app_state calls and their milliseconds in the last readState.
     let lastReads = [];
-    // Tabs in the window's tab strip at the last readState. Every browse opens
-    // a new tab and none is closed; logged to see whether the slow
-    // get_app_state grows with them.
+    // Tabs in the window's tab strip at the last readState, logged with the
+    // read times to see whether closeOldTabs made get_app_state faster.
     let lastTabs = 0;
     async function readState(app) {
       let state = '';
@@ -1822,6 +1856,8 @@ enum CloudDesktopBridge {
           t = mark('readState', t);
           timing.reads = lastReads;
           timing.tabs = lastTabs;
+          if (job.closedTabs) timing.closedTabs = job.closedTabs;
+          if (replyChars.length) timing.replies = replyChars;
           if (before && !job.verified && plainState(state) === before) {
             lines.push('The page is the same as before this click: the click did not take effect. '
               + 'Do not assume it worked; check the element is on screen (action=scroll), then try its label, '

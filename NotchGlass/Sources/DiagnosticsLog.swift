@@ -123,6 +123,8 @@ final class DiagnosticsLog: @unchecked Sendable {
 // MARK: - Click-to-open probe
 
 import AppKit
+import Combine
+import QuartzCore
 import os
 
 /// Temporary instrumentation for the `.click` hover level's open path — the one
@@ -372,5 +374,373 @@ final class ClickOpenProbe {
         let f = DateFormatter()
         f.dateFormat = "HH:mm:ss.SSS"
         return f.string(from: date)
+    }
+}
+
+// MARK: - Client UI & Animation Performance Monitor
+
+/// Local-only, zero-idle-cost UI smoothness & responsiveness monitor.
+///
+/// Measures real frame pacing (FPS avg, 5% low FPS, hitch rate, P95 frame time),
+/// notch open latency, and main-thread runloop stalls (>= 50 ms) over a rolling
+/// 15-minute window, writing a compact JSON snapshot to:
+///   `~/Library/Application Support/Notchi/perf-metrics.json`
+///
+/// The `CADisplayLink` is ONLY active during brief 1.8 s bursts triggered by real
+/// UI transitions (notch unfurl/collapse, mode/page/tab switches, window focus or
+/// resize), so resting idle CPU/GPU cost is zero. Never phones home — external
+/// local tooling (`ops/dashboard/scripts/report-client-health.sh`) reads the file.
+@MainActor
+final class ClientPerfMonitor: NSObject {
+    static let shared = ClientPerfMonitor()
+
+    struct Snapshot: Codable {
+        let updatedAt: String
+        let windowSec: Int
+        let displayHz: Int
+        let fpsAvg: Double?
+        let fpsP5: Double?
+        let hitchRatePct: Double?
+        let frameP95Ms: Double?
+        let openLatencyMs: Double?
+        let mainStallCount: Int
+        let mainStallMaxMs: Double?
+        let animFrames: Int
+
+        enum CodingKeys: String, CodingKey {
+            case updatedAt = "updated_at"
+            case windowSec = "window_sec"
+            case displayHz = "display_hz"
+            case fpsAvg = "fps_avg"
+            case fpsP5 = "fps_p5"
+            case hitchRatePct = "hitch_rate_pct"
+            case frameP95Ms = "frame_p95_ms"
+            case openLatencyMs = "open_latency_ms"
+            case mainStallCount = "main_stall_count"
+            case mainStallMaxMs = "main_stall_max_ms"
+            case animFrames = "anim_frames"
+        }
+    }
+
+    private struct FrameSample {
+        let at: CFTimeInterval
+        let dtMs: Double
+        let fps: Double
+        let hitched: Bool
+    }
+
+    private struct TimedValue {
+        let at: CFTimeInterval
+        let ms: Double
+    }
+
+    /// Rolling window kept in memory so every 10-minute health report reflects
+    /// recent interaction smoothness without stale data from hours ago.
+    private static let windowSec: CFTimeInterval = 15 * 60
+    private static let burstDuration: CFTimeInterval = 1.8
+    private static let stallThresholdMs: Double = 50.0
+    private static let maxFrameSamples = 4000
+
+    private var started = false
+    private var cancellables: Set<AnyCancellable> = []
+    private var notificationTokens: [NSObjectProtocol] = []
+
+    // Display-link burst state
+    private var displayLink: CADisplayLink?
+    private var burstEndAt: CFTimeInterval = 0
+    private var lastFrameTimestamp: CFTimeInterval = 0
+    private var currentDisplayHz: Int = 60
+
+    // Open-latency measurement
+    private var pendingOpenStart: CFTimeInterval?
+
+    // Main-thread RunLoop stall observer
+    private var runLoopObserver: CFRunLoopObserver?
+    private var turnStartAt: CFTimeInterval = 0
+
+    // Rolling samples
+    private var frames: [FrameSample] = []
+    private var openLatencies: [TimedValue] = []
+    private var stalls: [TimedValue] = []
+
+    // Debounced flush
+    private var lastFlushAt: CFTimeInterval = 0
+    private var periodicFlushTimer: Timer?
+    private var dirty = false
+
+    private lazy var fileURL: URL? = {
+        guard let dir = FileManager.default.urls(for: .applicationSupportDirectory,
+                                                 in: .userDomainMask).first
+        else { return nil }
+        let appDir = dir.appendingPathComponent("Notchi", isDirectory: true)
+        try? FileManager.default.createDirectory(at: appDir, withIntermediateDirectories: true)
+        return appDir.appendingPathComponent("perf-metrics.json")
+    }()
+
+    func start(model: NotchModel) {
+        guard !started else { return }
+        started = true
+        currentDisplayHz = Self.activeDisplayHz()
+
+        // 1. Observe key UI transitions in NotchModel.
+        model.$open
+            .removeDuplicates()
+            .dropFirst()
+            .sink { [weak self] isOpen in
+                guard let self else { return }
+                if isOpen {
+                    self.pendingOpenStart = CACurrentMediaTime()
+                }
+                self.triggerBurst()
+            }
+            .store(in: &cancellables)
+
+        model.$mode
+            .dropFirst()
+            .sink { [weak self] _ in self?.triggerBurst() }
+            .store(in: &cancellables)
+
+        model.$showHistory
+            .removeDuplicates()
+            .dropFirst()
+            .sink { [weak self] _ in self?.triggerBurst() }
+            .store(in: &cancellables)
+
+        model.$showSettings
+            .removeDuplicates()
+            .dropFirst()
+            .sink { [weak self] _ in self?.triggerBurst() }
+            .store(in: &cancellables)
+
+        model.$settingsSection
+            .removeDuplicates()
+            .dropFirst()
+            .sink { [weak self] _ in self?.triggerBurst() }
+            .store(in: &cancellables)
+
+        model.$sidePageTab
+            .removeDuplicates()
+            .dropFirst()
+            .sink { [weak self] _ in self?.triggerBurst() }
+            .store(in: &cancellables)
+
+        model.$showModelPicker
+            .removeDuplicates()
+            .dropFirst()
+            .sink { [weak self] _ in self?.triggerBurst() }
+            .store(in: &cancellables)
+
+        model.$showAskModelPicker
+            .removeDuplicates()
+            .dropFirst()
+            .sink { [weak self] _ in self?.triggerBurst() }
+            .store(in: &cancellables)
+
+        // 2. Observe secondary windows (Settings, History Archive, Detached Session).
+        let nc = NotificationCenter.default
+        for name in [NSWindow.didBecomeKeyNotification, NSWindow.didResizeNotification] {
+            let tok = nc.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.triggerBurst() }
+            }
+            notificationTokens.append(tok)
+        }
+
+        // 3. Lightweight main-thread RunLoop stall observer.
+        installRunLoopObserver()
+
+        // 4. Periodic flush (every 60s) so idle snapshots still refresh displayHz & stalls.
+        periodicFlushTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.flush(force: true)
+            }
+        }
+        periodicFlushTimer?.tolerance = 10
+
+        // Seed an initial snapshot on launch.
+        flush(force: true)
+    }
+
+    private func installRunLoopObserver() {
+        let activities: CFRunLoopActivity = [.beforeSources, .afterWaiting, .beforeWaiting]
+        let observer = CFRunLoopObserverCreateWithHandler(
+            kCFAllocatorDefault,
+            activities.rawValue,
+            true,
+            0
+        ) { [weak self] _, activity in
+            MainActor.assumeIsolated {
+                self?.handleRunLoop(activity: activity)
+            }
+        }
+        if let observer {
+            CFRunLoopAddObserver(CFRunLoopGetMain(), observer, .commonModes)
+            runLoopObserver = observer
+        }
+    }
+
+    private func handleRunLoop(activity: CFRunLoopActivity) {
+        let now = CACurrentMediaTime()
+        if activity == .afterWaiting || activity == .beforeSources {
+            if turnStartAt == 0 {
+                turnStartAt = now
+            }
+        } else if activity == .beforeWaiting {
+            if turnStartAt > 0 {
+                let elapsedMs = (now - turnStartAt) * 1000.0
+                turnStartAt = 0
+                // Ignore huge jumps (> 10s) from system sleep or debugger breaks.
+                if elapsedMs >= Self.stallThresholdMs && elapsedMs < 10_000 {
+                    stalls.append(TimedValue(at: now, ms: elapsedMs))
+                    dirty = true
+                }
+            }
+        }
+    }
+
+    /// Arm or extend a 1.8s CADisplayLink sampling burst.
+    func triggerBurst() {
+        let now = CACurrentMediaTime()
+        burstEndAt = max(burstEndAt, now + Self.burstDuration)
+
+        if displayLink == nil {
+            let screen = NSScreen.main ?? NSScreen.screens.first
+            currentDisplayHz = max(30, screen?.maximumFramesPerSecond ?? 60)
+            if let link = screen?.displayLink(target: self, selector: #selector(onDisplayLink(_:))) {
+                lastFrameTimestamp = 0
+                link.add(to: .main, forMode: .common)
+                displayLink = link
+            }
+        }
+    }
+
+    @objc private func onDisplayLink(_ link: CADisplayLink) {
+        let now = CACurrentMediaTime()
+
+        if let openStart = pendingOpenStart {
+            pendingOpenStart = nil
+            let latencyMs = (now - openStart) * 1000.0
+            if latencyMs >= 0 && latencyMs < 5000 {
+                openLatencies.append(TimedValue(at: now, ms: latencyMs))
+                dirty = true
+            }
+        }
+
+        let ts = link.timestamp
+        if lastFrameTimestamp > 0 {
+            let dt = ts - lastFrameTimestamp
+            if dt > 0.001 && dt < 1.0 {
+                let targetDt = (link.targetTimestamp > ts && (link.targetTimestamp - ts) < 0.1)
+                    ? (link.targetTimestamp - ts)
+                    : (1.0 / Double(currentDisplayHz))
+                let dtMs = dt * 1000.0
+                let fps = min(Double(currentDisplayHz), 1.0 / dt)
+                // Hitch = missed vsync by > 50% (at least 12.5 ms threshold for 120Hz).
+                let hitched = dt > max(targetDt * 1.5, 0.0125)
+                frames.append(FrameSample(at: now, dtMs: dtMs, fps: fps, hitched: hitched))
+                if frames.count > Self.maxFrameSamples {
+                    frames.removeFirst(frames.count - Self.maxFrameSamples)
+                }
+                dirty = true
+            }
+        }
+        lastFrameTimestamp = ts
+
+        if now >= burstEndAt {
+            stopDisplayLink()
+            flush(force: false)
+        }
+    }
+
+    private func stopDisplayLink() {
+        displayLink?.invalidate()
+        displayLink = nil
+        lastFrameTimestamp = 0
+    }
+
+    private func prune(now: CFTimeInterval) {
+        let cutoff = now - Self.windowSec
+        if let idx = frames.firstIndex(where: { $0.at >= cutoff }) {
+            if idx > 0 { frames.removeFirst(idx) }
+        } else if !frames.isEmpty {
+            frames.removeAll()
+        }
+        openLatencies.removeAll { $0.at < cutoff }
+        stalls.removeAll { $0.at < cutoff }
+    }
+
+    private func flush(force: Bool) {
+        let now = CACurrentMediaTime()
+        if !force && (!dirty || (now - lastFlushAt) < 10.0) { return }
+        lastFlushAt = now
+        dirty = false
+
+        prune(now: now)
+        if frames.isEmpty {
+            currentDisplayHz = Self.activeDisplayHz()
+        }
+
+        let fpsAvg: Double?
+        let fpsP5: Double?
+        let hitchRatePct: Double?
+        let frameP95Ms: Double?
+
+        if !frames.isEmpty {
+            let totalFps = frames.reduce(0.0) { $0 + $1.fps }
+            fpsAvg = Self.round2(totalFps / Double(frames.count))
+
+            let sortedFps = frames.map(\.fps).sorted()
+            fpsP5 = Self.round2(Self.percentile(sortedFps, 5))
+
+            let hitches = frames.reduce(0) { $0 + ($1.hitched ? 1 : 0) }
+            hitchRatePct = Self.round2(Double(hitches) * 100.0 / Double(frames.count))
+
+            let sortedDt = frames.map(\.dtMs).sorted()
+            frameP95Ms = Self.round2(Self.percentile(sortedDt, 95))
+        } else {
+            fpsAvg = nil
+            fpsP5 = nil
+            hitchRatePct = nil
+            frameP95Ms = nil
+        }
+
+        let openLatencyMs: Double? = openLatencies.isEmpty
+            ? nil
+            : Self.round2(Self.percentile(openLatencies.map(\.ms).sorted(), 50))
+
+        let mainStallMaxMs: Double? = stalls.map(\.ms).max().map(Self.round2)
+
+        let snapshot = Snapshot(
+            updatedAt: ISO8601DateFormatter().string(from: Date()),
+            windowSec: Int(Self.windowSec),
+            displayHz: currentDisplayHz,
+            fpsAvg: fpsAvg,
+            fpsP5: fpsP5,
+            hitchRatePct: hitchRatePct,
+            frameP95Ms: frameP95Ms,
+            openLatencyMs: openLatencyMs,
+            mainStallCount: stalls.count,
+            mainStallMaxMs: mainStallMaxMs,
+            animFrames: frames.count
+        )
+
+        guard let url = fileURL,
+              let data = try? JSONEncoder().encode(snapshot) else { return }
+        DispatchQueue.global(qos: .utility).async {
+            try? data.write(to: url, options: .atomic)
+        }
+    }
+
+    private static func activeDisplayHz() -> Int {
+        max(30, (NSScreen.main ?? NSScreen.screens.first)?.maximumFramesPerSecond ?? 60)
+    }
+
+    private static func percentile(_ sorted: [Double], _ p: Double) -> Double {
+        guard !sorted.isEmpty else { return 0 }
+        let idx = min(sorted.count - 1, max(0, Int((p / 100.0) * Double(sorted.count))))
+        return sorted[idx]
+    }
+
+    private static func round2(_ v: Double) -> Double {
+        (v * 100.0).rounded() / 100.0
     }
 }

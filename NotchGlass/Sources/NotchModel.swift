@@ -5,8 +5,38 @@ import Carbon.HIToolbox
 import UniformTypeIdentifiers   // UTType — is a pasted file URL an image? (agent ⌘V)
 import PDFKit   // the text of a PDF dropped on the island
 import Vision   // the text of a screen area, for a model that cannot read images
+import ScreenCaptureKit   // full-screen screenshot without subprocess TCC drift
 import AudioToolbox   // MessageTone — system sounds
 import os             // copyTiming — how long each step of a handled copy takes
+
+/// Where a global full-screen screenshot flies into and opens when Notchi is
+/// closed: `.auto` chooses the notch on notched displays and the top-right
+/// menu bar card on displays without a hardware notch.
+enum ScreenshotDestination: String, CaseIterable, Identifiable {
+    case auto
+    case notch
+    case menuBar
+
+    var id: String { rawValue }
+    private static let key = "screenshotDestination"
+
+    static var current: ScreenshotDestination {
+        get {
+            guard let raw = UserDefaults.standard.string(forKey: key),
+                  let value = ScreenshotDestination(rawValue: raw) else { return .auto }
+            return value
+        }
+        set { UserDefaults.standard.set(newValue.rawValue, forKey: key) }
+    }
+
+    var label: String {
+        switch self {
+        case .auto:    return L("screenshot.destination.auto")
+        case .notch:   return L("screenshot.destination.notch")
+        case .menuBar: return L("screenshot.destination.menuBar")
+        }
+    }
+}
 
 /// Images loaded back out of the history store (`NotchModel.historyImage(named:)`),
 /// keyed by filename. File-scope rather than a static on the (main-actor) model, so
@@ -1027,7 +1057,7 @@ final class NotchModel: ObservableObject {
     /// card reads as outside the island, so leave-folding and hover-only chrome
     /// treat these as the pointer still being inside.
     var isFloatingCardOpen: Bool {
-        isModelPickerOpen || isFolderPickerOpen || isResultMetadataMenuOpen || isAttachMenuOpen
+        isModelPickerOpen || isFolderPickerOpen || isScreenCaptureOpen || isResultMetadataMenuOpen || isAttachMenuOpen
             || isCardMoreMenuOpen
             || isResultMoreMenuOpen || slashMenuOpen || isCardPositionMenuOpen
     }
@@ -1189,6 +1219,19 @@ final class NotchModel: ObservableObject {
     /// exactly like `isModelPickerOpen`: the open panel is a separate window, so
     /// the pointer moving into it must not fold the island behind it.
     @Published var isFolderPickerOpen = false
+
+    /// True while `/usr/sbin/screencapture -i` is active. Holds panel state
+    /// across the temporary hide/restore so `orderOut` and pointer travel do
+    /// not fold the panel or discard drafts.
+    @Published var isScreenCaptureOpen = false
+
+    /// A captured screenshot routed to the active in-panel follow-up composer
+    /// (`agentDetailFollowUpImages` or `splitFollowUpImages`) when one is up.
+    @Published var pendingFollowUpScreenshot: (id: UUID, image: NSImage)? = nil
+
+    /// True while the split-view history detail composer is visible on screen,
+    /// so panel/global screenshot shortcuts attach to its follow-up slot.
+    var isSplitFollowUpActive = false
 
     /// True while the AI is in its pre-stream *thinking* phase — from the moment a
     /// question is submitted until the first answer token lands (or the round ends).
@@ -4714,7 +4757,7 @@ final class NotchModel: ObservableObject {
                 switch entry.editable {
                 case .summon: scope = " [setting=summon_shortcut]"
                 case .action(let action): scope = " [setting=action_shortcut scope=\(action.token)]"
-                case .card, .prompt, nil: scope = ""
+                case .card, .screenshot, .prompt, nil: scope = ""
                 }
                 return "- \(entry.label): \(binding)\(scope)"
             }
@@ -7959,8 +8002,8 @@ final class NotchModel: ObservableObject {
     private var threadPullMonitor: Any?
     /// Counts settles, so each one's ending runs once and only for itself.
     private var threadPullSettle = 0
-    /// Drives a settle's frames (see `settleThreadPull`).
-    private var threadPullTicker: Timer?
+    /// Drives a settle's frames on the display's VSync (see `settleThreadPull`).
+    private var threadPullTicker: ThreadPullDisplayLink?
     /// A click or wheel open waiting for the thread's first measurement, so the
     /// motion starts from the real target geometry.
     private var threadPullAutoOpenPending = false
@@ -8034,12 +8077,16 @@ final class NotchModel: ObservableObject {
             && threadScrolledToBottom
     }
 
+    /// Tracks downward jitter during `.pendingCollapse` so a tiny initial
+    /// trackpad wobble doesn't cancel an intentional upward swipe.
+    private var threadCollapseJitter: CGFloat = 0
+
     /// The short layout has no scroller, so it is always at its bottom.
     private var threadScrolledToBottom: Bool {
         guard let scroll = threadScrollView, scroll.window != nil,
               let document = scroll.documentView else { return true }
         return !threadWindowStopsShort
-            && scroll.contentView.bounds.maxY >= document.frame.height - 2
+            && scroll.contentView.bounds.maxY >= document.frame.height - 12
     }
 
     /// Scroll events reach the pull through one app-wide monitor, installed at
@@ -8089,6 +8136,7 @@ final class NotchModel: ObservableObject {
         case .began:
             threadPullSamples = []
             threadPullDistance = 0
+            threadCollapseJitter = 0
             guard threadPullProgress == nil, pullTargetsPanel(event) else {
                 threadPullGesture = .ignoring
                 return false
@@ -8137,9 +8185,17 @@ final class NotchModel: ObservableObject {
                 _ = attachMainThreadRound()
                 return true
             case .pendingCollapse:
-                // Down, or twice as sideways as up, is a scroll. A step with
-                // no vertical part decides nothing yet.
-                if dy > 0 || abs(event.scrollingDeltaX) > 2 * abs(dy) && dy != 0 {
+                // Allow tiny initial downward wobble (< 6pt) before deciding the
+                // user actually intends to scroll back up into older history.
+                if dy > 0 {
+                    threadCollapseJitter += dy
+                    if threadCollapseJitter > 6 {
+                        threadPullGesture = .ignoring
+                        return false
+                    }
+                    return false
+                }
+                if abs(event.scrollingDeltaX) > 2 * abs(dy) && dy != 0 {
                     threadPullGesture = .ignoring
                     return false
                 }
@@ -8359,28 +8415,30 @@ final class NotchModel: ObservableObject {
                                                initialVelocity: initial, epsilon: 0.001)
         threadPullSettle += 1
         let settle = threadPullSettle
-        let start = CACurrentMediaTime()
+        var firstTimestamp: CFTimeInterval?
         threadPullTicker?.invalidate()
-        let timer = Timer(timeInterval: 1.0 / 120.0, repeats: true) { [weak self] timer in
-            MainActor.assumeIsolated {
-                guard let self, self.threadPullSettle == settle else {
-                    timer.invalidate()
-                    return
-                }
-                let t = CACurrentMediaTime() - start
-                if t >= duration {
-                    self.endThreadPull(opened: opens)
-                    return
-                }
-                let value = spring.value(fromValue: from, toValue: to,
-                                         initialVelocity: initial, time: t)
-                var transaction = Transaction()
-                transaction.disablesAnimations = true
-                withTransaction(transaction) { self.threadPullProgress = CGFloat(value) }
+        let screen = activeDisplay.flatMap { id in
+            NSScreen.screens.first { $0.displayID == id }
+        } ?? NSScreen.main ?? NSScreen.screens.first
+        let ticker = ThreadPullDisplayLink(screen: screen) { [weak self] timestamp in
+            guard let self, self.threadPullSettle == settle else {
+                return false
             }
+            let start = firstTimestamp ?? timestamp
+            firstTimestamp = start
+            let t = max(0, timestamp - start)
+            if t >= duration {
+                self.endThreadPull(opened: opens)
+                return false
+            }
+            let value = spring.value(fromValue: from, toValue: to,
+                                     initialVelocity: initial, time: t)
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            withTransaction(transaction) { self.threadPullProgress = CGFloat(value) }
+            return true
         }
-        RunLoop.main.add(timer, forMode: .common)
-        threadPullTicker = timer
+        threadPullTicker = ticker
     }
 
     /// The pull's last frame. Opened, the idle page at progress 1 is swapped for
@@ -9520,14 +9578,18 @@ final class NotchModel: ObservableObject {
             // for an account that was not read yet.
             maybeStartUnifiedIntro()
             maybeStartAuditIntro()
-            Task {
+            // Defer background account/nudge/announcement refreshes past the open
+            // spring so they never contend with the first frames of panel unfurl.
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(nanoseconds: 350_000_000)
+                guard let self, self.open else { return }
                 await NoNoAccount.shared.refreshIfStale()
                 await FeatureNudges.shared.refreshIfDue()
-                maybeStartUnifiedIntro()
-                maybeStartAuditIntro()
-                maybeStartFeatureNudge()
+                self.maybeStartUnifiedIntro()
+                self.maybeStartAuditIntro()
+                self.maybeStartFeatureNudge()
                 await Announcements.shared.refreshIfDue()
-                maybeShowAnnouncement()
+                self.maybeShowAnnouncement()
             }
             if mode == .idle, turns.isEmpty, let round = inFlightRounds.last {
                 // A round is still streaming in the background — the busy
@@ -9793,9 +9855,9 @@ final class NotchModel: ObservableObject {
             cancelLeaveWatch()
             return
         }
-        // Telegram setup sends the user to Telegram and back (BotFather, the
-        // token, Start); the steps must still be there on return.
-        if TelegramBridge.shared.holdsPanel || SignalBridge.shared.holdsPanel {
+        // Telegram / Signal setup and connector OAuth send the user to another
+        // app or browser and back; the panel stays open until they finish or cancel.
+        if TelegramBridge.shared.holdsPanel || SignalBridge.shared.holdsPanel || MCPConnectorAuth.shared.holdsPanel {
             cancelLeaveWatch()
             return
         }
@@ -9880,7 +9942,8 @@ final class NotchModel: ObservableObject {
         guard let watch = leaveWatch else { return }
         guard open else { leaveWatch = nil; return }
         if isAnswerPinned || isFloatingCardOpen || InfoPopoverGate.open
-            || TelegramBridge.shared.holdsPanel || SignalBridge.shared.holdsPanel {
+            || TelegramBridge.shared.holdsPanel || SignalBridge.shared.holdsPanel
+            || MCPConnectorAuth.shared.holdsPanel {
             cancelLeaveWatch(); return
         }
         if PermissionPromptGate.open {
@@ -10805,9 +10868,8 @@ final class NotchModel: ObservableObject {
     /// Files other than a project folder attach to the next ask
     /// (`handleFileDrop`). When off, a drop takes a single folder or PDFs.
     static let fileDropAskEnabled = true
-    /// The `askScreen` chord (`askAboutScreenArea`). Off for now: the chord is
-    /// not registered and Settings does not list it.
-    static let screenAreaAskEnabled = false
+    /// The in-panel screenshot shortcut (`AppShortcutAction.askScreen`).
+    static let screenAreaAskEnabled = true
 
     /// ⌘F search in the conversation on screen (`openThreadSearch`).
     static let threadSearchEnabled = true
@@ -11048,43 +11110,361 @@ final class NotchModel: ObservableObject {
         }
     }
 
-    // MARK: - Ask about an area of the screen
+    // MARK: - Screenshot capture
 
     private var screenAreaCaptureRunning = false
 
-    /// The `askScreen` chord: macOS's own area selection (`screencapture -i`),
-    /// then the area attaches to an ask on the idle prompt — as an image when
-    /// the model reads images, otherwise as the text in it, read on this Mac.
-    /// Esc during the selection cancels with nothing attached.
-    func askAboutScreenArea(on display: CGDirectDisplayID?) {
-        guard Self.screenAreaAskEnabled, !screenAreaCaptureRunning else { return }
+    /// Visible Notchi windows that should step out of the way while
+    /// `screencapture -i` runs so Notchi never appears in its own screenshot.
+    /// Excludes the system status bar icon window and transient `MenuCardPanel`
+    /// popups (which are dismissed upfront and must never be zombie-restored).
+    private static func windowsToHideForScreenshot() -> [NSWindow] {
+        NSApp.windows.filter { window in
+            guard window.isVisible else { return false }
+            let typeName = String(describing: type(of: window))
+            if typeName.contains("StatusBar") || typeName.contains("MenuCardPanel") { return false }
+            return window is NotchPanel || window.canBecomeKey || window is NSPanel
+        }
+    }
+
+    /// 1-based display index for `screencapture -D`, matching `CGGetActiveDisplayList`.
+    private static func screencaptureDisplayIndex(for display: CGDirectDisplayID?) -> Int? {
+        guard let display else { return nil }
+        var count: UInt32 = 0
+        guard CGGetActiveDisplayList(0, nil, &count) == .success, count > 0 else { return nil }
+        var displays = [CGDirectDisplayID](repeating: 0, count: Int(count))
+        guard CGGetActiveDisplayList(count, &displays, &count) == .success else { return nil }
+        guard let idx = displays.prefix(Int(count)).firstIndex(of: display) else { return nil }
+        return idx + 1
+    }
+
+    /// Runs `/usr/sbin/screencapture` with the given arguments into a temporary
+    /// PNG without touching the system pasteboard, temporarily hiding visible
+    /// Notchi windows and restoring them cleanly afterward (including on Esc cancel).
+    private func runScreenshotCapture(
+        arguments: [String],
+        hideVisibleWindows: Bool,
+        takesImages: Bool,
+        restoreKeyWindow: NSWindow? = nil,
+        completion: @escaping @MainActor (NSImage?, String?) -> Void
+    ) {
+        guard !screenAreaCaptureRunning else { return }
         screenAreaCaptureRunning = true
-        let takesImages = activeModelSupportsVision
+        isScreenCaptureOpen = true
+        isAttachMenuOpen = false
+        MenuCardWindow.dismissOpen()
+
+        let hiddenWindows = hideVisibleWindows ? Self.windowsToHideForScreenshot() : []
+        let previousKey = restoreKeyWindow ?? NSApp.keyWindow
+        for window in hiddenWindows {
+            window.orderOut(nil)
+        }
+
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("notchi-area-\(UUID().uuidString).png")
+        let delayNs: UInt64 = hiddenWindows.isEmpty ? 0 : 70_000_000
+
         Task.detached(priority: .userInitiated) {
+            if delayNs > 0 {
+                try? await Task.sleep(nanoseconds: delayNs)
+            }
             let process = Process()
             process.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
-            // Interactive area, no shutter sound, no window shadow.
-            process.arguments = ["-i", "-x", "-o", url.path]
+            process.arguments = arguments + [url.path]
             do {
                 try process.run()
                 process.waitUntilExit()
             } catch {}
             defer { try? FileManager.default.removeItem(at: url) }
+
             let image = NSImage(contentsOf: url)
-            let text = (image != nil && !takesImages) ? Self.recognizedText(at: url) : nil
-            await MainActor.run { [image, text] in
+            let validImage = (image?.isValid == true) ? image : nil
+            let text = (validImage != nil && !takesImages) ? Self.recognizedText(at: url) : nil
+
+            await MainActor.run { [validImage, text] in
                 self.screenAreaCaptureRunning = false
-                guard let image, image.isValid else { return }
+                self.isScreenCaptureOpen = false
+                for window in hiddenWindows {
+                    window.orderFrontRegardless()
+                }
+                if let previousKey, hiddenWindows.contains(where: { $0 === previousKey }) {
+                    NSApp.activate(ignoringOtherApps: true)
+                    previousKey.makeKeyAndOrderFront(nil)
+                }
+                completion(validImage, text)
+            }
+        }
+    }
+
+    /// Capture an area/window screenshot (`screencapture -i -x -o`) and attach
+    /// it to whichever composer is active right now.
+    func captureScreenshotForCurrentComposer(
+        on display: CGDirectDisplayID? = nil,
+        openIfClosed: Bool = false
+    ) {
+        captureIntoCurrentComposer(
+            arguments: ["-i", "-x", "-o"],
+            on: display,
+            openIfClosed: openIfClosed
+        )
+    }
+
+    /// Backing scale factor for a display id (e.g. 2.0 on Retina), falling back to 2.0.
+    private static func backingScaleFactor(for displayID: CGDirectDisplayID) -> CGFloat {
+        for screen in NSScreen.screens {
+            let id = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID
+            if id == displayID { return screen.backingScaleFactor }
+        }
+        return NSScreen.main?.backingScaleFactor ?? 2.0
+    }
+
+    /// Explains why Screen Recording is needed before opening System Settings.
+    /// Only after the user clicks "Open System Settings" do we open the privacy
+    /// pane and dock the floating drag-to-authorize helper beside it.
+    private func presentScreenRecordingPermissionAlert() {
+        isScreenCaptureOpen = true
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.messageText = L("screenshot.permission.title")
+        alert.informativeText = L("screenshot.permission.body")
+        alert.addButton(withTitle: L("screenshot.permission.openSettings"))
+        alert.addButton(withTitle: L("screenshot.permission.cancel"))
+        let response = alert.runModal()
+        isScreenCaptureOpen = false
+        if response == .alertFirstButtonReturn {
+            ScreenPermissionGuideController.shared.showScreenRecordingGuide()
+        }
+    }
+
+    /// Immediately capture the full screen on `captureDisplay` via
+    /// `ScreenCaptureKit` without area selection or Notchi's own windows, then
+    /// fly it into `targetDisplay` (notch or menu bar card) and attach it.
+    func captureFullScreenForCurrentComposer(
+        on captureDisplay: CGDirectDisplayID? = nil,
+        targetDisplay: CGDirectDisplayID? = nil,
+        openIfClosed: Bool = false
+    ) {
+        guard !screenAreaCaptureRunning else { return }
+
+        guard CGPreflightScreenCaptureAccess() else {
+            presentScreenRecordingPermissionAlert()
+            return
+        }
+
+        screenAreaCaptureRunning = true
+        isScreenCaptureOpen = true
+        isAttachMenuOpen = false
+        MenuCardWindow.dismissOpen()
+
+        let takesImages: Bool = if agentComposeActive {
+            true
+        } else if let engine = agentThreadContinuation {
+            engine.supportsImageInput
+        } else {
+            activeModelSupportsVision
+        }
+        let ownPID = ProcessInfo.processInfo.processIdentifier
+        let resolvedTarget = targetDisplay ?? captureDisplay
+
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                let content = try await SCShareableContent.excludingDesktopWindows(
+                    false,
+                    onScreenWindowsOnly: true
+                )
+                guard let scDisplay = content.displays.first(where: { $0.displayID == captureDisplay })
+                        ?? content.displays.first else {
+                    self.screenAreaCaptureRunning = false
+                    self.isScreenCaptureOpen = false
+                    return
+                }
+                let ownApps = content.applications.filter { $0.processID == ownPID }
+                let filter = SCContentFilter(
+                    display: scDisplay,
+                    excludingApplications: ownApps,
+                    exceptingWindows: []
+                )
+                let scale = Self.backingScaleFactor(for: scDisplay.displayID)
+                let config = SCStreamConfiguration()
+                config.width = max(1, Int((CGFloat(scDisplay.width) * scale).rounded()))
+                config.height = max(1, Int((CGFloat(scDisplay.height) * scale).rounded()))
+                config.showsCursor = false
+
+                let cgImage = try await SCScreenshotManager.captureImage(
+                    contentFilter: filter,
+                    configuration: config
+                )
+                let image = NSImage(
+                    cgImage: cgImage,
+                    size: NSSize(width: scDisplay.width, height: scDisplay.height)
+                )
+                let fallbackText: String? = takesImages ? nil : await Task.detached(priority: .userInitiated) {
+                    Self.recognizedText(in: cgImage)
+                }.value
+
+                self.screenAreaCaptureRunning = false
+                self.isScreenCaptureOpen = false
+                self.deliverCapturedScreenshot(
+                    image: image,
+                    fallbackText: fallbackText,
+                    style: .fullScreen,
+                    captureDisplay: scDisplay.displayID,
+                    on: resolvedTarget,
+                    openIfClosed: openIfClosed
+                )
+            } catch {
+                self.screenAreaCaptureRunning = false
+                self.isScreenCaptureOpen = false
+                self.presentScreenRecordingPermissionAlert()
+            }
+        }
+    }
+
+    /// Incremented whenever a flow (such as screenshot delivery) finishes and
+    /// needs the active panel to become key and place the caret in the input box.
+    @Published var inputFocusNonce: Int = 0
+
+    func requestInputFocus() {
+        inputFocusNonce &+= 1
+    }
+
+    private func deliverCapturedScreenshot(
+        image: NSImage,
+        fallbackText: String?,
+        style: ScreenshotFlyInAnimator.Style,
+        captureDisplay: CGDirectDisplayID? = nil,
+        on display: CGDirectDisplayID?,
+        openIfClosed: Bool
+    ) {
+        let target = ScreenshotFlyInAnimator.targetPoint(
+            for: display,
+            captureDisplay: captureDisplay,
+            activeDisplay: activeDisplay,
+            panelOpen: open
+        )
+        ScreenshotFlyInAnimator.play(
+            image: image,
+            style: style,
+            targetPoint: target.point,
+            on: target.screen
+        ) { [weak self] in
+            guard let self else { return }
+            if openIfClosed && !self.open {
                 self.openPanel(on: display)
-                if takesImages {
-                    self.attachDropped(images: [image], files: [])
-                } else if let text {
-                    self.attachDropped(images: [], files: [DroppedFile(name: L("screenArea.name"), text: text)])
+            }
+            if self.showSettings || self.showWhatsNew {
+                withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
+                    self.showSettings = false
+                    self.showWhatsNew = false
+                }
+            }
+            Haptics.alignment()
+            if self.agentDetailTaskID != nil || self.isSplitFollowUpActive {
+                self.pendingFollowUpScreenshot = (UUID(), image)
+            } else {
+                self.attachCapturedScreenshot(image: image, fallbackText: fallbackText)
+            }
+            self.requestInputFocus()
+        }
+    }
+
+    private func captureIntoCurrentComposer(
+        arguments: [String],
+        on display: CGDirectDisplayID?,
+        openIfClosed: Bool
+    ) {
+        let wasOpen = open
+        let takesImages: Bool = if agentComposeActive {
+            true
+        } else if let engine = agentThreadContinuation {
+            engine.supportsImageInput
+        } else {
+            activeModelSupportsVision
+        }
+
+        runScreenshotCapture(
+            arguments: arguments,
+            hideVisibleWindows: wasOpen || !Self.windowsToHideForScreenshot().isEmpty,
+            takesImages: takesImages
+        ) { [weak self] image, fallbackText in
+            guard let self, let image else { return }
+            self.deliverCapturedScreenshot(
+                image: image,
+                fallbackText: fallbackText,
+                style: .area,
+                on: display,
+                openIfClosed: openIfClosed
+            )
+        }
+    }
+
+    /// Appends a captured screenshot to the main composer (Agent or Ask) while
+    /// preserving any existing draft text and attachments.
+    func attachCapturedScreenshot(image: NSImage, fallbackText: String?) {
+        collapseHistory()
+        noteUserTyping()
+        withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
+            if agentComposeActive {
+                let limit = min(Self.composeImageLimit, Self.agentImageLimit)
+                guard agentComposeImages.count < limit else { return }
+                agentComposeImages.append(image)
+            } else {
+                let supportsImage = agentThreadContinuation?.supportsImageInput ?? activeModelSupportsVision
+                manualPanelOverride = .chat
+                if supportsImage {
+                    guard askComposeImages.count < Self.composeImageLimit else { return }
+                    askComposeImages.append(image)
+                } else if let fallbackText {
+                    droppedFiles.append(DroppedFile(name: L("screenArea.name"), text: fallbackText))
                 }
             }
         }
+    }
+
+    /// Screenshot capture for a detached thread window's follow-up composer.
+    func captureScreenshotForDetachedWindow(
+        window: NSWindow?,
+        takesImages: Bool,
+        done: @escaping ([NSImage], [DroppedFile]) -> Void
+    ) {
+        runScreenshotCapture(
+            arguments: ["-i", "-x", "-o"],
+            hideVisibleWindows: true,
+            takesImages: takesImages,
+            restoreKeyWindow: window
+        ) { [weak self] image, fallbackText in
+            guard let self, let image else { return }
+            let target = ScreenshotFlyInAnimator.targetPoint(
+                for: nil,
+                activeDisplay: self.activeDisplay,
+                panelOpen: false,
+                detachedWindow: window
+            )
+            ScreenshotFlyInAnimator.play(
+                image: image,
+                style: .area,
+                targetPoint: target.point,
+                on: target.screen
+            ) {
+                Haptics.alignment()
+                if takesImages {
+                    done([image], [])
+                } else if let fallbackText {
+                    done([], [DroppedFile(name: L("screenArea.name"), text: fallbackText)])
+                }
+                if let window {
+                    NSApp.activate(ignoringOtherApps: true)
+                    window.makeKeyAndOrderFront(nil)
+                }
+            }
+        }
+    }
+
+    /// Legacy entry point kept as a thin forwarder.
+    func askAboutScreenArea(on display: CGDirectDisplayID?) {
+        captureScreenshotForCurrentComposer(on: display, openIfClosed: true)
     }
 
     /// The text in an image, read with the Vision framework on this Mac.
@@ -16457,6 +16837,52 @@ enum MessageTone {
 @MainActor
 final class ThreadPullLive: ObservableObject {
     @Published var progress: CGFloat = 0
+}
+
+/// VSync-aligned frame driver for `NotchModel.settleThreadPull`. Replaces a
+/// free-running 1/120s `Timer` so spring frames align with ProMotion's 120Hz
+/// refresh cycle without phase judder.
+@MainActor
+final class ThreadPullDisplayLink: NSObject {
+    private var link: CADisplayLink?
+    private var fallbackTimer: Timer?
+    private var onFrame: ((CFTimeInterval) -> Bool)?
+
+    init(screen: NSScreen?, onFrame: @escaping (CFTimeInterval) -> Bool) {
+        self.onFrame = onFrame
+        super.init()
+        if let screen {
+            let link = screen.displayLink(target: self, selector: #selector(step(_:)))
+            link.preferredFrameRateRange = CAFrameRateRange(minimum: 80, maximum: 120, preferred: 120)
+            link.add(to: .main, forMode: .common)
+            self.link = link
+        } else {
+            let timer = Timer(timeInterval: 1.0 / 120.0, repeats: true) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    if self.onFrame?(CACurrentMediaTime()) != true {
+                        self.invalidate()
+                    }
+                }
+            }
+            RunLoop.main.add(timer, forMode: .common)
+            self.fallbackTimer = timer
+        }
+    }
+
+    @objc private func step(_ link: CADisplayLink) {
+        if onFrame?(link.timestamp) != true {
+            invalidate()
+        }
+    }
+
+    func invalidate() {
+        link?.invalidate()
+        link = nil
+        fallbackTimer?.invalidate()
+        fallbackTimer = nil
+        onFrame = nil
+    }
 }
 
 /// The ⌘F search over the conversation on screen (`NotchModel.threadSearch`).

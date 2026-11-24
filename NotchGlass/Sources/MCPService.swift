@@ -132,14 +132,17 @@ enum MCPConfig {
     static func load() -> Loaded {
         var out = Loaded()
         var taken = Set<String>()
-        for connector in MCPConnector.all where MCPTokenStore.load(connector.id) != nil {
+        for connector in MCPConnector.all where connector.isConnected {
             taken.insert(connector.id)
             var spec = MCPServerSpec(name: connector.id)
-            spec.url = connector.url
+            spec.url = connector.composio ? ComposioGateway.mcpURL(for: connector.id) : connector.url
             spec.oauthConnector = connector.id
+            if connector.composio, let saved = ComposioConnectorStore.load(connector.id) {
+                spec.headers["X-Composio-Session"] = saved.sessionID
+            }
             out.specs.append(spec)
             out.sources[connector.id] = connector.title
-            out.raw[connector.id] = ["url": connector.url.absoluteString]
+            out.raw[connector.id] = ["url": (spec.url ?? connector.url).absoluteString]
         }
         guard userServersEnabled else { return out }
         if let data = try? Data(contentsOf: fileURL) {
@@ -589,6 +592,7 @@ final class MCPHTTPTransport: MCPTransport, @unchecked Sendable {
     private let lock = NSLock()
     private var nextID = 1
     private var sessionID: String?
+    private var composioSessionID: String?
     private var protocolVersion: String?
 
     init(spec: MCPServerSpec) throws {
@@ -596,6 +600,7 @@ final class MCPHTTPTransport: MCPTransport, @unchecked Sendable {
         self.url = url
         headers = spec.headers
         connector = spec.oauthConnector
+        composioSessionID = spec.headers["X-Composio-Session"]
     }
 
     func setProtocolVersion(_ version: String) {
@@ -659,14 +664,20 @@ final class MCPHTTPTransport: MCPTransport, @unchecked Sendable {
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.setValue("application/json, text/event-stream", forHTTPHeaderField: "Accept")
         lock.lock()
-        let session = sessionID, version = protocolVersion
+        let session = sessionID, version = protocolVersion, composioSession = composioSessionID
         lock.unlock()
         if let session { req.setValue(session, forHTTPHeaderField: "Mcp-Session-Id") }
         if let version { req.setValue(version, forHTTPHeaderField: "MCP-Protocol-Version") }
         for (key, value) in headers { req.setValue(value, forHTTPHeaderField: key) }
+        if let composioSession { req.setValue(composioSession, forHTTPHeaderField: "X-Composio-Session") }
         if let connector {
-            let token = try await MCPTokens.shared.accessToken(connector, forceRefresh: refresh)
-            req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+            if MCPConnector.find(connector)?.composio == true {
+                let token = try await ComposioGateway.ensureToken()
+                req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+            } else {
+                let token = try await MCPTokens.shared.accessToken(connector, forceRefresh: refresh)
+                req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+            }
         }
         req.httpBody = try JSONSerialization.data(withJSONObject: message)
 
@@ -674,6 +685,14 @@ final class MCPHTTPTransport: MCPTransport, @unchecked Sendable {
         guard let http = response as? HTTPURLResponse else { throw MCPError("Not an HTTP response.") }
         if let assigned = http.value(forHTTPHeaderField: "Mcp-Session-Id") {
             lock.lock(); sessionID = assigned; lock.unlock()
+        }
+        if let newComposio = http.value(forHTTPHeaderField: "X-Composio-Session"),
+           !newComposio.isEmpty, let connector {
+            lock.lock(); composioSessionID = newComposio; lock.unlock()
+            if var saved = ComposioConnectorStore.load(connector), saved.sessionID != newComposio {
+                saved.sessionID = newComposio
+                ComposioConnectorStore.save(saved, for: connector)
+            }
         }
         guard (200..<300).contains(http.statusCode) else {
             var body = Data()
@@ -1303,11 +1322,22 @@ struct MCPConnector: Identifiable, Sendable {
     /// Set for Google: its authorization server has no registration, so
     /// Notchi signs in as the desktop client made for it in Google Cloud.
     var client: StaticClient?
+    /// True for a connector backed by a local mounted folder (e.g. Google Drive
+    /// for Desktop in `~/Library/CloudStorage`) instead of OAuth.
+    var localFolder: Bool
+    /// True for a connector brokered by Notchi's gateway + Composio Tool Router
+    /// (managed OAuth + Streamable HTTP MCP proxy).
+    var composio: Bool
     /// The tools `load_tools(app:)` adds, by the server's names; the rest load
     /// by name. Empty: all of them when there are ten or fewer.
     var defaultTools: [String]
     /// The group Settings lists it under.
     var category: Category
+
+    var isConnected: Bool {
+        if composio { return ComposioConnectorStore.load(id) != nil }
+        return localFolder ? LocalDriveStore.path(for: id) != nil : MCPTokenStore.load(id) != nil
+    }
 
     enum Category: String, CaseIterable {
         case docs, mail, projects, developer
@@ -1351,14 +1381,16 @@ struct MCPConnector: Identifiable, Sendable {
         token: URL(string: "https://login.microsoftonline.com/common/oauth2/v2.0/token")!)
 
     init(_ id: String, _ title: String, _ url: String, scopes: [String]? = nil,
-         githubClientID: String? = nil, client: StaticClient? = nil, defaultTools: [String] = [],
-         category: Category = .developer) {
+         githubClientID: String? = nil, client: StaticClient? = nil, localFolder: Bool = false,
+         composio: Bool = false, defaultTools: [String] = [], category: Category = .developer) {
         self.id = id
         self.title = title
         self.url = URL(string: url)!
         self.scopes = scopes
         self.githubClientID = githubClientID
         self.client = client
+        self.localFolder = localFolder
+        self.composio = composio
         self.defaultTools = defaultTools
         self.category = category
     }
@@ -1377,29 +1409,53 @@ struct MCPConnector: Identifiable, Sendable {
         }
     }
 
+    private static func composioConnector(_ id: String, _ title: String, category: Category) -> MCPConnector {
+        MCPConnector(id, title, "https://api.notch.website/v1/connectors/\(id)/mcp",
+                     composio: true, category: category)
+    }
+
     private static let listed: [MCPConnector] = [
+        // Docs & files
         MCPConnector("notion", "Notion", "https://mcp.notion.com/mcp",
                      defaultTools: ["notion-search", "notion-fetch", "notion-create-pages", "notion-update-page"], category: .docs),
+        composioConnector("googledrive", "Google Drive", category: .docs),
+        composioConnector("googledocs", "Google Docs", category: .docs),
+        composioConnector("googlesheets", "Google Sheets", category: .docs),
+        MCPConnector("dropbox", "Dropbox", "https://mcp.dropbox.com/mcp", category: .docs),
+        composioConnector("one_drive", "OneDrive", category: .docs),
+        composioConnector("airtable", "Airtable", category: .docs),
+        composioConnector("confluence", "Confluence", category: .docs),
+        MCPConnector("granola", "Granola", "https://mcp.granola.ai/mcp", category: .docs),
+
+        // Mail & calendar
+        composioConnector("gmail", "Gmail", category: .mail),
+        composioConnector("googlecalendar", "Google Calendar", category: .mail),
+        composioConnector("outlook", "Outlook", category: .mail),
+        composioConnector("slack", "Slack", category: .mail),
+        composioConnector("discord", "Discord", category: .mail),
+        composioConnector("microsoft_teams", "Microsoft Teams", category: .mail),
+        composioConnector("calendly", "Calendly", category: .mail),
+
+        // Projects
         MCPConnector("linear", "Linear", "https://mcp.linear.app/mcp",
                      defaultTools: ["list_issues", "get_issue", "create_issue", "update_issue",
                                     "list_projects", "list_teams", "create_comment"], category: .projects),
-        // Outlook has no MCP server for personal accounts; OutlookServer
-        // answers in Notchi, over Microsoft Graph.
-        MCPConnector("outlook", "Outlook", "https://graph.microsoft.com/v1.0",
-                     scopes: ["offline_access", "User.Read", "Mail.ReadWrite"],
-                     client: microsoft, category: .mail),
-        MCPConnector("gmail", "Gmail", "https://gmailmcp.googleapis.com/mcp/v1",
-                     scopes: ["https://www.googleapis.com/auth/gmail.modify"],
-                     client: google, category: .mail),
-        MCPConnector("googlecalendar", "Google Calendar", "https://calendarmcp.googleapis.com/mcp/v1",
-                     scopes: ["https://www.googleapis.com/auth/calendar"],
-                     client: google, category: .mail),
-        MCPConnector("googledrive", "Google Drive", "https://drivemcp.googleapis.com/mcp/v1",
-                     scopes: ["https://www.googleapis.com/auth/drive"],
-                     client: google, category: .docs),
-        MCPConnector("dropbox", "Dropbox", "https://mcp.dropbox.com/mcp", category: .docs),
-        MCPConnector("granola", "Granola", "https://mcp.granola.ai/mcp", category: .docs),
+        MCPConnector("github", "GitHub", "https://api.githubcopilot.com/mcp/",
+                     scopes: ["repo", "read:org", "read:user", "user:email", "notifications", "gist", "read:project"],
+                     githubClientID: "Ov23lixrOXQWEKxIYhBX",
+                     defaultTools: ["get_me", "search_repositories", "get_file_contents", "search_code",
+                                    "search_issues", "issue_read", "issue_write", "search_pull_requests",
+                                    "pull_request_read", "list_issues"], category: .projects),
+        composioConnector("figma", "Figma", category: .projects),
+        composioConnector("jira", "Jira", category: .projects),
+        composioConnector("asana", "Asana", category: .projects),
+        composioConnector("clickup", "ClickUp", category: .projects),
+        composioConnector("trello", "Trello", category: .projects),
+        composioConnector("monday", "Monday", category: .projects),
+        composioConnector("hubspot", "HubSpot", category: .projects),
         MCPConnector("miro", "Miro", "https://mcp.miro.com/", category: .projects),
+
+        // Developer
         MCPConnector("vercel", "Vercel", "https://mcp.vercel.com"),
         MCPConnector("cloudflare", "Cloudflare", "https://mcp.cloudflare.com/mcp"),
         MCPConnector("supabase", "Supabase", "https://mcp.supabase.com/mcp",
@@ -1409,12 +1465,8 @@ struct MCPConnector: Identifiable, Sendable {
         MCPConnector("netlify", "Netlify", "https://netlify-mcp.netlify.app/mcp",
                      scopes: ["offline_access", "read", "write"]),
         MCPConnector("huggingface", "Hugging Face", "https://huggingface.co/mcp"),
-        MCPConnector("github", "GitHub", "https://api.githubcopilot.com/mcp/",
-                     scopes: ["repo", "read:org", "read:user", "user:email", "notifications", "gist", "read:project"],
-                     githubClientID: "Ov23lixrOXQWEKxIYhBX",
-                     defaultTools: ["get_me", "search_repositories", "get_file_contents", "search_code",
-                                    "search_issues", "issue_read", "issue_write", "search_pull_requests",
-                                    "pull_request_read", "list_issues"], category: .projects),
+        composioConnector("sentry", "Sentry", category: .developer),
+        composioConnector("bitbucket", "Bitbucket", category: .developer),
     ]
 
     static func find(_ id: String?) -> MCPConnector? {
@@ -1452,6 +1504,94 @@ enum MCPTokenStore {
 
     static func delete(_ id: String) {
         UserDefaults.standard.removeObject(forKey: prefix + id)
+    }
+}
+
+/// Persisted Composio Tool Router session + connected account id per connector.
+struct ComposioConnection: Codable, Sendable {
+    var sessionID: String
+    var connectedAccountID: String?
+}
+
+enum ComposioConnectorStore {
+    private static let prefix = "mcp_composio."
+
+    static func load(_ id: String) -> ComposioConnection? {
+        guard let data = UserDefaults.standard.data(forKey: prefix + id) else { return nil }
+        return try? JSONDecoder().decode(ComposioConnection.self, from: data)
+    }
+
+    static func save(_ conn: ComposioConnection, for id: String) {
+        guard let data = try? JSONEncoder().encode(conn) else { return }
+        UserDefaults.standard.set(data, forKey: prefix + id)
+    }
+
+    static func delete(_ id: String) {
+        UserDefaults.standard.removeObject(forKey: prefix + id)
+    }
+}
+
+/// Talks to Notchi's gateway `/v1/connectors/:id/*` endpoints using the
+/// install's anonymous bearer token (`NoNoAccount`).
+enum ComposioGateway {
+    static var baseURL: String {
+        let endpoint = Provider.nonoEndpoint
+        if let range = endpoint.range(of: "/chat/completions", options: .backwards) {
+            return String(endpoint[endpoint.startIndex..<range.lowerBound])
+        }
+        return "https://api.notch.website/v1"
+    }
+
+    static func mcpURL(for connectorID: String) -> URL {
+        URL(string: "\(baseURL)/connectors/\(connectorID)/mcp")!
+    }
+
+    static func ensureToken() async throws -> String {
+        let existing = await MainActor.run { NoNoAccount.shared.token }
+        if !existing.isEmpty { return existing }
+        await NoNoAccount.shared.register()
+        let token = await MainActor.run { NoNoAccount.shared.token }
+        guard !token.isEmpty else {
+            throw MCPError("Could not reach api.notch.website to register this Mac.")
+        }
+        return token
+    }
+
+    static func connect(connectorID: String, callbackURL: String) async throws -> (sessionID: String, redirectURL: URL, connectedAccountID: String?) {
+        let token = try await ensureToken()
+        guard let url = URL(string: "\(baseURL)/connectors/\(connectorID)/connect") else {
+            throw MCPError("Invalid connector gateway address.")
+        }
+        var req = URLRequest(url: url, timeoutInterval: 30)
+        req.httpMethod = "POST"
+        req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.setValue("application/json", forHTTPHeaderField: "Accept")
+        req.httpBody = try JSONSerialization.data(withJSONObject: ["callback_url": callbackURL])
+        let (data, response) = try await ProxyConfig.urlSession.data(for: req)
+        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
+        guard (200..<300).contains(status),
+              let sessionID = json["session_id"] as? String,
+              let rawRedirect = json["redirect_url"] as? String,
+              let redirectURL = URL(string: rawRedirect) else {
+            let reason = ((json["error"] as? [String: Any])?["message"] as? String) ?? "HTTP \(status)"
+            throw MCPError("Could not start sign-in (\(reason)).")
+        }
+        return (sessionID, redirectURL, json["connected_account_id"] as? String)
+    }
+
+    static func disconnect(connectorID: String, connectedAccountID: String?) async {
+        guard let token = try? await ensureToken(),
+              let url = URL(string: "\(baseURL)/connectors/\(connectorID)/disconnect") else { return }
+        var req = URLRequest(url: url, timeoutInterval: 15)
+        req.httpMethod = "POST"
+        req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        var body: [String: Any] = [:]
+        if let connectedAccountID { body["connected_account_id"] = connectedAccountID }
+        req.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        _ = try? await ProxyConfig.urlSession.data(for: req)
     }
 }
 
@@ -1653,14 +1793,21 @@ final class MCPConnectorAuth: ObservableObject {
         let state: String
     }
 
+    private struct PendingComposio {
+        let connector: MCPConnector
+        let sessionID: String
+        let connectedAccountID: String?
+    }
+
     private var listener: NWListener?
     private var pending: Pending?
+    private var pendingComposio: PendingComposio?
     private var current: String?
     private var timeoutTask: Task<Void, Never>?
     private static let timeout: TimeInterval = 300
 
     private init() {
-        connected = Set(MCPConnector.all.map(\.id).filter { MCPTokenStore.load($0) != nil })
+        connected = Set(MCPConnector.all.filter(\.isConnected).map(\.id))
     }
 
     func phase(_ id: String) -> Phase { phases[id] ?? .idle }
@@ -1672,13 +1819,30 @@ final class MCPConnectorAuth: ObservableObject {
         }
     }
 
+    /// True while a connector sign-in is waiting for the user to finish in the
+    /// browser; keeps the notch panel open while they switch to the browser and back.
+    var holdsPanel: Bool {
+        current != nil || phases.values.contains {
+            switch $0 {
+            case .waiting, .code: return true
+            default: return false
+            }
+        }
+    }
+
     func connect(_ connector: MCPConnector) {
         cancel()
+        if connector.localFolder {
+            connectLocalFolder(connector)
+            return
+        }
         current = connector.id
         phases[connector.id] = .waiting
         Task {
             do {
-                if let clientID = connector.githubClientID {
+                if connector.composio {
+                    try await beginComposio(connector)
+                } else if let clientID = connector.githubClientID {
                     try await beginDevice(connector, clientID: clientID)
                 } else {
                     try await begin(connector)
@@ -1690,18 +1854,76 @@ final class MCPConnectorAuth: ObservableObject {
         }
     }
 
+    private func beginComposio(_ connector: MCPConnector) async throws {
+        let port = try await listen()
+        let redirect = "http://127.0.0.1:\(port)/callback"
+        let started = try await ComposioGateway.connect(connectorID: connector.id, callbackURL: redirect)
+        guard current == connector.id else { return }
+        pendingComposio = PendingComposio(
+            connector: connector,
+            sessionID: started.sessionID,
+            connectedAccountID: started.connectedAccountID
+        )
+        NSWorkspace.shared.open(started.redirectURL)
+        timeoutTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(Self.timeout * 1_000_000_000))
+            guard let self, !Task.isCancelled, self.current == connector.id else { return }
+            self.cancel()
+        }
+    }
+
+    private func connectLocalFolder(_ connector: MCPConnector) {
+        let discovered = LocalDriveStore.discoverGoogleDrive()
+        if discovered.count == 1, let root = discovered.first {
+            LocalDriveStore.save(root, for: connector.id)
+            connected.insert(connector.id)
+            phases[connector.id] = .idle
+            MCPHub.shared.reload()
+            return
+        }
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.canCreateDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.message = "Choose your Google Drive folder (usually in ~/Library/CloudStorage)."
+        let cloudStorage = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/CloudStorage", isDirectory: true)
+        if FileManager.default.fileExists(atPath: cloudStorage.path) {
+            panel.directoryURL = cloudStorage
+        } else {
+            panel.directoryURL = FileManager.default.homeDirectoryForCurrentUser
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        guard panel.runModal() == .OK, let url = panel.url else {
+            phases[connector.id] = .idle
+            return
+        }
+        LocalDriveStore.save(url, for: connector.id)
+        connected.insert(connector.id)
+        phases[connector.id] = .idle
+        MCPHub.shared.reload()
+    }
+
     func cancel() {
         teardown()
         if let id = current, isWaiting(id) { phases[id] = .idle }
         current = nil
         pending = nil
+        pendingComposio = nil
     }
 
     func disconnect(_ connector: MCPConnector) {
+        let composioConn = ComposioConnectorStore.load(connector.id)
         MCPTokenStore.delete(connector.id)
+        LocalDriveStore.delete(connector.id)
+        ComposioConnectorStore.delete(connector.id)
         connected.remove(connector.id)
         phases[connector.id] = .idle
         MCPHub.shared.reload()
+        if connector.composio, let accountID = composioConn?.connectedAccountID {
+            Task { await ComposioGateway.disconnect(connectorID: connector.id, connectedAccountID: accountID) }
+        }
     }
 
     private func begin(_ connector: MCPConnector) async throws {
@@ -1874,11 +2096,44 @@ final class MCPConnectorAuth: ObservableObject {
     private func route(_ conn: NWConnection, head: String) {
         let parts = head.components(separatedBy: " ")
         guard parts.count >= 2, let target = URLComponents(string: parts[1]),
-              target.path == "/callback", let pending else {
+              target.path == "/callback" else {
             respond(conn, status: "404 Not Found", body: "")
             return
         }
         let query = { (name: String) in target.queryItems?.first { $0.name == name }?.value }
+        if let composio = pendingComposio {
+            let title = composio.connector.title
+            let status = query("status")?.lowercased()
+            let error = query("error")
+            if let error, !error.isEmpty {
+                respond(conn, status: "200 OK", body: Self.page("\(title) was not connected. You can close this tab."))
+                fail("Sign-in failed: \(error)")
+                return
+            }
+            if status == "failed" || status == "cancelled" || status == "canceled" {
+                respond(conn, status: "200 OK", body: Self.page("\(title) was not connected. You can close this tab."))
+                fail("The sign-in was cancelled.")
+                return
+            }
+            respond(conn, status: "200 OK", body: Self.page("\(title) is connected. You can close this tab and go back to Notchi."))
+            teardown()
+            let accountID = query("connected_account_id") ?? composio.connectedAccountID
+            let id = composio.connector.id
+            ComposioConnectorStore.save(
+                ComposioConnection(sessionID: composio.sessionID, connectedAccountID: accountID),
+                for: id
+            )
+            connected.insert(id)
+            phases[id] = .idle
+            current = nil
+            pendingComposio = nil
+            MCPHub.shared.reload()
+            return
+        }
+        guard let pending else {
+            respond(conn, status: "404 Not Found", body: "")
+            return
+        }
         guard query("state") == pending.state else {
             respond(conn, status: "400 Bad Request", body: "")
             return
@@ -1926,6 +2181,7 @@ final class MCPConnectorAuth: ObservableObject {
         if let id = current { phases[id] = .failed(message) }
         current = nil
         pending = nil
+        pendingComposio = nil
     }
 
     private func teardown() {

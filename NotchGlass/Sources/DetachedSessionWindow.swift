@@ -2088,6 +2088,13 @@ final class DetachedSessionWindowController: NSObject, NSWindowDelegate {
                 return true
             }
         }
+        if AppShortcutStore.matches(.askScreen, event: event) {
+            NotificationCenter.default.post(
+                name: Notification.Name("detachedWindowTakeScreenshot"),
+                object: state
+            )
+            return true
+        }
         // ⌘P floats/unfloats the window — the keyboard twin of the header's pin
         // chip. Unguarded by the field editor: ⌘P is not a text-editing key, and
         // pinning mid-follow-up is exactly when you want it.
@@ -4880,10 +4887,31 @@ struct DetachedThreadView: View {
                 card: {
                     AnyView(AttachMenuCard(
                         filesTitle: L("attach.files"),
+                        onScreenshot: { takeFollowUpScreenshot() },
                         onFiles: { pickFollowUpAttachments(folder: false) },
                         onFolder: { pickFollowUpAttachments(folder: true) })
                         .menuCardBackground())
                 }))
+            .onReceive(NotificationCenter.default.publisher(
+                for: Notification.Name("detachedWindowTakeScreenshot")
+            )) { note in
+                guard (note.object as AnyObject?) === store else { return }
+                takeFollowUpScreenshot()
+            }
+    }
+
+    private func takeFollowUpScreenshot() {
+        attachMenuOpen = false
+        model?.captureScreenshotForDetachedWindow(
+            window: NSApp.keyWindow,
+            takesImages: store.followUpSupportsImages
+        ) { images, files in
+            withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
+                let room = max(0, NotchModel.composeImageLimit - followUpImages.count)
+                followUpImages.append(contentsOf: images.prefix(room))
+                followUpFiles.append(contentsOf: files)
+            }
+        }
     }
 
     private func pickFollowUpAttachments(folder: Bool) {

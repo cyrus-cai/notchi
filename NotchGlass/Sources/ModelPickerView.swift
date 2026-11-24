@@ -2962,6 +2962,12 @@ struct AskRecentModelPickerView: View {
                     if let first = allRows.first { proxy.scrollTo(first, anchor: .top) }
                 }
             }
+            if showsNoCreditFooter {
+                ModelNoCreditFooter {
+                    Self.openAddCredit()
+                    onDone()
+                }
+            }
         }
         .padding(MenuCard.cardPad)
         .frame(width: cardWidth, height: cardHeight, alignment: .topLeading)
@@ -2985,7 +2991,6 @@ struct AskRecentModelPickerView: View {
         return MenuCardRow(
             title: ModelRatings.prettyName(for: r.id, provider: r.provider),
             accessory: Self.accessory(for: r),
-            lowBalance: Self.lowBalance(r),
             tag: Self.tag(for: r),
             tagTint: Self.showsNewTag(r) ? Tokens.accent : Tokens.sale,
             brandTitle: Self.isHouse(r),
@@ -3055,6 +3060,10 @@ struct AskRecentModelPickerView: View {
                             if Self.showsNewTag(r) { ModelNewMarks.markSeen(r.id) }
                             arm(r)
                             ModelDetailPanel.shared.hide()
+                            onDone()
+                        },
+                        onAddCredit: {
+                            Self.openAddCredit()
                             onDone()
                         })
                         .menuCardBackground())
@@ -3154,10 +3163,29 @@ struct AskRecentModelPickerView: View {
     }
 
 
-    /// The card's height: the search row and the list window.
+    /// True when the visible list holds paid Notchi models while the balance
+    /// is empty — surfaces the single bottom NO CREDIT + Add footer instead of
+    /// tagging every row.
+    private var showsNoCreditFooter: Bool {
+        allRows.contains(where: Self.lowBalance)
+    }
+
+    static func openAddCredit() {
+        ModelDetailPanel.shared.hide()
+        MenuCardWindow.dismissOpen()
+        NotificationCenter.default.post(
+            name: .openProviderSettingsRequested,
+            object: nil,
+            userInfo: ["provider": Provider.nono.rawValue, "addCredit": true]
+        )
+    }
+
+    /// The card's height: the search row, the list window, and the optional
+    /// no-credit footer.
     private var cardHeight: CGFloat {
         var h = listHeight + MenuCard.cardPad * 2
         h += Self.rowHeight                                 // search row
+        if showsNoCreditFooter { h += ModelNoCreditFooter.height }
         return h
     }
 
@@ -3228,6 +3256,7 @@ private struct AskModelSubmenuCard: View {
     let rows: [Row]
     let selected: Row
     let onPick: (Row) -> Void
+    let onAddCredit: () -> Void
 
     @ObservedObject private var nono = NoNoAccount.shared
 
@@ -3245,6 +3274,10 @@ private struct AskModelSubmenuCard: View {
         CGFloat(rows.count) * Self.rowStride - MenuCard.rowSpacing
     }
 
+    private var showsNoCreditFooter: Bool {
+        rows.contains(where: AskRecentModelPickerView.lowBalance)
+    }
+
     /// Rows past the tenth sit below the fold. Without the fade the list reads
     /// as complete and those models look missing.
     @State private var scrolledOffTop = false
@@ -3252,24 +3285,29 @@ private struct AskModelSubmenuCard: View {
 
     var body: some View {
         let overflowing = rows.count > Self.listRows
-        ScrollViewReader { proxy in
-            ScrollView(showsIndicators: false) {
-                LazyVStack(alignment: .leading, spacing: MenuCard.rowSpacing) {
-                    ForEach(rows, id: \.self) { r in row(r).id(r) }
+        VStack(alignment: .leading, spacing: 0) {
+            ScrollViewReader { proxy in
+                ScrollView(showsIndicators: false) {
+                    LazyVStack(alignment: .leading, spacing: MenuCard.rowSpacing) {
+                        ForEach(rows, id: \.self) { r in row(r).id(r) }
+                    }
+                    .onScrollOffsetChange { offset in
+                        let top = offset > 0.5
+                        if top != scrolledOffTop { scrolledOffTop = top }
+                        let bottom = offset < contentHeight - listHeight - 0.5
+                        if bottom != scrolledOffBottom { scrolledOffBottom = bottom }
+                    }
                 }
-                .onScrollOffsetChange { offset in
-                    let top = offset > 0.5
-                    if top != scrolledOffTop { scrolledOffTop = top }
-                    let bottom = offset < contentHeight - listHeight - 0.5
-                    if bottom != scrolledOffBottom { scrolledOffBottom = bottom }
+                .scrollEdgeFade(top: overflowing && scrolledOffTop,
+                                bottom: overflowing && scrolledOffBottom,
+                                fade: 18)
+                .frame(height: listHeight)
+                .onAppear {
+                    if rows.contains(selected) { proxy.scrollTo(selected, anchor: .center) }
                 }
             }
-            .scrollEdgeFade(top: overflowing && scrolledOffTop,
-                            bottom: overflowing && scrolledOffBottom,
-                            fade: 18)
-            .frame(height: listHeight)
-            .onAppear {
-                if rows.contains(selected) { proxy.scrollTo(selected, anchor: .center) }
+            if showsNoCreditFooter {
+                ModelNoCreditFooter(onAdd: onAddCredit)
             }
         }
         .padding(MenuCard.cardPad)
@@ -3282,7 +3320,6 @@ private struct AskModelSubmenuCard: View {
         return MenuCardRow(
             title: ModelRatings.prettyName(for: r.id, provider: r.provider),
             accessory: V.accessory(for: r),
-            lowBalance: V.lowBalance(r),
             tag: V.tag(for: r),
             tagTint: V.showsNewTag(r) ? Tokens.accent : Tokens.sale,
             brandTitle: V.isHouse(r),
@@ -3296,6 +3333,48 @@ private struct AskModelSubmenuCard: View {
                 guard !unavailable else { return }
                 onPick(r)
             }
+    }
+}
+
+/// Footer shown under a Notchi model list when the balance is empty: one
+/// `LowBalanceTag` for the whole list and an Add button that jumps to the
+/// Balances top-up flow, instead of repeating NO CREDIT on every row.
+private struct ModelNoCreditFooter: View {
+    let onAdd: () -> Void
+    @State private var hovering = false
+
+    /// Divider + vertical rule gaps + row height, for cards sized by arithmetic.
+    static var height: CGFloat {
+        0.5 + MenuCard.pickerRuleGap * 2 + MenuCard.pickerRowHeight + 2
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Rectangle().fill(Tokens.ink.opacity(0.08))
+                .frame(height: 0.5)
+                .padding(.horizontal, MenuCard.pickerRowPad)
+                .padding(.vertical, MenuCard.pickerRuleGap)
+
+            HStack(spacing: 6) {
+                LowBalanceTag()
+                Spacer(minLength: 0)
+                Button(action: onAdd) {
+                    Text(L("nono.addShort"))
+                        .font(.sf(Tokens.TypeSize.meta, weight: .medium))
+                        .foregroundStyle(Tokens.text1)
+                        .fixedSize()
+                        .padding(.horizontal, 9)
+                        .frame(height: 20)
+                        .prominentSurface(in: Capsule(style: .continuous), lit: hovering)
+                        .contentShape(Capsule(style: .continuous))
+                }
+                .buttonStyle(GlassPressStyle())
+                .onHover { hovering = $0 }
+                .accessibilityLabel(L("nono.add"))
+            }
+            .padding(.horizontal, MenuCard.pickerRowPad)
+            .frame(height: MenuCard.pickerRowHeight + 2)
+        }
     }
 }
 

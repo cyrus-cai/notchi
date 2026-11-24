@@ -103,13 +103,16 @@ enum ShortcutRecording {
     }
 }
 
-/// Which physical key of a modifier pair a double-tap listens to.
+/// Which physical key of a modifier pair a modifier trigger listens to.
 enum ModifierSide: Int {
     case either = 0
     case left = 1
     case right = 2
+    /// Both left and right physical keys pressed together (e.g. Left ⌥ + Right ⌥).
+    case both = 3
 
     /// (this side's bits, the other side's bits) in `NSEvent.modifierFlags`.
+    /// For `.both`, returns `(leftBits, rightBits)`.
     func deviceMasks(forCarbon carbon: UInt32) -> (UInt, UInt) {
         let pair: (left: UInt, right: UInt)
         switch carbon {
@@ -123,6 +126,7 @@ enum ModifierSide: Int {
         case .either: return (0, 0)
         case .left:   return (pair.left, pair.right)
         case .right:  return (pair.right, pair.left)
+        case .both:   return (pair.left, pair.right)
         }
     }
 }
@@ -257,6 +261,78 @@ final class DoubleTapModifierMonitor {
         case UInt32(controlKey): return .control
         case UInt32(shiftKey):   return .shift
         default:                 return []
+        }
+    }
+}
+
+/// Fires `action` once when BOTH physical keys of a modifier pair (e.g. Left ⌥
+/// + Right ⌥) are pressed simultaneously with no other modifiers or keys held.
+/// Re-arms as soon as either side is released (and all dirtied keys clear).
+final class BothSidesModifierMonitor {
+    private let flag: NSEvent.ModifierFlags
+    private let leftMask: UInt
+    private let rightMask: UInt
+    private let action: () -> Void
+    private var globalMonitor: Any?
+    private var localMonitor: Any?
+    private var firedOrDirty = false
+
+    private static let watched: NSEvent.ModifierFlags = [.command, .option, .control, .shift]
+
+    init(carbonModifier: UInt32, action: @escaping () -> Void) {
+        switch carbonModifier {
+        case UInt32(cmdKey):     self.flag = .command
+        case UInt32(optionKey):  self.flag = .option
+        case UInt32(controlKey): self.flag = .control
+        case UInt32(shiftKey):   self.flag = .shift
+        default:                 self.flag = []
+        }
+        (self.leftMask, self.rightMask) = ModifierSide.both.deviceMasks(forCarbon: carbonModifier)
+        self.action = action
+
+        globalMonitor = NSEvent.addGlobalMonitorForEvents(
+            matching: [.flagsChanged, .keyDown]
+        ) { [weak self] event in
+            self?.handle(event)
+        }
+        localMonitor = NSEvent.addLocalMonitorForEvents(
+            matching: [.flagsChanged, .keyDown]
+        ) { [weak self] event in
+            self?.handle(event)
+            return event
+        }
+    }
+
+    deinit {
+        if let m = globalMonitor { NSEvent.removeMonitor(m) }
+        if let m = localMonitor { NSEvent.removeMonitor(m) }
+    }
+
+    private func handle(_ event: NSEvent) {
+        if event.type == .keyDown {
+            firedOrDirty = true
+            return
+        }
+        guard !flag.isEmpty, leftMask != 0, rightMask != 0 else { return }
+
+        let active = event.modifierFlags.intersection(Self.watched)
+        if active.isEmpty {
+            firedOrDirty = false
+            return
+        }
+        guard active == flag else {
+            firedOrDirty = true
+            return
+        }
+
+        let raw = UInt(event.modifierFlags.rawValue)
+        let bothHeld = (raw & leftMask != 0) && (raw & rightMask != 0)
+        if bothHeld {
+            guard !firedOrDirty else { return }
+            firedOrDirty = true
+            action()
+        } else if firedOrDirty {
+            // Wait until both keys are released (`active.isEmpty`) before re-arming.
         }
     }
 }
@@ -964,8 +1040,13 @@ struct SummonHotKey: Equatable {
     /// way in, for users who don't want a global key grabbing the summon.
     var enabled: Bool
 
-    /// Whether this config triggers on a double-tapped bare modifier.
+    /// Whether this config triggers on a bare modifier gesture (double-tap or
+    /// pressing both sides simultaneously).
     var isDoubleTap: Bool { doubleTapModifier != 0 }
+
+    /// Whether this config triggers when left + right keys of `doubleTapModifier`
+    /// are pressed together (e.g. Left ⌥ + Right ⌥).
+    var isBothSides: Bool { isDoubleTap && doubleTapSide == .both }
 
     /// This config as a chord, for comparing with a recorded one.
     var chord: ShortcutChord {
@@ -973,11 +1054,14 @@ struct SummonHotKey: Equatable {
                     : ShortcutChord(keyCode: keyCode, modifiers: modifiers)
     }
 
-    /// Whether two enabled double-tap configs can fire on the same key presses:
-    /// same modifier, and the sides are equal or one of them takes either key.
+    /// Whether two enabled modifier configs can fire on the same key presses:
+    /// same modifier, and both use simultaneous press or overlapping double-tap sides.
     func doubleTapOverlaps(_ other: SummonHotKey) -> Bool {
         guard enabled, other.enabled, isDoubleTap, other.isDoubleTap,
               doubleTapModifier == other.doubleTapModifier else { return false }
+        if doubleTapSide == .both || other.doubleTapSide == .both {
+            return doubleTapSide == other.doubleTapSide
+        }
         return doubleTapSide == .either || other.doubleTapSide == .either
             || doubleTapSide == other.doubleTapSide
     }
@@ -1010,6 +1094,15 @@ struct SummonHotKey: Equatable {
         enabled: true
     )
 
+    /// Global "capture full screen and ask Notchi" shortcut: Left ⌥ + Right ⌥ together.
+    static let screenshotDefaultConfig = SummonHotKey(
+        keyCode: 0,
+        modifiers: 0,
+        doubleTapModifier: UInt32(optionKey),
+        doubleTapSide: .both,
+        enabled: true
+    )
+
     static var current: SummonHotKey {
         get {
             if let stored = readStored(prefix: "summonHotKey") {
@@ -1027,6 +1120,11 @@ struct SummonHotKey: Equatable {
     static var card: SummonHotKey {
         get { readStored(prefix: "cardHotKey") ?? .cardDefaultConfig }
         set { write(newValue, prefix: "cardHotKey") }
+    }
+
+    static var screenshot: SummonHotKey {
+        get { readStored(prefix: "screenshotHotKey") ?? .screenshotDefaultConfig }
+        set { write(newValue, prefix: "screenshotHotKey") }
     }
 
     private static func readStored(prefix: String) -> SummonHotKey? {
@@ -1069,6 +1167,7 @@ struct SummonHotKey: Equatable {
             case .either: return glyph + glyph
             case .left:   return L("general.shortcut.leftGlyph", glyph + glyph)
             case .right:  return L("general.shortcut.rightGlyph", glyph + glyph)
+            case .both:   return L("general.shortcut.bothGlyph", glyph)
             }
         }
         return SummonHotKey.modifierSymbols(modifiers) + SummonHotKey.keyName(keyCode)
@@ -2122,9 +2221,9 @@ enum AppShortcutAction: String, CaseIterable, Identifiable, Hashable {
         case .detach:
             return ShortcutChord(keyCode: UInt32(kVK_ANSI_Equal),
                                  modifiers: UInt32(controlKey) | UInt32(shiftKey))
-        // Beside macOS's own ⌘⇧3/4/5 screenshot chords.
+        // In-panel screenshot capture: ⌘⇧S.
         case .askScreen:
-            return ShortcutChord(keyCode: UInt32(kVK_ANSI_2),
+            return ShortcutChord(keyCode: UInt32(kVK_ANSI_S),
                                  modifiers: UInt32(cmdKey) | UInt32(shiftKey))
         }
     }
@@ -2245,6 +2344,7 @@ enum AppShortcutStore {
 enum EditableShortcut: Hashable {
     case summon
     case card
+    case screenshot
     case action(AppShortcutAction)
     case prompt(UUID)
 }
@@ -2296,6 +2396,7 @@ struct AppShortcutReference {
 
     static func groups(
         summonHotKey: SummonHotKey = .current,
+        screenshotHotKey: SummonHotKey = .screenshot,
         shortcuts: [AppShortcutAction: ShortcutChord] = AppShortcutStore.current
     ) -> [Group] {
         func editable(_ action: AppShortcutAction) -> Entry {
@@ -2314,6 +2415,11 @@ struct AppShortcutReference {
                   SummonHotKey.card.enabled ? [SummonHotKey.card.displayString] : [],
                   note: SummonHotKey.card.enabled ? nil : L("general.shortcut.off"),
                   editable: .card))
+        summonEntries.append(
+            Entry(L("shortcuts.screenshotGlobal"),
+                  screenshotHotKey.enabled ? [screenshotHotKey.displayString] : [],
+                  note: screenshotHotKey.enabled ? nil : L("general.shortcut.off"),
+                  editable: .screenshot))
         return [
             Group(title: L("shortcuts.group.summon"), entries: summonEntries),
             Group(title: L("shortcuts.group.prompt"), entries: [

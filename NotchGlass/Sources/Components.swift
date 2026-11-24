@@ -247,39 +247,107 @@ struct PromptField: NSViewRepresentable {
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
-    func makeNSView(context: Context) -> NSScrollView {
-        // Build the TextKit 1 stack by hand. A bare `NSTextView()` comes up on
-        // TextKit 2, where every `layoutManager` touch silently falls back with a
-        // console warning — and the layout manager is exactly what measures the
-        // box's height and its last line's width here.
-        let storage = NSTextStorage()
-        let layout = NSLayoutManager()
-        let container = NSTextContainer(
-            size: NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude))
-        storage.addLayoutManager(layout)
-        layout.addTextContainer(container)
+    /// Reuses already-built TextKit 1 + `PromptTextView` + `NSScrollView` stacks
+    /// across panel opens so clicking the notch does not cold-initialize TextKit
+    /// and AppKit text services on every open.
+    @MainActor
+    private enum ViewPool {
+        private static var spare: [NSScrollView] = []
+        private static let capacity = 2
 
-        let tv = PromptTextView(
-            frame: NSRect(x: 0, y: 0, width: 200, height: Self.lineHeight(for: fontSize)),
-            textContainer: container)
+        static func dequeue() -> NSScrollView? {
+            spare.isEmpty ? nil : spare.removeLast()
+        }
+
+        static func recycle(_ scroll: NSScrollView) {
+            guard spare.count < capacity,
+                  let tv = scroll.documentView as? PromptTextView else { return }
+            tv.delegate = nil
+            tv.onPasteImage = { false }
+            tv.onInitialNoteTrigger = { _ in }
+            tv.onCommandSubmit = { false }
+            tv.placeholder = ""
+            if tv.hasMarkedText() {
+                tv.inputContext?.discardMarkedText()
+                if tv.hasMarkedText() { tv.unmarkText() }
+            }
+            tv.textStorage?.setAttributedString(NSAttributedString())
+            tv.undoManager?.removeAllActions()
+            tv.setSelectedRange(NSRange(location: 0, length: 0))
+            scroll.hasVerticalScroller = false
+            scroll.contentView.scroll(to: .zero)
+            scroll.reflectScrolledClipView(scroll.contentView)
+            spare.append(scroll)
+        }
+    }
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let scroll: NSScrollView
+        let tv: PromptTextView
+        if let pooled = ViewPool.dequeue(),
+           let pooledTV = pooled.documentView as? PromptTextView {
+            scroll = pooled
+            tv = pooledTV
+        } else {
+            // Build the TextKit 1 stack by hand. A bare `NSTextView()` comes up on
+            // TextKit 2, where every `layoutManager` touch silently falls back with a
+            // console warning — and the layout manager is exactly what measures the
+            // box's height and its last line's width here.
+            let storage = NSTextStorage()
+            let layout = NSLayoutManager()
+            let container = NSTextContainer(
+                size: NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude))
+            storage.addLayoutManager(layout)
+            layout.addTextContainer(container)
+
+            let createdTV = PromptTextView(
+                frame: NSRect(x: 0, y: 0, width: 200, height: Self.lineHeight(for: fontSize)),
+                textContainer: container)
+            createdTV.isRichText = false
+            createdTV.importsGraphics = false
+            createdTV.allowsUndo = true
+            createdTV.drawsBackground = false
+            createdTV.backgroundColor = .clear
+            createdTV.focusRingType = .none
+            createdTV.isVerticallyResizable = true
+            createdTV.isHorizontallyResizable = false
+            createdTV.autoresizingMask = [.width]
+            createdTV.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude,
+                                       height: CGFloat.greatestFiniteMagnitude)
+            createdTV.textContainerInset = NSSize(width: Self.textInset, height: 0)
+            // Wrap to the box's width, grow without bound downward — the scroll view
+            // caps what's *visible*, not what can be typed.
+            container.lineFragmentPadding = 0
+            container.widthTracksTextView = true
+            container.heightTracksTextView = false
+
+            let createdScroll = NSScrollView(frame: createdTV.frame)
+            createdScroll.documentView = createdTV
+            createdScroll.drawsBackground = false
+            createdScroll.backgroundColor = .clear
+            createdScroll.borderType = .noBorder
+            // OFF until the text actually exceeds the line cap (see `report`). Leaving
+            // this on unconditionally let macOS flash the overlay knob whenever a
+            // relayout (panel open, list expand) transiently made content > viewport —
+            // the ghost "rectangular cursor" at the field's trailing edge.
+            createdScroll.hasVerticalScroller = false
+            createdScroll.hasHorizontalScroller = false
+            createdScroll.autohidesScrollers = true
+            // Overlay scrollers only surface while scrolling, so a capped-out prompt
+            // shows the bar it needs and the resting one-liner shows nothing.
+            createdScroll.scrollerStyle = .overlay
+            createdScroll.verticalScrollElasticity = .none
+            createdScroll.contentView.drawsBackground = false
+            // The inline hint rides the last line, so it has to follow the box as its
+            // content scrolls under the cap.
+            createdScroll.contentView.postsBoundsChangedNotifications = true
+            scroll = createdScroll
+            tv = createdTV
+        }
+
         tv.delegate = context.coordinator
-        tv.isRichText = false
-        tv.importsGraphics = false
-        tv.allowsUndo = true
-        tv.drawsBackground = false
-        tv.backgroundColor = .clear
-        tv.focusRingType = .none
-        tv.isVerticallyResizable = true
-        tv.isHorizontallyResizable = false
-        tv.autoresizingMask = [.width]
-        tv.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude,
-                            height: CGFloat.greatestFiniteMagnitude)
-        tv.textContainerInset = NSSize(width: Self.textInset, height: 0)
-        // Wrap to the box's width, grow without bound downward — the scroll view
-        // caps what's *visible*, not what can be typed.
-        container.lineFragmentPadding = 0
-        container.widthTracksTextView = true
-        container.heightTracksTextView = false
+        tv.isEditable = editable
+        tv.isSelectable = editable
         Self.disableEditorMagic(tv)
         applyStyle(to: tv)
         // Route ⌘V through the coordinator so the closure the view calls is
@@ -289,29 +357,13 @@ struct PromptField: NSViewRepresentable {
         tv.onPasteImage = { coord.parent.onPasteImage() }
         tv.onInitialNoteTrigger = { coord.parent.onInitialNoteTrigger($0) }
         tv.onCommandSubmit = { coord.parent.onCommandSubmit() }
-
-        let scroll = NSScrollView(frame: tv.frame)
-        scroll.documentView = tv
-        scroll.drawsBackground = false
-        scroll.backgroundColor = .clear
-        scroll.borderType = .noBorder
-        // OFF until the text actually exceeds the line cap (see `report`). Leaving
-        // this on unconditionally let macOS flash the overlay knob whenever a
-        // relayout (panel open, list expand) transiently made content > viewport —
-        // the ghost "rectangular cursor" at the field's trailing edge.
-        scroll.hasVerticalScroller = false
-        scroll.hasHorizontalScroller = false
-        scroll.autohidesScrollers = true
-        // Overlay scrollers only surface while scrolling, so a capped-out prompt
-        // shows the bar it needs and the resting one-liner shows nothing.
-        scroll.scrollerStyle = .overlay
-        scroll.verticalScrollElasticity = .none
-        scroll.contentView.drawsBackground = false
-        // The inline hint rides the last line, so it has to follow the box as its
-        // content scrolls under the cap.
-        scroll.contentView.postsBoundsChangedNotifications = true
         context.coordinator.observe(scroll: scroll, textView: tv)
         return scroll
+    }
+
+    static func dismantleNSView(_ scroll: NSScrollView, coordinator: Coordinator) {
+        NotificationCenter.default.removeObserver(coordinator)
+        ViewPool.recycle(scroll)
     }
 
     func updateNSView(_ scroll: NSScrollView, context: Context) {
@@ -2938,7 +2990,20 @@ struct CrossfadeText: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     /// The word currently lit; swapping it drives the transition below.
-    @State private var shown: String = ""
+    @State private var shown: String
+
+    init(text: String,
+         font: CGFloat = Tokens.TypeSize.reading,
+         color: Color = Tokens.text2,
+         shimmers: Bool = true,
+         centered: Bool = false) {
+        self.text = text
+        self.font = font
+        self.color = color
+        self.shimmers = shimmers
+        self.centered = centered
+        _shown = State(initialValue: text)
+    }
 
     /// One dissolve. 0.45s reads as a calm melt, not a blink, and completes well
     /// inside the caller's rotation dwell (4s mood words, 1.2s host walk).
@@ -2975,11 +3040,6 @@ struct CrossfadeText: View {
                 .transition(reduceMotion
                     ? .opacity
                     : .asymmetric(insertion: insertion, removal: removal))
-        }
-        .onAppear {
-            // First appearance lights up immediately — no fade-from-blank that
-            // would read as a flicker on the very first word.
-            shown = text
         }
         .onChange(of: text) { _, newValue in
             guard newValue != shown else { return }
@@ -4350,15 +4410,18 @@ struct AnswerCard<Content: View>: View {
     /// are laid out for the chrome-less card (pulled left by the side padding),
     /// so that card gets the padding back.
     private var glassBody: some View {
-        let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)
         let pad = visible && !bare && !flat
+        let showsGlass = visible && !flat
+        let surfaceRadius = bare ? Tokens.Radius.control : radius
+        let shape = RoundedRectangle(cornerRadius: surfaceRadius, style: .continuous)
         return FractionWidthLayout(fraction: visible && !flat ? widthFraction : 1,
                                    hugs: visible && hugs && !flat, idealAtLeast: idealAtLeast) {
             content
+                .environment(\.chatBubbleGlass, !showsGlass)
                 .padding(.leading, pad && !chrome ? ChatBubbleChrome.horizontalPad : 0)
                 .padding(.horizontal, pad ? ChatBubbleChrome.glassHorizontalPad : 0)
                 .padding(.vertical, pad ? ChatBubbleChrome.glassVerticalPad : 0)
-                .modifier(OptionalSmokedGlass(radius: radius, on: pad))
+                .modifier(OptionalSmokedGlass(radius: surfaceRadius, on: showsGlass))
                 .contentShape(shape)
                 .onGeometryChange(for: CGFloat.self) { $0.size.height } action: {
                     cardHeight = $0
@@ -6805,6 +6868,7 @@ private struct MarkdownTableView: View {
     let baseFont: CGFloat
     let color: Color
 
+    @Environment(\.chatBubbleGlass) private var onDesktop
     @State private var hovering = false
     @State private var copied = false
 
@@ -6831,6 +6895,7 @@ private struct MarkdownTableView: View {
             RoundedRectangle.control
                 .strokeBorder(Tokens.hairline, lineWidth: 0.5)
         )
+        .modifier(OptionalSmokedGlass(radius: Tokens.Radius.control, on: onDesktop))
         .overlay(alignment: .topTrailing) {
             if hovering || copied { copyButton.padding(6).transition(.opacity) }
         }
@@ -7161,15 +7226,18 @@ private func openAnswerMediaURL(_ urlString: String) {
 /// The shape media takes while its download is in flight — a quiet island of
 /// fixed height, so the panel settles in one reflow when the pixels land.
 private struct MediaLoadingPlaceholder: View {
+    @Environment(\.chatBubbleGlass) private var onDesktop
+
     var body: some View {
         RoundedRectangle.control
-            .fill(Tokens.ink.opacity(0.04))
+            .fill(onDesktop ? Color.clear : Tokens.ink.opacity(0.04))
             .frame(height: 120)
             .overlay(ProgressView().controlSize(.small).tint(Tokens.ink.opacity(0.4)))
             .overlay(
                 RoundedRectangle.control
-                    .strokeBorder(Tokens.hairline, lineWidth: 0.5)
+                    .strokeBorder(onDesktop ? Color.clear : Tokens.hairline, lineWidth: 0.5)
             )
+            .modifier(OptionalSmokedGlass(radius: Tokens.Radius.control, on: onDesktop))
     }
 }
 
@@ -7186,6 +7254,7 @@ struct MediaLinkChip: View {
     var baseFont: CGFloat = Tokens.TypeSize.reading
     var color: Color = Tokens.text1
     let action: () -> Void
+    @Environment(\.chatBubbleGlass) private var onDesktop
 
     var body: some View {
         Button(action: action) {
@@ -7205,8 +7274,15 @@ struct MediaLinkChip: View {
             .foregroundStyle(color.opacity(0.75))
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
-            .background(Capsule(style: .continuous).fill(Tokens.ink.opacity(0.05)))
-            .overlay(Capsule(style: .continuous).strokeBorder(Tokens.hairline, lineWidth: 0.5))
+            .background {
+                if onDesktop {
+                    Color.clear.smokedGlass(radius: 16)
+                } else {
+                    Capsule(style: .continuous)
+                        .fill(Tokens.ink.opacity(0.05))
+                        .overlay(Capsule(style: .continuous).strokeBorder(Tokens.hairline, lineWidth: 0.5))
+                }
+            }
             .contentShape(Capsule(style: .continuous))
         }
         .buttonStyle(.plain).exemptsDoubleClickPin()
@@ -7231,6 +7307,7 @@ private struct AnswerImageView: View {
     /// there the tap falls back to opening the source.
     @Environment(\.imageLightboxHostID) private var lightboxHostID
     @Environment(\.answerMediaBaseDirectory) private var mediaBase
+    @Environment(\.chatBubbleGlass) private var onDesktop
 
     @State private var outcome: AnswerMediaLoader.Outcome?
     /// Set only while the pixels are not back yet: the size this image had when
@@ -7294,9 +7371,10 @@ private struct AnswerImageView: View {
                 if let knownSize {
                     let ratio = knownSize.width / max(knownSize.height, 1)
                     RoundedRectangle.control
-                        .fill(Tokens.ink.opacity(0.04))
+                        .fill(onDesktop ? Color.clear : Tokens.ink.opacity(0.04))
                         .aspectRatio(ratio, contentMode: .fit)
                         .frame(maxWidth: min(knownSize.width, Self.heightCap * ratio))
+                        .modifier(OptionalSmokedGlass(radius: Tokens.Radius.control, on: onDesktop))
                 } else {
                     MediaLoadingPlaceholder()
                 }
@@ -7322,6 +7400,7 @@ private struct AnswerPDFView: View {
     var color: Color = Tokens.text1
 
     @Environment(\.answerMediaBaseDirectory) private var mediaBase
+    @Environment(\.chatBubbleGlass) private var onDesktop
     @State private var outcome: AnswerMediaLoader.Outcome?
 
     var body: some View {
@@ -7357,13 +7436,14 @@ private struct AnswerPDFView: View {
                     }
                     .background(
                         RoundedRectangle.control
-                            .fill(Tokens.ink.opacity(0.04))
+                            .fill(onDesktop ? Color.clear : Tokens.ink.opacity(0.04))
                     )
                     .clipShape(RoundedRectangle.control)
                     .overlay(
                         RoundedRectangle.control
-                            .strokeBorder(Tokens.hairline, lineWidth: 0.5)
+                            .strokeBorder(onDesktop ? Color.clear : Tokens.hairline, lineWidth: 0.5)
                     )
+                    .modifier(OptionalSmokedGlass(radius: Tokens.Radius.control, on: onDesktop))
                 }
                 .buttonStyle(.plain).exemptsDoubleClickPin()
                 .accessibilityLabel(displayTitle)
