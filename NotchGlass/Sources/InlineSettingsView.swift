@@ -88,59 +88,24 @@ private enum SettingsPermissionStatus: Equatable {
     }
 }
 
-/// A deliberately neutral system-style status capsule. Permission state is not
-/// an alert or a score: granted rests in quiet grey, while a missing permission
-/// uses the same shape as its action instead of introducing traffic-light color.
+/// Permission status row trailing view: granted/checking renders as a
+/// non-interactive secondary badge, while a missing permission renders as an
+/// actionable outline button.
 private struct PermissionStatusPill: View {
     let status: SettingsPermissionStatus
     let action: () -> Void
 
-    @State private var hovering = false
-
     var body: some View {
-        Group {
-            if status == .granted || status == .checking {
-                pillLabel
-            } else {
-                Button(action: action) { pillLabel }
-                    .buttonStyle(.plain).exemptsDoubleClickPin()
-                    .onHover { hovering = $0 }
-            }
+        if status == .granted || status == .checking {
+            SettingsBadge(text: status.pillLabel, variant: .secondary)
+        } else {
+            SettingsButton(title: status.pillLabel, variant: .outline, size: .sm, action: action)
         }
-        .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
-    }
-
-    private var pillLabel: some View {
-        Text(status.pillLabel)
-            .font(.sf(Tokens.TypeSize.meta, weight: .regular))
-            .foregroundStyle(missing
-                             ? Color.red.opacity(hovering ? 0.88 : 0.72)
-                             : (hovering ? Tokens.text1 : Tokens.text2))
-            .padding(.horizontal, 11)
-            .frame(height: 28)
-            .background(
-                Capsule(style: .continuous)
-                    .fill(missing
-                          ? Color.red.opacity(hovering ? 0.14 : 0.09)
-                          : Tokens.ink.opacity(hovering ? 0.12 : 0.07))
-            )
-            .overlay(
-                Capsule(style: .continuous)
-                    .strokeBorder(missing
-                                  ? Color.red.opacity(hovering ? 0.22 : 0.15)
-                                  : Tokens.ink.opacity(hovering ? 0.15 : 0.08),
-                                  lineWidth: 0.5)
-            )
-            .contentShape(Capsule(style: .continuous))
-    }
-
-    private var missing: Bool {
-        status != .granted && status != .checking
     }
 }
 
-/// The Telegram setup step's action, in `PermissionStatusPill`'s neutral
-/// capsule. Without an action it is a status (Checking…) and does not react.
+/// A step action inside setup flows: renders as a secondary `SettingsButton`
+/// when actionable, or a quiet `SettingsBadge` while in a passive status.
 private struct TelegramStepPill: View {
     let title: String
     let action: (() -> Void)?
@@ -150,31 +115,12 @@ private struct TelegramStepPill: View {
         self.action = action
     }
 
-    @State private var hovering = false
-
     var body: some View {
-        Group {
-            if let action {
-                Button(action: action) { label }
-                    .buttonStyle(.plain).exemptsDoubleClickPin()
-                    .onHover { hovering = $0 }
-            } else {
-                label
-            }
+        if let action {
+            SettingsButton(title: title, variant: .secondary, size: .sm, action: action)
+        } else {
+            SettingsBadge(text: title, variant: .secondary)
         }
-        .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
-    }
-
-    private var label: some View {
-        Text(title)
-            .font(.sf(Tokens.TypeSize.meta, weight: .regular))
-            .foregroundStyle(hovering ? Tokens.text1 : Tokens.text2)
-            .lineLimit(1)
-            .padding(.horizontal, 11)
-            .frame(height: 28)
-            .background(Capsule(style: .continuous).fill(Tokens.ink.opacity(hovering ? 0.12 : 0.07)))
-            .overlay(Capsule(style: .continuous).strokeBorder(Tokens.ink.opacity(hovering ? 0.15 : 0.08), lineWidth: 0.5))
-            .contentShape(Capsule(style: .continuous))
     }
 }
 
@@ -193,56 +139,59 @@ private struct ConnectorTableRow: View {
         let phase = auth.phase(connector.id)
         let connected = auth.connected.contains(connector.id)
         let server = hub.servers.first { $0.name == connector.id }
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 10) {
-                tile
-                Text(connector.title)
-                    .font(.sf(Tokens.TypeSize.form))
-                    .foregroundStyle(Tokens.text1)
-                    .lineLimit(1)
-                if connector.composio {
-                    InlineSettingsView.NewBadge(text: "Third-party", tint: Tokens.text2)
-                }
-                Spacer(minLength: 12)
-                Group {
-                    if connected {
-                        if hovering {
-                            TelegramStepPill(title: L("connector.disconnect")) { auth.disconnect(connector) }
-                        } else {
-                            Image(systemName: "checkmark")
-                                .font(.system(size: 13, weight: .regular))
-                                .foregroundStyle(Tokens.text2)
-                                .padding(.trailing, 11)
-                        }
-                    } else if auth.isWaiting(connector.id) {
-                        TelegramStepPill(title: L("connector.cancel")) { auth.cancel() }
-                    } else {
-                        TelegramStepPill(title: L("connector.connect")) { onConnect() }
+        HStack(alignment: .center, spacing: 10) {
+            tile
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    Text(connector.title)
+                        .font(.sf(Tokens.TypeSize.form, weight: .regular))
+                        .foregroundStyle(Tokens.text1)
+                        .lineLimit(1)
+                    if connector.composio {
+                        SettingsBadge(text: "Third-party", variant: .secondary)
                     }
                 }
-                .frame(width: 104, alignment: .trailing)
-            }
-            .frame(height: 40)
-            // The 40pt row centers the name, leaving 12pt under it; the note
-            // sits close under the name instead.
-            Group {
-            if case .code(let code) = phase {
-                note(L("connector.code", code), color: Tokens.text3)
-            } else if phase == .waiting {
-                note(L("connector.waiting"), color: Tokens.text3)
-            } else if case .failed(let message) = phase {
-                note(message, color: Tokens.danger)
-            } else if connected, case .failed(let reason)? = server?.status {
-                HStack(alignment: .firstTextBaseline, spacing: 10) {
-                    note(reason, color: Tokens.text3)
-                    UnderlineLink(title: L("mcp.retry")) { hub.restart(connector.id) }
-                        .fixedSize()
+                if case .code(let code) = phase {
+                    note(L("connector.code", code), color: Tokens.text3)
+                } else if phase == .waiting {
+                    note(L("connector.waiting"), color: Tokens.text3)
+                } else if case .failed(let message) = phase {
+                    note(message, color: Tokens.danger)
+                } else if connected, case .failed(let reason)? = server?.status {
+                    HStack(alignment: .firstTextBaseline, spacing: 10) {
+                        note(reason, color: Tokens.text3)
+                        UnderlineLink(title: L("mcp.retry")) { hub.restart(connector.id) }
+                            .fixedSize()
+                    }
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            Group {
+                if connected {
+                    if hovering {
+                        SettingsButton(title: L("connector.disconnect"), variant: .ghost, size: .sm) {
+                            auth.disconnect(connector)
+                        }
+                    } else {
+                        Image(systemName: "checkmark")
+                            .font(.system(size: 13, weight: .regular))
+                            .foregroundStyle(Tokens.text2)
+                            .padding(.trailing, 10)
+                    }
+                } else if auth.isWaiting(connector.id) {
+                    SettingsButton(title: L("connector.cancel"), variant: .outline, size: .sm) {
+                        auth.cancel()
+                    }
+                } else {
+                    SettingsButton(title: L("connector.connect"), variant: .secondary, size: .sm) {
+                        onConnect()
+                    }
+                }
             }
-            .padding(.top, -14)
+            .frame(width: 104, alignment: .trailing)
         }
-        .padding(.bottom, phase == .idle && !(connected && isFailed(server)) ? 0 : 8)
+        .frame(minHeight: 40)
+        .padding(.vertical, phase == .idle && !(connected && isFailed(server)) ? 0 : 4)
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
         .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
@@ -260,7 +209,6 @@ private struct ConnectorTableRow: View {
             .lineLimit(metrics.noteLines(2))
             .textSelection(.enabled)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.leading, 34)
     }
 
     private var tile: some View {
@@ -364,6 +312,7 @@ struct InlineSettingsView: View {
     @State private var settingsHostWindow = HostWindowBox()
     @State private var copyKeyHovering = false
     @FocusState private var licenseKeyFocused: Bool
+    @FocusState private var searchKeyFocused: Bool
     /// Whether the custom-instructions field is unfolded. Collapsed at rest like
     /// the key section above it — it opens by itself only when there is already an
     /// instruction stored, so an existing preference is never hidden.
@@ -387,28 +336,14 @@ struct InlineSettingsView: View {
     @State private var signalCopiedBrew = false
     /// The open group in the connectors table. One tab shows one category's
     /// rows, so the table keeps a single heading over a short list.
-    @State private var connectorCategory: MCPConnector.Category = .docs
-    @State private var pendingThirdPartyConnector: MCPConnector? = nil
+    @State private var connectorCategory: MCPConnector.Category = .recommended
     @ObservedObject private var clipboardHistory = ClipboardHistory.shared
-    /// Memory files as edited on the Memory page, by file name. Seeded from
-    /// disk on first read; each edit is written straight back.
-    @State private var memoryDrafts: [String: String] = [:]
-    /// The memory file opened for editing on the Memory page.
-    @State private var memoryOpenFile: String?
-    /// A Forget waiting on its confirmation: one file, or all of them (`file`
-    /// nil).
+    /// A Forget waiting on its confirmation (turning Memory off deletes every file).
     @State private var memoryForgetTarget: MemoryForgetTarget?
     private struct MemoryForgetTarget: Equatable {
-        var file: String?
         /// Turning Memory off, which deletes every file.
         var turnsOff = false
     }
-    /// Memory folders folded shut in the tree.
-    @State private var memoryClosedFolders: Set<String> = []
-    /// The Memory page's "what to change or remove" box, and whether the
-    /// model is working on it.
-    @State private var memoryInstruction = ""
-    @State private var memoryEditing = false
 
     /// The model catalog behind the picker — live lists, the fold, and which providers
     /// are callable. Session-wide (the panel's ⌘⇧I picker reads the same store), so a
@@ -576,7 +511,7 @@ struct InlineSettingsView: View {
     enum Section: String, CaseIterable, Identifiable {
         case model = "Model"     // who answers: provider, API key, model override — and the search backend behind it
         case chat = "Chat"       // how a conversation behaves: custom instructions, lid-closed answers, cloud machine, memory, copy sensing, message sounds
-        case memories = "Memories" // memory switches; the files open in `.memory`
+        case memories = "Memories" // memory switches and Finder link to the memory folder
         case connect = "Connect" // third-party connectors
         case channels = "Channels" // other places that reach Notchi: the user's own Telegram bot
         case appearance = "Appearance" // notch style, interaction, and display placement
@@ -591,7 +526,6 @@ struct InlineSettingsView: View {
         case pricing = "Pricing" // Blend1 per-model rates — reached from the wallet's links
         case balances = "Balances" // Blend1 gifts and purchases — reached from the wallet's links
         case privacy = "Privacy" // what happens to a Blend1 request — reached from the wallet's links
-        case memory = "Memory"   // the memory folder — reached from Chat
         case pages = "Pages"     // Notchi pages (*.notch.website) — reached from Chat
         case whatsNew = "WhatsNew" // the release notes — reached from About
         var id: String { rawValue }
@@ -600,14 +534,14 @@ struct InlineSettingsView: View {
         /// the pane's full width instead of `SettingsMetrics.contentMaxWidth`.
         var fillsWindowWidth: Bool {
             self == .stats || self == .usage || self == .pricing || self == .balances
-                || self == .memory || self == .pages
+                || self == .pages
         }
 
         /// A sub-page rather than a category: reached from a parent pane, drawn
         /// across the whole panel, and left through the header's back pill or Esc.
         var isDetail: Bool {
             self == .licenses || self == .survey || self == .usage || self == .pricing || self == .balances
-                || self == .privacy || self == .memory || self == .pages || self == .whatsNew
+                || self == .privacy || self == .pages || self == .whatsNew
         }
 
         /// The section a sub-page sits under — where back (and ⎋) returns to.
@@ -616,7 +550,6 @@ struct InlineSettingsView: View {
             switch self {
             case .licenses, .survey, .whatsNew: return .about
             case .usage, .pricing, .balances, .privacy: return .model
-            case .memory: return .memories
             case .pages:  return .chat
             default:               return nil
             }
@@ -661,7 +594,6 @@ struct InlineSettingsView: View {
             case .pricing:    return L("model.pricing")
             case .balances:   return L("nono.balances")
             case .privacy:    return L("nono.privacy.title")
-            case .memory:     return L("memory.title")
             case .pages:      return L("pages.title")
             case .whatsNew:   return L("whatsnew.title")
             }
@@ -1007,38 +939,24 @@ struct InlineSettingsView: View {
             } else if let target = memoryForgetTarget {
                 // Forgetting cannot be undone, so it asks first.
                 ConfirmationDialogOverlay(onDismiss: { memoryForgetTarget = nil }) {
-                    VStack(spacing: 14) {
-                        Text(target.file.map { L("memory.forget.confirm", $0) } ?? L("memory.forgetAll.confirm"))
-                            .font(.sf(Tokens.TypeSize.reading, weight: .regular))
-                            .foregroundStyle(Tokens.text1)
-                            .multilineTextAlignment(.center)
-                            .fixedSize(horizontal: false, vertical: true)
-                        // Cancel takes the trailing slot, where this card puts its
-                        // main action (`LinkWarningConfirm`). Forget stays the
-                        // leading risk action.
-                        HStack(spacing: 10) {
-                            ConfirmDialogButton(title: L(target.file == nil ? "memory.clearAll" : "memory.delete"),
-                                                kind: .destructive) {
-                                memoryForgetTarget = nil
-                                withAnimation(.easeOut(duration: Tokens.hoverFade)) {
-                                    if let file = target.file {
-                                        if memoryOpenFile == file { memoryOpenFile = nil }
-                                        memory.delete(file)
-                                    } else if target.turnsOff {
-                                        memory.enabled = false   // which forgets everything
-                                    } else {
-                                        memory.deleteAll()
-                                    }
+                    SettingsAlertDialog(
+                        title: L("memory.clearAll"),
+                        description: L("memory.forgetAll.confirm"),
+                        confirmTitle: L("memory.clearAll"),
+                        cancelTitle: L("clear.cancel"),
+                        destructive: true,
+                        onCancel: { memoryForgetTarget = nil },
+                        onConfirm: {
+                            memoryForgetTarget = nil
+                            withAnimation(.easeOut(duration: Tokens.hoverFade)) {
+                                if target.turnsOff {
+                                    memory.enabled = false   // which forgets everything
+                                } else {
+                                    memory.deleteAll()
                                 }
                             }
-                            ConfirmDialogButton(title: L("clear.cancel"), kind: .neutral) {
-                                memoryForgetTarget = nil
-                            }
                         }
-                    }
-                    .padding(.horizontal, 20)
-                    .padding(.vertical, 18)
-                    .frame(maxWidth: 280)
+                    )
                 }
                 .padding(.horizontal, -NotchBody.panelPadding)
                 .padding(.top, -NotchBody.panelPadding)
@@ -1046,59 +964,46 @@ struct InlineSettingsView: View {
                 .transition(.opacity.combined(with: .scale(scale: 0.96)))
             } else if signalConfirmForget, case .connected(let account) = signal.state {
                 ConfirmationDialogOverlay(onDismiss: { signalConfirmForget = false }) {
-                    VStack(spacing: 14) {
-                        Text(L("signal.forget.confirm", account))
-                            .font(.sf(Tokens.TypeSize.reading, weight: .regular))
-                            .foregroundStyle(Tokens.text1)
-                            .multilineTextAlignment(.center)
-                            .fixedSize(horizontal: false, vertical: true)
-                        HStack(spacing: 10) {
-                            ConfirmDialogButton(title: L("telegram.forget"), kind: .destructive) {
-                                signalConfirmForget = false
-                                withAnimation(.easeOut(duration: Tokens.hoverFade)) {
-                                    signalSetupOpen = true
-                                    signal.forget(relink: true)
-                                }
-                            }
-                            ConfirmDialogButton(title: L("clear.cancel"), kind: .neutral) {
-                                signalConfirmForget = false
+                    SettingsAlertDialog(
+                        title: L("telegram.forget"),
+                        description: L("signal.forget.confirm", account),
+                        confirmTitle: L("telegram.forget"),
+                        cancelTitle: L("clear.cancel"),
+                        destructive: true,
+                        onCancel: { signalConfirmForget = false },
+                        onConfirm: {
+                            signalConfirmForget = false
+                            withAnimation(.easeOut(duration: Tokens.hoverFade)) {
+                                signalSetupOpen = true
+                                signal.forget(relink: true)
                             }
                         }
-                    }
-                    .padding(.horizontal, 20)
-                    .padding(.vertical, 18)
-                    .frame(maxWidth: 280)
+                    )
                 }
                 .padding(.horizontal, -NotchBody.panelPadding)
+                .padding(.top, -NotchBody.panelPadding)
                 .padding(.bottom, -NotchBody.panelPadding)
                 .transition(.opacity.combined(with: .scale(scale: 0.96)))
             } else if telegramConfirmForget, case .connected(let bot, _) = telegram.state {
                 // Starting over unpairs the bot, and pairing again takes the
                 // whole setup, so it asks first. Same card as Forget memories.
                 ConfirmationDialogOverlay(onDismiss: { telegramConfirmForget = false }) {
-                    VStack(spacing: 14) {
-                        Text(L("telegram.forget.confirm", "@" + bot))
-                            .font(.sf(Tokens.TypeSize.reading, weight: .regular))
-                            .foregroundStyle(Tokens.text1)
-                            .multilineTextAlignment(.center)
-                            .fixedSize(horizontal: false, vertical: true)
-                        HStack(spacing: 10) {
-                            ConfirmDialogButton(title: L("telegram.forget"), kind: .destructive) {
-                                telegramConfirmForget = false
-                                withAnimation(.easeOut(duration: Tokens.hoverFade)) {
-                                    telegramOpenedBotFather = false
-                                    telegramSetupOpen = true
-                                    telegram.forget()
-                                }
-                            }
-                            ConfirmDialogButton(title: L("clear.cancel"), kind: .neutral) {
-                                telegramConfirmForget = false
+                    SettingsAlertDialog(
+                        title: L("telegram.forget"),
+                        description: L("telegram.forget.confirm", "@" + bot),
+                        confirmTitle: L("telegram.forget"),
+                        cancelTitle: L("clear.cancel"),
+                        destructive: true,
+                        onCancel: { telegramConfirmForget = false },
+                        onConfirm: {
+                            telegramConfirmForget = false
+                            withAnimation(.easeOut(duration: Tokens.hoverFade)) {
+                                telegramOpenedBotFather = false
+                                telegramSetupOpen = true
+                                telegram.forget()
                             }
                         }
-                    }
-                    .padding(.horizontal, 20)
-                    .padding(.vertical, 18)
-                    .frame(maxWidth: 280)
+                    )
                 }
                 .padding(.horizontal, -NotchBody.panelPadding)
                 .padding(.top, -NotchBody.panelPadding)
@@ -1123,49 +1028,16 @@ struct InlineSettingsView: View {
                 .padding(.top, -NotchBody.panelPadding)
                 .padding(.bottom, -NotchBody.panelPadding)
                 .transition(.opacity.combined(with: .scale(scale: 0.96)))
-            } else if let connector = pendingThirdPartyConnector {
-                ConfirmationDialogOverlay(onDismiss: { pendingThirdPartyConnector = nil }) {
-                    VStack(spacing: 12) {
-                        Text(L("connector.thirdParty.title", connector.title))
-                            .font(.sf(Tokens.TypeSize.reading, weight: .medium))
-                            .foregroundStyle(Tokens.text1)
-                            .multilineTextAlignment(.center)
-                            .fixedSize(horizontal: false, vertical: true)
-                        Text(L("connector.thirdParty.body", connector.title))
-                            .font(.sf(Tokens.TypeSize.meta))
-                            .foregroundStyle(Tokens.text2)
-                            .multilineTextAlignment(.center)
-                            .fixedSize(horizontal: false, vertical: true)
-                        UnderlineLink(title: L("connector.thirdParty.privacy"), external: true) {
-                            if let url = URL(string: "https://composio.dev/privacy") {
-                                NSWorkspace.shared.open(url)
-                            }
-                        }
-                        HStack(spacing: 10) {
-                            ConfirmDialogButton(title: L("connector.thirdParty.confirm"), kind: .neutral) {
-                                let target = connector
-                                pendingThirdPartyConnector = nil
-                                connectorAuth.connect(target)
-                            }
-                            ConfirmDialogButton(title: L("clear.cancel"), kind: .quiet) {
-                                pendingThirdPartyConnector = nil
-                            }
-                        }
-                        .padding(.top, 2)
-                    }
-                    .padding(.horizontal, 20)
-                    .padding(.vertical, 18)
-                    .frame(maxWidth: 300)
-                }
-                .padding(.horizontal, -NotchBody.panelPadding)
-                .padding(.top, -NotchBody.panelPadding)
-                .padding(.bottom, -NotchBody.panelPadding)
-                .transition(.opacity.combined(with: .scale(scale: 0.96)))
+            } else if inWindow, let connector = connectorAuth.pendingThirdPartyConsent {
+                ThirdPartyConnectorConsentOverlay(connector: connector, auth: connectorAuth)
+                    .padding(.horizontal, -NotchBody.panelPadding)
+                    .padding(.top, -NotchBody.panelPadding)
+                    .padding(.bottom, -NotchBody.panelPadding)
+                    .transition(.opacity.combined(with: .scale(scale: 0.96)))
             }
         }
         .animation(.easeOut(duration: 0.16), value: model.confirmingDisconnect)
-        .animation(.easeOut(duration: 0.16), value: pendingThirdPartyConnector?.id)
-        .holdsPanelWhilePresented(pendingThirdPartyConnector != nil)
+        .animation(.easeOut(duration: 0.16), value: connectorAuth.pendingThirdPartyConsent?.id)
         .animation(.easeOut(duration: 0.16), value: memoryForgetTarget)
         .animation(.easeOut(duration: 0.16), value: telegramConfirmForget)
         .animation(.easeOut(duration: 0.16), value: signalConfirmForget)
@@ -1377,8 +1249,69 @@ struct InlineSettingsView: View {
             WhatsNewView(model: model, showsHeader: false, height: settingsPaneHeight)
                 .frame(maxWidth: .infinity, alignment: .topLeading)
                 .transition(.asymmetric(insertion: .opacity, removal: .identity))
+        } else if section == .connect {
+            stickyConnectorsPane
         } else {
             scrollingPaneContent
+        }
+    }
+
+    /// Connectors pane with category tabs pinned at the top while the connector
+    /// rows scroll underneath with edge fade.
+    private var stickyConnectorsPane: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            VStack(alignment: .leading, spacing: metrics.rowSpacing) {
+                if inWindow {
+                    StandaloneWindowTitle(text: section.title)
+                }
+                connectorCategoryTabs
+            }
+            .frame(maxWidth: metrics.contentMaxWidth, alignment: .topLeading)
+            .frame(maxWidth: .infinity, alignment: inWindow ? .top : .topLeading)
+            .padding(.top, metrics.paneTopRunway)
+            .padding(.bottom, 8)
+            .padding(.horizontal, metrics.paneSideInset)
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(MCPConnector.connectors(in: activeConnectorCategory)) { connector in
+                        ConnectorTableRow(connector: connector, auth: connectorAuth, hub: mcp) {
+                            connectorAuth.requestConnect(connector)
+                        }
+                    }
+                }
+                .animation(.easeOut(duration: 0.18), value: activeConnectorCategory)
+                .frame(maxWidth: metrics.contentMaxWidth, alignment: .topLeading)
+                .frame(maxWidth: .infinity, alignment: inWindow ? .top : .topLeading)
+                .background(
+                    GeometryReader { g in
+                        Color.clear.preference(key: PaneContentHeightKey.self, value: g.size.height)
+                    }
+                )
+                .padding(.top, 2)
+                .padding(.bottom, 20)
+                .padding(.horizontal, metrics.paneSideInset)
+                .onScrollOffsetChange { offset in
+                    let off = offset > 0.5
+                    if off != paneScrolledOffTop { paneScrolledOffTop = off }
+                }
+            }
+            .id(activeConnectorCategory)
+            .scrollIndicators(.never)
+            .onPreferenceChange(PaneContentHeightKey.self) { height in
+                let headerBudget: CGFloat = metrics.paneTopRunway + 38 + (inWindow ? 40 : 0)
+                let over = height > settingsPaneHeight - headerBudget + 0.5
+                if over != paneOverflows { paneOverflows = over }
+            }
+            .scrollEdgeFade(top: paneScrolledOffTop, bottom: paneOverflows,
+                            topFade: 18, bottomFade: 32)
+        }
+        .frame(height: settingsPaneHeight, alignment: .topLeading)
+        .onChange(of: activeConnectorCategory) {
+            paneScrolledOffTop = false
+        }
+        .onAppear {
+            paneScrolledOffTop = false
         }
     }
 
@@ -1488,7 +1421,11 @@ struct InlineSettingsView: View {
                 memoryEnableRow
                 if memory.enabled {
                     if ClipboardHistory.available { memoryClipboardRow }
-                    UnderlineLink(title: L("memory.manage")) { open(.memory) }
+                    UnderlineLink(title: L("memory.manage"), external: true) {
+                        try? FileManager.default.createDirectory(at: UserMemory.folder,
+                                                                 withIntermediateDirectories: true)
+                        NSWorkspace.shared.open(UserMemory.folder)
+                    }
                 }
             case .general:
                 // App-level settings: how it talks to you, launch, the app's
@@ -1550,21 +1487,8 @@ struct InlineSettingsView: View {
                     .padding(.top, metrics.groupHeadingGap)
                 lidClosedRow
             case .connect:
-                // One tab per group that has connectors, then that group's rows:
-                // the tab is the heading, so each row needs no caption of its own.
-                VStack(alignment: .leading, spacing: 6) {
-                    connectorCategoryTabs
-                    ForEach(MCPConnector.all.filter { $0.category == activeConnectorCategory }) { connector in
-                        ConnectorTableRow(connector: connector, auth: connectorAuth, hub: mcp) {
-                            if connector.composio {
-                                pendingThirdPartyConnector = connector
-                            } else {
-                                connectorAuth.connect(connector)
-                            }
-                        }
-                    }
-                }
-                .animation(.easeOut(duration: 0.18), value: activeConnectorCategory)
+                // Drawn with sticky category tabs in `stickyConnectorsPane` (see `paneContent`).
+                EmptyView()
             case .stats:
                 statsSection
             case .about:
@@ -1581,8 +1505,6 @@ struct InlineSettingsView: View {
                 balancesSection
             case .privacy:
                 NonoPrivacyNote()
-            case .memory:
-                memoryPage
             case .pages:
                 NotchiPagesPane()
             case .whatsNew:
@@ -1685,11 +1607,6 @@ struct InlineSettingsView: View {
             // of panes that fit (About's colophon, Stats' bottom card).
             .scrollEdgeFade(top: paneScrolledOffTop, bottom: paneOverflows,
                             topFade: metrics.paneTopFade, bottomFade: 32)
-            // Memory's instruction box and Forget all stay pinned under the
-            // pane while the files scroll.
-            .overlay(alignment: .bottom) {
-                if section == .memory, !memory.scanning { memoryFooter }
-            }
             // A pane swap starts at the top again; the observer only reports on
             // the next bounds change, so clear the flag here.
             .onAppear {
@@ -1909,13 +1826,11 @@ struct InlineSettingsView: View {
         @State private var hovering = false
         @Environment(\.settingsWindowPaneHeight) private var windowPane
 
-        /// In the window every row is in full ink and the selection is the
-        /// fill alone; gray rows there read as disabled. The panel keeps its
-        /// quieter rows against the glass.
         private var ink: Color {
-            if windowPane != nil { return Tokens.text1 }
-            return selected ? Tokens.text1 : (hovering ? Tokens.text2 : Tokens.text3)
+            selected ? Tokens.text1 : (hovering ? Tokens.text1.opacity(0.88) : Tokens.text3)
         }
+
+        private var itemShape: Capsule { Capsule(style: .continuous) }
 
         var body: some View {
             Button(action: action) {
@@ -1923,20 +1838,17 @@ struct InlineSettingsView: View {
                     .foregroundStyle(ink)
                     .background {
                         if buy {
-                            Color.clear.licenseChipSurface(Capsule(style: .continuous),
-                                                           hovered: hovering)
+                            Color.clear.licenseChipSurface(itemShape, hovered: hovering)
                         }
-                        // The hover fill stays on its own row; the selected
-                        // fill is one capsule that slides to the new row.
-                        Capsule(style: .continuous)
-                            .fill(Tokens.ink.opacity(!selected && hovering ? 0.04 : 0))
+                        itemShape
+                            .fill(Tokens.ink.opacity(!selected && hovering ? 0.05 : 0))
                         if selected, let selection {
-                            Capsule(style: .continuous)
-                                .fill(Tokens.ink.opacity(0.08))
+                            itemShape
+                                .fill(Tokens.ink.opacity(0.09))
                                 .matchedGeometryEffect(id: "sidebarSelection", in: selection)
                         }
                     }
-                    .contentShape(Capsule(style: .continuous))
+                    .contentShape(itemShape)
             }
             .buttonStyle(.plain).exemptsDoubleClickPin()
             .onHover { hovering = $0 }
@@ -2199,57 +2111,30 @@ struct InlineSettingsView: View {
     @ViewBuilder
     private var foldedKeySection: some View {
         let expanded = keySectionOpen || setupRequired
-        VStack(alignment: .leading, spacing: 12) {
-            Button {
-                withAnimation(.easeOut(duration: 0.16)) {
-                    if expanded {
-                        keySectionOpen = false
-                        pendingModel = nil     // folding away dismisses the pending ask
-                        setKeyScope(provider)  // …and the section re-tracks the backend
-                    } else {
-                        keySectionOpen = true
+        let summary = providerReady(keyScope) ? keyScope.displayName : nil
+        SettingsCollapsible(
+            title: L("model.keys.section"),
+            summary: summary,
+            isOpen: Binding(
+                get: { expanded },
+                set: { wantOpen in
+                    withAnimation(.easeOut(duration: 0.16)) {
+                        if !wantOpen {
+                            keySectionOpen = false
+                            pendingModel = nil     // folding away dismisses the pending ask
+                            setKeyScope(provider)  // …and the section re-tracks the backend
+                        } else {
+                            keySectionOpen = true
+                        }
                     }
                 }
-            } label: {
-                HStack(spacing: 5) {
-                    Image(systemName: "chevron.right")
-                        .font(.sf(Tokens.TypeSize.badge, weight: .regular))
-                        .rotationEffect(.degrees(expanded ? 90 : 0))
-                    Text(L("model.keys.section"))
-                        .font(.sf(Tokens.TypeSize.label, weight: .regular))
-                }
-                .foregroundStyle(Tokens.text1)
-                .padding(.horizontal, 10)
-                .frame(height: 26)
-                // The disclosure's own glass chip — a translucent pill that
-                // brightens under the pointer, so the fold itself reads as a
-                // control on the panel's glass rather than a bare line of text.
-                .background(
-                    Capsule(style: .continuous)
-                        .fill(Tokens.ink.opacity(hoveredDisclosure == .keys ? 0.12 : 0.06))
-                )
-                .overlay(
-                    Capsule(style: .continuous)
-                        .strokeBorder(Tokens.ink.opacity(hoveredDisclosure == .keys ? 0.22 : 0.12),
-                                      lineWidth: 0.5)
-                )
-                .contentShape(Capsule(style: .continuous))
-            }
-            .buttonStyle(.plain).exemptsDoubleClickPin()
-            .onHover { inside in
-                if inside { hoveredDisclosure = .keys }
-                else if hoveredDisclosure == .keys { hoveredDisclosure = nil }
-            }
-            .animation(.easeOut(duration: Tokens.hoverFade), value: hoveredDisclosure)
-
-            if expanded {
-                keySectionBody
-            }
+            )
+        ) {
+            keySectionBody
         }
         // The scroller's anchor (see `paneContent`): a required setup unfolding
         // this block past the pane's height cap snaps it into view.
         .id(Self.keySectionAnchor)
-        .animation(.easeOut(duration: 0.16), value: expanded)
     }
 
     /// The key section's contents: why it is asking (when it is), whose key, the
@@ -2262,14 +2147,10 @@ struct InlineSettingsView: View {
             Text(L("model.pending.hint", pending.provider.displayName,
                    ModelRatings.prettyName(for: pending.id,
                                            provider: pending.provider)))
-                .font(.sf(Tokens.TypeSize.label))
-                .foregroundStyle(Tokens.text2)
-                .fixedSize(horizontal: false, vertical: true)
+                .settingsDescription(Tokens.text2)
         } else if !providerReady(provider) {
             Text(L("model.setup.needed", provider.displayName))
-                .font(.sf(Tokens.TypeSize.label))
-                .foregroundStyle(Tokens.text2)
-                .fixedSize(horizontal: false, vertical: true)
+                .settingsDescription(Tokens.text2)
         }
 
         // Whose key this section is editing — shown only when that isn't the
@@ -2411,7 +2292,7 @@ struct InlineSettingsView: View {
                             if text.wrappedValue.isEmpty {
                                 Text(placeholder)
                                     .font(.sf(Tokens.TypeSize.form))
-                                    .foregroundStyle(Tokens.text3)
+                                    .foregroundStyle(Tokens.placeholder)
                                     .lineLimit(1)
                                     .fixedSize()
                                     .allowsHitTesting(false)
@@ -2428,10 +2309,7 @@ struct InlineSettingsView: View {
                 Spacer(minLength: 0)
             }
             .clipped()
-            .padding(.horizontal, 12)
-            .frame(height: 34)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .recessedSurface(in: RoundedRectangle.control, lit: false)
+            .settingsInputBox(focused: false)
         }
     }
 
@@ -2583,7 +2461,7 @@ struct InlineSettingsView: View {
                         if apiKey.isEmpty {
                             Text(L("model.pasteKey"))
                                 .font(.sf(Tokens.TypeSize.form))
-                                .foregroundStyle(Tokens.text2)
+                                .foregroundStyle(Tokens.placeholder)
                                 .allowsHitTesting(false)
                         }
                         TextField("", text: $apiKey)
@@ -2608,10 +2486,7 @@ struct InlineSettingsView: View {
                             .lineLimit(1)
                     }
                 }
-                .padding(.horizontal, 12)
-                .frame(height: 34)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .recessedSurface(in: RoundedRectangle.control, lit: editingKey)
+                .settingsInputBox(focused: keyFieldFocused)
                 .opacity(envOverride ? 0.5 : 1)
                 // The saved key's field is the way back into editing.
                 .contentShape(Rectangle())
@@ -2713,7 +2588,7 @@ struct InlineSettingsView: View {
                         if keenableKey.isEmpty {
                             Text(L("model.keenablePasteKey"))
                                 .font(.sf(Tokens.TypeSize.form))
-                                .foregroundStyle(Tokens.text2)
+                                .foregroundStyle(Tokens.placeholder)
                                 .allowsHitTesting(false)
                         }
                         TextField("", text: $keenableKey)
@@ -2721,6 +2596,7 @@ struct InlineSettingsView: View {
                             .font(.sf(Tokens.TypeSize.form))
                             .foregroundStyle(Tokens.text1)
                             .disabled(keenableEnvOverride)
+                            .focused($searchKeyFocused)
                             .onSubmit { saveKeenableKey() }
                             // Typing here must hold off the hover-leave fold too.
                             .onChange(of: keenableKey) { model.noteUserTyping() }
@@ -2731,10 +2607,7 @@ struct InlineSettingsView: View {
                             .lineLimit(1)
                     }
                 }
-                .padding(.horizontal, 12)
-                .frame(height: 34)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .recessedSurface(in: RoundedRectangle.control, lit: editingKeenableKey)
+                .settingsInputBox(focused: searchKeyFocused)
                 .opacity(keenableEnvOverride ? 0.5 : 1)
 
                 if editingKeenableKey {
@@ -2797,7 +2670,7 @@ struct InlineSettingsView: View {
                         if exaKey.isEmpty {
                             Text(L("model.exaPasteKey"))
                                 .font(.sf(Tokens.TypeSize.form))
-                                .foregroundStyle(Tokens.text2)
+                                .foregroundStyle(Tokens.placeholder)
                                 .allowsHitTesting(false)
                         }
                         TextField("", text: $exaKey)
@@ -2805,6 +2678,7 @@ struct InlineSettingsView: View {
                             .font(.sf(Tokens.TypeSize.form))
                             .foregroundStyle(Tokens.text1)
                             .disabled(exaEnvOverride)
+                            .focused($searchKeyFocused)
                             .onSubmit { saveExaKey() }
                             // Typing here must hold off the hover-leave fold too.
                             .onChange(of: exaKey) { model.noteUserTyping() }
@@ -2815,10 +2689,7 @@ struct InlineSettingsView: View {
                             .lineLimit(1)
                     }
                 }
-                .padding(.horizontal, 12)
-                .frame(height: 34)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .recessedSurface(in: RoundedRectangle.control, lit: editingExaKey)
+                .settingsInputBox(focused: searchKeyFocused)
                 .opacity(exaEnvOverride ? 0.5 : 1)
 
                 if editingExaKey {
@@ -2882,7 +2753,7 @@ struct InlineSettingsView: View {
                         if anySearchKey.isEmpty {
                             Text(L("model.anysearchPasteKey"))
                                 .font(.sf(Tokens.TypeSize.form))
-                                .foregroundStyle(Tokens.text2)
+                                .foregroundStyle(Tokens.placeholder)
                                 .allowsHitTesting(false)
                         }
                         TextField("", text: $anySearchKey)
@@ -2890,6 +2761,7 @@ struct InlineSettingsView: View {
                             .font(.sf(Tokens.TypeSize.form))
                             .foregroundStyle(Tokens.text1)
                             .disabled(anySearchEnvOverride)
+                            .focused($searchKeyFocused)
                             .onSubmit { saveAnySearchKey() }
                             .onChange(of: anySearchKey) { model.noteUserTyping() }
                     } else {
@@ -2899,10 +2771,7 @@ struct InlineSettingsView: View {
                             .lineLimit(1)
                     }
                 }
-                .padding(.horizontal, 12)
-                .frame(height: 34)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .recessedSurface(in: RoundedRectangle.control, lit: editingAnySearchKey)
+                .settingsInputBox(focused: searchKeyFocused)
                 .opacity(anySearchEnvOverride ? 0.5 : 1)
 
                 if editingAnySearchKey {
@@ -2954,7 +2823,7 @@ struct InlineSettingsView: View {
                         if deepSeekSearchKey.isEmpty {
                             Text(L("model.deepseekSearchPasteKey"))
                                 .font(.sf(Tokens.TypeSize.form))
-                                .foregroundStyle(Tokens.text2)
+                                .foregroundStyle(Tokens.placeholder)
                                 .allowsHitTesting(false)
                         }
                         TextField("", text: $deepSeekSearchKey)
@@ -2962,6 +2831,7 @@ struct InlineSettingsView: View {
                             .font(.sf(Tokens.TypeSize.form))
                             .foregroundStyle(Tokens.text1)
                             .disabled(deepSeekSearchEnvOverride)
+                            .focused($searchKeyFocused)
                             .onSubmit { saveDeepSeekSearchKey() }
                             .onChange(of: deepSeekSearchKey) { model.noteUserTyping() }
                     } else {
@@ -2971,10 +2841,7 @@ struct InlineSettingsView: View {
                             .lineLimit(1)
                     }
                 }
-                .padding(.horizontal, 12)
-                .frame(height: 34)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .recessedSurface(in: RoundedRectangle.control, lit: editingDeepSeekSearchKey)
+                .settingsInputBox(focused: searchKeyFocused)
                 .opacity(deepSeekSearchEnvOverride ? 0.5 : 1)
 
                 if editingDeepSeekSearchKey {
@@ -3041,19 +2908,10 @@ struct InlineSettingsView: View {
     /// in faint text, in the same register as the rest of the panel.
     @ViewBuilder
     private func statusPill(ok: Bool, message: String) -> some View {
-        if ok {
-            Text(message)
-                .font(.sf(Tokens.TypeSize.meta))
-                .foregroundStyle(Tokens.text3)
-                .padding(.top, 1)
-        } else {
-            // A failure stays a touch heavier so it reads as a problem, but in the
-            // same neutral ink as the rest of the panel — no coloured dot, no pill.
-            Text(message)
-                .font(.sf(Tokens.TypeSize.meta, weight: .regular))
-                .foregroundStyle(Tokens.text2)
-                .padding(.top, 1)
-        }
+        Text(message)
+            .modifier(SettingsTypeFont(size: SettingsType.description))
+            .foregroundStyle(ok ? Tokens.text2 : Tokens.danger)
+            .padding(.top, 1)
     }
 
     // MARK: - Notchi Balance
@@ -3329,9 +3187,8 @@ struct InlineSettingsView: View {
                     model.noteUserTyping()
                 }
         }
-        .padding(.horizontal, 10)
-        .frame(width: 252, height: 30)
-        .recessedSurface(in: RoundedRectangle.control, lit: licenseKeyFocused)
+        .frame(width: 252)
+        .settingsInputBox(focused: licenseKeyFocused, height: SettingsUI.heightMD)
     }
 
     /// Buy; with the field open, activate what is in it, or close an empty one.
@@ -3970,9 +3827,7 @@ struct InlineSettingsView: View {
             Text(installed
                  ? (signedIn ? L("codex.status.hint.ready") : L("codex.status.hint.login"))
                  : L("codex.status.hint.install"))
-                .font(.sf(Tokens.TypeSize.label))
-                .foregroundStyle(Tokens.text3)
-                .fixedSize(horizontal: false, vertical: true)
+                .settingsDescription()
                 .padding(.leading, SettingsMetrics.fieldIndent)
         }
     }
@@ -4010,9 +3865,7 @@ struct InlineSettingsView: View {
             Text(installed
                  ? (signedIn ? L("claudecode.status.hint.ready") : L("claudecode.status.hint.login"))
                  : L("claudecode.status.hint.install"))
-                .font(.sf(Tokens.TypeSize.label))
-                .foregroundStyle(Tokens.text3)
-                .fixedSize(horizontal: false, vertical: true)
+                .settingsDescription()
                 .padding(.leading, SettingsMetrics.fieldIndent)
         }
     }
@@ -4053,9 +3906,7 @@ struct InlineSettingsView: View {
             Text(installed
                  ? (signedIn ? L("grok.status.hint.ready") : L("grok.status.hint.login"))
                  : L("grok.status.hint.install"))
-                .font(.sf(Tokens.TypeSize.label))
-                .foregroundStyle(Tokens.text3)
-                .fixedSize(horizontal: false, vertical: true)
+                .settingsDescription()
                 .padding(.leading, SettingsMetrics.fieldIndent)
         }
     }
@@ -4090,24 +3941,14 @@ struct InlineSettingsView: View {
                 Spacer(minLength: 8)
                 // Detection is cached for the whole launch; this re-runs it. Same
                 // chip as the model row's refresh arrow.
-                Button {
+                SettingsButton(title: "",
+                               variant: .ghost,
+                               size: .icon,
+                               systemImage: "arrow.clockwise",
+                               loading: commandCodeRedetecting) {
                     commandCodeRedetecting = true
                     CommandCodeCLIService.redetect { commandCodeRedetecting = false }
-                } label: {
-                    ZStack {
-                        if commandCodeRedetecting {
-                            ProgressView()
-                                .controlSize(.small)
-                                .scaleEffect(0.8)
-                        } else {
-                            Image(systemName: "arrow.clockwise")
-                                .font(.sf(Tokens.TypeSize.meta, weight: .regular))
-                                .foregroundStyle(Tokens.text3)
-                        }
-                    }
-                    .frame(width: Tokens.Control.chip, height: Tokens.Control.chip)
                 }
-                .buttonStyle(ShortcutChipStyle(rest: 0.055, restStroke: 0.1))
                 .disabled(commandCodeRedetecting)
                 .notchTooltip(L("commandcode.action.redetect"))
             }
@@ -4121,34 +3962,25 @@ struct InlineSettingsView: View {
                  : signedIn
                  ? (installed ? L("commandcode.status.hint.ready") : L("commandcode.status.hint.noCLI"))
                  : (installed ? L("commandcode.status.hint.login") : L("commandcode.status.hint.install")))
-                .font(.sf(Tokens.TypeSize.label))
-                .foregroundStyle(Tokens.text3)
-                .fixedSize(horizontal: false, vertical: true)
+                .settingsDescription()
                 .padding(.leading, SettingsMetrics.fieldIndent)
             if let startupError {
                 Text(startupError)
-                    .font(Self.memoryMono)
+                    .font(.system(size: Tokens.TypeSize.meta, design: .monospaced))
                     .foregroundStyle(Tokens.text3)
                     .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.leading, SettingsMetrics.fieldIndent)
             }
 
-            HStack(spacing: 12) {
-                Text(L("commandcode.zdr"))
-                    .font(.sf(Tokens.TypeSize.form, weight: .regular))
-                    .foregroundStyle(Tokens.text2)
-                Spacer(minLength: 8)
+            settingRow(label: L("commandcode.zdr"), info: L("commandcode.zdr.hint")) {
                 Toggle("", isOn: $commandCodeZeroDataRetention)
                     .labelsHidden()
                     .toggleStyle(.switch)
                     .controlSize(.mini)
                     .tint(Tokens.switchTint)
             }
-            Text(L("commandcode.zdr.hint"))
-                .font(.sf(Tokens.TypeSize.label))
-                .foregroundStyle(Tokens.text3)
-                .fixedSize(horizontal: false, vertical: true)
+            .padding(.top, 4)
         }
         // The probe lands on a background queue; `cliTick` is the redraw.
         .onReceive(NotificationCenter.default.publisher(for: .cliAvailabilityResolved)) { _ in
@@ -4198,9 +4030,7 @@ struct InlineSettingsView: View {
             Text(installed
                  ? (signedIn ? L("pi.status.hint.ready") : L("pi.status.hint.login"))
                  : L("pi.status.hint.install"))
-                .font(.sf(Tokens.TypeSize.label))
-                .foregroundStyle(Tokens.text3)
-                .fixedSize(horizontal: false, vertical: true)
+                .settingsDescription()
                 .padding(.leading, SettingsMetrics.fieldIndent)
         }
     }
@@ -4242,9 +4072,7 @@ struct InlineSettingsView: View {
             Text(installed
                  ? (signedIn ? L("dsh.status.hint.ready") : L("dsh.status.hint.login"))
                  : L("dsh.status.hint.install"))
-                .font(.sf(Tokens.TypeSize.label))
-                .foregroundStyle(Tokens.text3)
-                .fixedSize(horizontal: false, vertical: true)
+                .settingsDescription()
                 .padding(.leading, SettingsMetrics.fieldIndent)
         }
     }
@@ -4320,10 +4148,8 @@ struct InlineSettingsView: View {
 
             Text(hint(installed: installed, outdated: outdated, signedIn: signedIn,
                       signingIn: signingIn, failure: failure))
-                .font(.sf(Tokens.TypeSize.label))
-                .foregroundStyle(outdated || (failure != nil && !signedIn)
-                                 ? Tokens.danger : Tokens.text3)
-                .fixedSize(horizontal: false, vertical: true)
+                .settingsDescription(outdated || (failure != nil && !signedIn)
+                                     ? Tokens.danger : Tokens.text3)
                 .padding(.leading, SettingsMetrics.fieldIndent)
         }
         // The sign-in lands from a background queue minutes after the click, so the
@@ -4365,14 +4191,7 @@ struct InlineSettingsView: View {
     /// A quiet pill button in the account row's register (Get Codex / Sign in /
     /// Re-authorize) — same chrome as the OpenRouter Connect button.
     private func codexPillButton(_ title: String, action: @escaping () -> Void) -> some View {
-        Button(title, action: action)
-            .buttonStyle(.plain).exemptsDoubleClickPin()
-            .font(.sf(Tokens.TypeSize.form, weight: .regular))
-            .foregroundStyle(Tokens.text1)
-            .padding(.horizontal, 12)
-            .frame(height: 30)
-            .prominentSurface(in: Capsule(style: .continuous), lit: false)
-            .contentShape(Capsule(style: .continuous))
+        SettingsButton(title: title, variant: .secondary, size: .md, action: action)
     }
 
     /// The primary action of the whole onboarding: one click, sign in (or sign
@@ -4394,25 +4213,13 @@ struct InlineSettingsView: View {
     @State private var surveySubmitHovering = false
 
     private var connectButton: some View {
-        Button {
+        SettingsButton(title: L("model.connectOpenRouter"),
+                       variant: .primary,
+                       size: .md,
+                       systemImage: "link") {
             testResult = nil
             orAuth.connect()
-        } label: {
-            HStack(spacing: 7) {
-                Image(systemName: "link")
-                    .font(.sf(Tokens.TypeSize.meta, weight: .regular))
-                Text(L("model.connectOpenRouter"))
-                    .font(.sf(Tokens.TypeSize.form, weight: .regular))
-            }
-            .foregroundStyle(Tokens.text1)
-            .padding(.horizontal, 12)
-            .frame(height: 30)
-            .prominentSurface(in: Capsule(style: .continuous), lit: connectHovering)
-            .contentShape(Capsule(style: .continuous))
         }
-        .buttonStyle(GlassPressStyle())
-        .onHover { connectHovering = $0 }
-        .animation(.easeOut(duration: Tokens.hoverFade), value: connectHovering)
     }
 
     /// Drop the stored OpenRouter key and return the row to its Connect state.
@@ -4583,9 +4390,9 @@ struct InlineSettingsView: View {
                 .foregroundStyle(tint)
                 .lineLimit(1)
                 .fixedSize()
-                .padding(.horizontal, 4)
-                .padding(.vertical, 1)
-                .background(tint.opacity(0.22), in: LowBalanceTag.shape)
+                .padding(.horizontal, 6)
+                .frame(height: 18)
+                .background(tint.opacity(0.16), in: Capsule(style: .continuous))
         }
 
         /// The tag's width, for a card sized by arithmetic (the Ask model menu).
@@ -4695,25 +4502,13 @@ struct InlineSettingsView: View {
                 // catalogs for the whole launch), which is right until a model ships
                 // mid-session and the list you're looking at is the stale one. One
                 // tap re-asks every backend. Doubles as the load indicator.
-                Button {
+                SettingsButton(title: "",
+                               variant: .ghost,
+                               size: .icon,
+                               systemImage: "arrow.clockwise",
+                               loading: modelsBusy) {
                     Task { await manualRefreshModels() }
-                } label: {
-                    ZStack {
-                        if modelsBusy {
-                            ProgressView()
-                                .controlSize(.small)
-                                .scaleEffect(0.8)
-                        } else {
-                            Image(systemName: "arrow.clockwise")
-                                .font(.sf(Tokens.TypeSize.meta, weight: .regular))
-                                .foregroundStyle(Tokens.text3)
-                        }
-                    }
-                    // Square frame so the chip style's capsule resolves to a true
-                    // circle rather than a vertical oval.
-                    .frame(width: Tokens.Control.chip, height: Tokens.Control.chip)
                 }
-                .buttonStyle(ShortcutChipStyle(rest: 0.055, restStroke: 0.1))
                 .disabled(modelsBusy)
                 .notchTooltip(L("model.refresh"))
                 .opacity(refreshVisible ? 1 : 0)
@@ -5099,69 +4894,21 @@ struct InlineSettingsView: View {
     /// once-in-a-while preference, not something the pane should spend a whole
     /// field on every time it opens.
     private var customInstructionsRow: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Button {
-                // Opening and closing this in quick succession is not a pin.
-                NotchPanel.exemptNextDoubleClick()
-                withAnimation(.easeOut(duration: 0.16)) { instructionsSectionOpen.toggle() }
-            } label: {
-                HStack(spacing: 5) {
-                    Image(systemName: "chevron.right")
-                        .font(.sf(Tokens.TypeSize.badge, weight: .regular))
-                        .rotationEffect(.degrees(instructionsSectionOpen ? 90 : 0))
-                    Text(L("general.customInstructions"))
-                        .font(.sf(Tokens.TypeSize.label, weight: .regular))
-                }
-                .foregroundStyle(Tokens.text1)
-                .padding(.horizontal, 10)
-                .frame(height: 26)
-                // The disclosure's own glass chip — a translucent pill that
-                // brightens under the pointer, so the fold itself reads as a
-                // control on the panel's glass rather than a bare line of text.
-                .background(
-                    Capsule(style: .continuous)
-                        .fill(Tokens.ink.opacity(hoveredDisclosure == .instructions ? 0.12 : 0.06))
-                )
-                .overlay(
-                    Capsule(style: .continuous)
-                        .strokeBorder(Tokens.ink.opacity(hoveredDisclosure == .instructions ? 0.22 : 0.12),
-                                      lineWidth: 0.5)
-                )
-                .contentShape(Capsule(style: .continuous))
-            }
-            .buttonStyle(.plain).exemptsDoubleClickPin()
-            .onHover { inside in
-                if inside { hoveredDisclosure = .instructions }
-                else if hoveredDisclosure == .instructions { hoveredDisclosure = nil }
-            }
-            .animation(.easeOut(duration: Tokens.hoverFade), value: hoveredDisclosure)
-
-            if instructionsSectionOpen {
-                ZStack(alignment: .topLeading) {
-                    if model.customInstructions.isEmpty {
-                        Text(L("general.customInstructions.placeholder"))
-                            .font(.sf(Tokens.TypeSize.form))
-                            .foregroundStyle(Tokens.text3)
-                            .allowsHitTesting(false)
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 8)
-                    }
-                    TextField("", text: Binding(
-                        get: { model.customInstructions },
-                        set: { model.customInstructions = $0 }
-                    ), axis: .vertical)
-                        .textFieldStyle(.plain)
-                        .lineLimit(1...3)
-                        .font(.sf(Tokens.TypeSize.form))
-                        .foregroundStyle(Tokens.text1)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 8)
-                        // Typing here counts as activity so a drifting pointer can't fold
-                        // the panel mid-edit (same guard the API-key field uses).
-                        .onChange(of: model.customInstructions) { model.noteUserTyping() }
-                }
-                .recessedSurface(in: RoundedRectangle.control, lit: false)
-            }
+        let trimmed = model.customInstructions.trimmingCharacters(in: .whitespacesAndNewlines)
+        return SettingsCollapsible(
+            title: L("general.customInstructions"),
+            summary: trimmed.isEmpty ? nil : trimmed,
+            isOpen: $instructionsSectionOpen
+        ) {
+            SettingsTextField(
+                placeholder: L("general.customInstructions.placeholder"),
+                text: Binding(
+                    get: { model.customInstructions },
+                    set: { model.customInstructions = $0 }
+                ),
+                lines: 1...3,
+                onChange: { _ in model.noteUserTyping() }
+            )
         }
     }
 
@@ -5174,7 +4921,7 @@ struct InlineSettingsView: View {
                 Haptics.levelChange()
                 // Off forgets every file, so it asks first.
                 guard on || memory.entries.isEmpty else {
-                    memoryForgetTarget = MemoryForgetTarget(file: nil, turnsOff: true)
+                    memoryForgetTarget = MemoryForgetTarget(turnsOff: true)
                     return
                 }
                 memory.enabled = on
@@ -5188,292 +4935,11 @@ struct InlineSettingsView: View {
         .accessibilityLabel(L("memory.toggle"))
     }
 
-    /// Memory's master switch, as a plain row; the files open from the
-    /// "Manage your memories" link under the group.
+    /// Memory's master switch, as a plain row; the folder opens in Finder from
+    /// the "Manage your memories" link under the group.
     private var memoryEnableRow: some View {
         settingRow(label: L("memory.enable"), info: L("memory.info"), aligned: true) {
             memoryToggle
-        }
-    }
-
-    /// The Memory sub-page: the files in the memory folder, a box to tell the
-    /// model what to change, and Forget all.
-    private var memoryPage: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            if memory.enabled, memory.scanning {
-                HStack(spacing: 8) {
-                    ProgressView().controlSize(.small)
-                    Text(L("memory.scanning"))
-                        .font(.sf(Tokens.TypeSize.label))
-                        .foregroundStyle(Tokens.text2)
-                }
-            }
-            if !memory.scanning {
-                // Two panes, like an editor: the file tree on the left
-                // (folders fold, a right-click shows a file or folder in
-                // Finder), the selected file on the right, edited in place and
-                // written back as you type.
-                if memory.entries.isEmpty {
-                    Text(L("memory.empty"))
-                        .font(.sf(Tokens.TypeSize.form))
-                        .foregroundStyle(Tokens.text3)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 8)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .recessedSurface(in: RoundedRectangle.control, lit: false)
-                } else {
-                    // Each pane scrolls on its own; together they fill the page
-                    // above the pinned footer, so the page itself holds still.
-                    HStack(alignment: .top, spacing: 10) {
-                        ScrollView(.vertical) {
-                            VStack(alignment: .leading, spacing: 0) {
-                                ForEach(memoryTree, id: \.folder) { group in
-                                    if !group.folder.isEmpty { memoryFolderRow(group.folder) }
-                                    if group.folder.isEmpty || !memoryClosedFolders.contains(group.folder) {
-                                        ForEach(group.files) { entry in
-                                            memoryFileRow(entry, indented: !group.folder.isEmpty)
-                                        }
-                                    }
-                                }
-                            }
-                            .padding(4)
-                            .frame(maxWidth: .infinity, alignment: .topLeading)
-                        }
-                        .scrollIndicators(.never)
-                        .frame(width: 250)
-                        .recessedSurface(in: RoundedRectangle.control, lit: false)
-
-                        ScrollView(.vertical) {
-                            memoryEditorPane
-                                .frame(maxWidth: .infinity, alignment: .topLeading)
-                        }
-                        .scrollIndicators(.never)
-                        .frame(maxWidth: .infinity)
-                        .recessedSurface(in: RoundedRectangle.control, lit: false)
-                    }
-                    .frame(height: memoryPanesHeight)
-                }
-
-                // Room for the pinned footer (`memoryFooter`).
-                Color.clear.frame(height: 44)
-            }
-        }
-        .onAppear {
-            memoryDrafts = [:]   // the model may have rewritten files since
-            openRequestedMemoryFile()
-            model.scanHistoryForMemories()
-        }
-        .onChange(of: model.memoryFileToOpen) { openRequestedMemoryFile() }
-    }
-
-    /// An "Updated memory" line asked for this file: unfold its folder and
-    /// open it.
-    private func openRequestedMemoryFile() {
-        guard let file = model.memoryFileToOpen else { return }
-        model.memoryFileToOpen = nil
-        if let folder = file.split(separator: "/").dropLast().first { memoryClosedFolders.remove(String(folder)) }
-        memoryOpenFile = file
-    }
-
-    /// The memory files grouped by folder: top-level files first, then each
-    /// folder by name.
-    private var memoryTree: [(folder: String, files: [UserMemory.Entry])] {
-        let grouped = Dictionary(grouping: memory.entries) { entry -> String in
-            entry.id.contains("/") ? String(entry.id.split(separator: "/")[0]) : ""
-        }
-        return grouped.keys.sorted { a, b in
-            a.isEmpty != b.isEmpty ? a.isEmpty : a.localizedStandardCompare(b) == .orderedAscending
-        }.map { (folder: $0, files: grouped[$0] ?? []) }
-    }
-
-    /// A folder in the tree: a chevron that folds it, and its name.
-    private func memoryFolderRow(_ folder: String) -> some View {
-        let open = !memoryClosedFolders.contains(folder)
-        return Button {
-            NotchPanel.exemptNextDoubleClick()
-            withAnimation(.easeOut(duration: 0.16)) {
-                if open { memoryClosedFolders.insert(folder) } else { memoryClosedFolders.remove(folder) }
-            }
-        } label: {
-            HStack(spacing: 6) {
-                Image(systemName: "chevron.right")
-                    .font(.sf(Tokens.TypeSize.badge, weight: .regular))
-                    .rotationEffect(.degrees(open ? 90 : 0))
-                    .frame(width: 14)
-                Text(folder)
-                    .font(Self.memoryMono)
-                    .foregroundStyle(Tokens.text2)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-            }
-            .foregroundStyle(Tokens.text3)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain).exemptsDoubleClickPin()
-        .padding(.horizontal, 8)
-        .padding(.vertical, 5)
-        .contextMenu { memoryRevealButton(folder) }
-    }
-
-    private func memoryRevealButton(_ name: String) -> some View {
-        Button(L("memory.showInFinder")) {
-            NSWorkspace.shared.activateFileViewerSelecting([UserMemory.folder.appendingPathComponent(name)])
-        }
-    }
-
-    /// A memory file in the tree: icon, name and last update. A tap shows it in the editor
-    /// pane; the selected file keeps a lit row.
-    private func memoryFileRow(_ entry: UserMemory.Entry, indented: Bool) -> some View {
-        let selected = memoryOpenFile == entry.id
-        let name = entry.id.split(separator: "/").last.map(String.init) ?? entry.id
-        return Button {
-            NotchPanel.exemptNextDoubleClick()
-            memoryOpenFile = entry.id
-        } label: {
-            HStack(spacing: 6) {
-                MarkdownMark()
-                    .foregroundStyle(Tokens.text3)
-                    .frame(width: 14, height: 9)
-                Text(name)
-                    .font(Self.memoryMono)
-                    .foregroundStyle(selected ? Tokens.text1 : Tokens.text2)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                Text(relativeTime(entry.modified))
-                    .font(Self.memoryMono)
-                    .foregroundStyle(Tokens.text4)
-                    .fixedSize()
-            }
-            .padding(.leading, indented ? 26 : 8)
-            .padding(.trailing, 8)
-            .padding(.vertical, 5)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(Tokens.ink.opacity(selected ? 0.08 : 0))
-            )
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain).exemptsDoubleClickPin()
-        .contextMenu {
-            memoryRevealButton(entry.id)
-            Button(L("memory.delete")) { deleteMemoryFile(entry.id) }
-        }
-    }
-
-    /// The Memory page's editor face: the code-block monospace at its size.
-    private static let memoryMono = Font.system(size: Tokens.TypeSize.meta, design: .monospaced)
-
-    /// The two Memory panes' height: the page's own, less its runways, the
-    /// pinned footer's room and the gap above it.
-    private var memoryPanesHeight: CGFloat {
-        max(160, settingsPaneHeight - metrics.paneTopRunway - 20 - 44 - 12)
-    }
-
-    /// Asks before forgetting the file (see `memoryForgetTarget`).
-    private func deleteMemoryFile(_ id: String) {
-        memoryForgetTarget = MemoryForgetTarget(file: id)
-    }
-
-    /// The editor pane: the selected file's path and last update, then its
-    /// whole text, editable. With nothing selected it shows the first file.
-    @ViewBuilder
-    private var memoryEditorPane: some View {
-        if let entry = memory.entries.first(where: { $0.id == memoryOpenFile })
-            ?? memoryTree.first?.files.first {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    Text(entry.id)
-                        .font(Self.memoryMono)
-                        .foregroundStyle(Tokens.text2)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    Text(relativeTime(entry.modified))
-                        .font(Self.memoryMono)
-                        .foregroundStyle(Tokens.text4)
-                        .fixedSize()
-                }
-                .contextMenu { memoryRevealButton(entry.id) }
-                TextField("", text: Binding(
-                    get: { memoryDrafts[entry.id] ?? memory.read(entry.id) ?? "" },
-                    set: { text in
-                        memoryDrafts[entry.id] = text
-                        memory.write(entry.id, content: text)
-                    }
-                ), axis: .vertical)
-                    .textFieldStyle(.plain)
-                    .font(Self.memoryMono)
-                    .lineSpacing(2)
-                    .foregroundStyle(Tokens.text1)
-                    // Typing here counts as activity so a drifting pointer
-                    // can't fold the panel mid-edit.
-                    .onChange(of: memoryDrafts[entry.id]) { model.noteUserTyping() }
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 10)
-            .onAppear { if memoryOpenFile == nil { memoryOpenFile = entry.id } }
-        }
-    }
-
-    /// Below the files: say what to change or remove, and the model edits the
-    /// files (`NotchModel.editMemory`). The app's composer (`ComposerBox`), as
-    /// the detail page's follow-up line wears it.
-    private var memoryInstructField: some View {
-        ComposerBox(
-            text: $memoryInstruction,
-            onSubmit: submitMemoryInstruction,
-            placeholder: { Text(L("memory.instruct")) },
-            trailing: {
-                if memoryEditing {
-                    ThinkingDots(dot: 4, spacing: 5, minHeight: 14)
-                        .fixedSize()
-                        .transition(.opacity)
-                } else if !memoryInstruction.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    SendButton(compact: true, action: submitMemoryInstruction)
-                        .transition(.scale(scale: 0.6).combined(with: .opacity))
-                }
-            })
-            .disabled(memoryEditing)
-            .onChange(of: memoryInstruction) { model.noteUserTyping() }
-            .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    /// The instruction box and Forget all, on one line, pinned to the bottom
-    /// of the Memory pane.
-    private var memoryFooter: some View {
-        HStack(alignment: .bottom, spacing: 8) {
-            memoryInstructField
-            if !memory.entries.isEmpty {
-                Button {
-                    memoryForgetTarget = MemoryForgetTarget(file: nil)
-                } label: {
-                    Text(L("memory.clearAll"))
-                        .font(.sf(Tokens.TypeSize.label, weight: .regular))
-                        .foregroundStyle(Tokens.text2)
-                        .padding(.horizontal, 14)
-                        .frame(minHeight: Tokens.Control.rail)
-                }
-                .buttonStyle(PromptTemplateChipStyle(shape: Capsule(style: .continuous)))
-                .fixedSize()
-            }
-        }
-        .padding(.bottom, 6)
-    }
-
-    private func submitMemoryInstruction() {
-        let text = memoryInstruction
-        guard !memoryEditing, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        memoryEditing = true
-        Task {
-            let ok = await model.editMemory(instruction: text)
-            memoryEditing = false
-            if ok {
-                memoryInstruction = ""
-                memoryDrafts = [:]
-            }
         }
     }
 
@@ -5499,54 +4965,22 @@ struct InlineSettingsView: View {
     /// General makes the system's invisible TCC state explicit, and the trailing
     /// action gives every missing permission a recovery path in the same place.
     private var permissionsSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Button {
-                withAnimation(.easeOut(duration: 0.16)) { permissionsSectionOpen.toggle() }
-            } label: {
-                HStack(spacing: 5) {
-                    Image(systemName: "chevron.right")
-                        .font(.sf(Tokens.TypeSize.badge, weight: .regular))
-                        .rotationEffect(.degrees(permissionsSectionOpen ? 90 : 0))
-                    Text(L("permissions.title"))
-                        .font(.sf(Tokens.TypeSize.label, weight: .regular))
-                }
-                .foregroundStyle(Tokens.text1)
-                .padding(.horizontal, 10)
-                .frame(height: 26)
-                // The disclosure's own glass chip — a translucent pill that
-                // brightens under the pointer, so the fold itself reads as a
-                // control on the panel's glass rather than a bare line of text.
-                .background(
-                    Capsule(style: .continuous)
-                        .fill(Tokens.ink.opacity(hoveredDisclosure == .permissions ? 0.12 : 0.06))
-                )
-                .overlay(
-                    Capsule(style: .continuous)
-                        .strokeBorder(Tokens.ink.opacity(hoveredDisclosure == .permissions ? 0.22 : 0.12),
-                                      lineWidth: 0.5)
-                )
-                .contentShape(Capsule(style: .continuous))
-            }
-            .buttonStyle(.plain).exemptsDoubleClickPin()
-            .onHover { inside in
-                if inside { hoveredDisclosure = .permissions }
-                else if hoveredDisclosure == .permissions { hoveredDisclosure = nil }
-            }
-            .animation(.easeOut(duration: Tokens.hoverFade), value: hoveredDisclosure)
-
-            if permissionsSectionOpen {
-                VStack(alignment: .leading, spacing: 9) {
-                    ForEach(SystemPermission.allCases, id: \.self) { permission in
-                        permissionRow(label: L(permission.labelKey),
-                                      status: permissionStatus[permission] ?? .checking) {
-                            requestPermission(permission)
-                        }
+        let grantedCount = SystemPermission.allCases.filter { permissionStatus[$0] == .granted }.count
+        let summary = permissionStatus.isEmpty ? nil : "\(grantedCount) / \(SystemPermission.allCases.count)"
+        return SettingsCollapsible(
+            title: L("permissions.title"),
+            summary: summary,
+            isOpen: $permissionsSectionOpen
+        ) {
+            VStack(alignment: .leading, spacing: 8) {
+                ForEach(SystemPermission.allCases, id: \.self) { permission in
+                    permissionRow(label: L(permission.labelKey),
+                                  status: permissionStatus[permission] ?? .checking) {
+                        requestPermission(permission)
                     }
                 }
-                .transition(.opacity.combined(with: .move(edge: .top)))
             }
         }
-        .clipped()
         // Probes only while the list is open. The first pass may launch Notes,
         // Mail and Music in the background, since the Apple Events check needs
         // a running target; later passes re-read every status every two
@@ -6006,30 +5440,17 @@ struct InlineSettingsView: View {
                 .foregroundStyle(Tokens.text2)
                 .frame(width: Self.decisionLabelWidth, alignment: .leading)
             Spacer(minLength: 0)
-            ZStack(alignment: .leading) {
-                if text.wrappedValue.isEmpty {
-                    Text(placeholder)
-                        .font(.sf(Tokens.TypeSize.form))
-                        .foregroundStyle(Tokens.text3)
-                        .lineLimit(1)
-                        .allowsHitTesting(false)
-                }
-                Group {
-                    if secure { SecureField("", text: text) } else { TextField("", text: text) }
-                }
-                .textFieldStyle(.plain)
-                .font(.sf(Tokens.TypeSize.form))
-                .foregroundStyle(Tokens.text1)
-                .onChange(of: text.wrappedValue) {
+            SettingsTextField(
+                placeholder: placeholder,
+                text: text,
+                secure: secure,
+                onChange: { newValue in
                     model.noteUserTyping()
-                    commit(text.wrappedValue)
+                    commit(newValue)
                     decisionTestResult = nil
                 }
-            }
-            .padding(.horizontal, 12)
-            .frame(height: 34)
+            )
             .frame(maxWidth: Self.decisionFieldWidth, alignment: .leading)
-            .recessedSurface(in: RoundedRectangle.control, lit: false)
         }
     }
 
@@ -6161,7 +5582,7 @@ struct InlineSettingsView: View {
     /// after `MCPConnector.all` drops those this build cannot sign in to.
     private var connectorCategories: [MCPConnector.Category] {
         MCPConnector.Category.allCases.filter { category in
-            MCPConnector.all.contains { $0.category == category }
+            !MCPConnector.connectors(in: category).isEmpty
         }
     }
 
@@ -6170,20 +5591,16 @@ struct InlineSettingsView: View {
     private var activeConnectorCategory: MCPConnector.Category {
         connectorCategories.contains(connectorCategory)
             ? connectorCategory
-            : (connectorCategories.first ?? .docs)
+            : (connectorCategories.first ?? .recommended)
     }
 
     private var connectorCategoryTabs: some View {
-        HStack(spacing: TabChip.gap) {
-            ForEach(connectorCategories, id: \.self) { category in
-                TabChip(
-                    title: L("connector.category.\(category.rawValue)"),
-                    active: category == activeConnectorCategory
-                ) {
-                    connectorCategory = category
-                }
-            }
-        }
+        SettingsTabs(
+            items: connectorCategories,
+            selection: activeConnectorCategory,
+            title: { L("connector.category.\($0.rawValue)") },
+            onSelect: { connectorCategory = $0 }
+        )
     }
 
     private var telegramSection: some View {
@@ -6191,39 +5608,19 @@ struct InlineSettingsView: View {
             // Laid out like a connector row: icon, name, and the status column.
             // The icon keeps the name's line, so the handles below it are the
             // row's second line and the block stays as tall as its content.
-            HStack(alignment: .top, spacing: 10) {
+            HStack(alignment: .center, spacing: 10) {
                 Image("ConnectorLogo-telegram")
                     .resizable()
                     .interpolation(.high)
                     .frame(width: 24, height: 24)
                     .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
                     .shadow(color: .black.opacity(0.25), radius: 1.5, y: 0.5)
-                    // The 40pt name row centers it on the name.
-                    .padding(.top, 8)
-                VStack(alignment: .leading, spacing: 0) {
-                    HStack(spacing: 10) {
-                        Text(L("telegram.title"))
-                            .font(.sf(Tokens.TypeSize.form))
-                            .foregroundStyle(Tokens.text1)
-                            .lineLimit(1)
-                        Spacer(minLength: 12)
-                        Toggle("", isOn: Binding(
-                            get: { telegramOn },
-                            set: { on in
-                                Haptics.levelChange()
-                                setTelegram(on)
-                            }
-                        ))
-                        .labelsHidden()
-                        .toggleStyle(.switch)
-                        .controlSize(.mini)
-                        .tint(Tokens.switchTint)
-                    }
-                    .frame(height: 40)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(L("telegram.title"))
+                        .font(.sf(Tokens.TypeSize.form, weight: .regular))
+                        .foregroundStyle(Tokens.text1)
+                        .lineLimit(1)
                     if case .connected(let bot, let owner) = telegram.state {
-                        // A detail of the row above, so it sits in meta, not as
-                        // rows of its own — with a little air under the name
-                        // instead of running into it and the switch.
                         HStack(spacing: 12) {
                             ForEach(owner.isEmpty ? ["@" + bot] : ["@" + bot, owner], id: \.self) { name in
                                 Text(name)
@@ -6235,42 +5632,62 @@ struct InlineSettingsView: View {
                             UnderlineLink(title: L("telegram.avatar")) { saveTelegramAvatar() }
                             UnderlineLink(title: L("telegram.useAnother")) { telegramConfirmForget = true }
                         }
-                        .padding(.top, -6)
                     }
                 }
+                Spacer(minLength: 12)
+                Toggle("", isOn: Binding(
+                    get: { telegramOn },
+                    set: { on in
+                        Haptics.levelChange()
+                        setTelegram(on)
+                    }
+                ))
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .controlSize(.mini)
+                .tint(Tokens.switchTint)
             }
-            // The handles line is the block's own second line, so the block
-            // carries its breathing room instead of hanging flush under the pane.
-            .padding(.bottom, 2)
+            .frame(minHeight: 40)
             if telegramSettingUp {
-                VStack(alignment: .leading, spacing: 6) {
-                    telegramStepRow(1, L("telegram.step1")) {
+                let completed = max(0, telegramCurrentStep - 1)
+                SettingsPlanSteps(title: L("telegram.title"), completedCount: completed, totalCount: 3) {
+                    SettingsPlanStep(title: L("telegram.step1"),
+                                     status: telegramStepStatus(1)) {
                         TelegramStepPill(title: L("telegram.openBotFather")) {
                             openBotFather()
                             telegramOpenedBotFather = true
                         }
+                    } detail: {
+                        if telegramCurrentStep == 1 {
+                            Text(L("telegram.step1.detail"))
+                                .font(.sf(Tokens.TypeSize.meta))
+                                .foregroundStyle(Tokens.text3)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
                     }
-                    if telegramCurrentStep == 1 { telegramStepNote(L("telegram.step1.detail")) }
-                    telegramStepRow(2, L("telegram.step2")) {
+                    SettingsPlanStep(title: L("telegram.step2"),
+                                     status: telegramStepStatus(2)) {
                         if telegram.state == .checking {
                             TelegramStepPill(title: L("telegram.checking"), action: nil)
                         }
-                    }
-                    if telegramCurrentStep == 2, telegram.state != .checking {
-                        telegramTokenField
-                        if telegram.state == .invalidToken {
-                            Text(L("telegram.invalid"))
-                                .font(.sf(Tokens.TypeSize.meta))
-                                .foregroundStyle(Tokens.danger)
+                    } detail: {
+                        if telegramCurrentStep == 2, telegram.state != .checking {
+                            telegramTokenField
+                            if telegram.state == .invalidToken {
+                                Text(L("telegram.invalid"))
+                                    .font(.sf(Tokens.TypeSize.meta, weight: .regular))
+                                    .foregroundStyle(Tokens.danger)
+                            }
                         }
                     }
-                    telegramStepRow(3, L("telegram.step3")) {
+                    SettingsPlanStep(title: L("telegram.step3"),
+                                     status: telegramStepStatus(3),
+                                     isLast: true) {
                         if case .pairing(let bot) = telegram.state {
                             TelegramStepPill(title: "@" + bot) { telegram.openPairing() }
                         }
                     }
                 }
-                .padding(.leading, 34)
                 .transition(.opacity)
             }
         }
@@ -6293,35 +5710,21 @@ struct InlineSettingsView: View {
 
     private var signalSection: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack(alignment: .top, spacing: 10) {
+            HStack(alignment: .center, spacing: 10) {
                 Image("ConnectorLogo-signal")
                     .resizable()
                     .interpolation(.high)
                     .frame(width: 24, height: 24)
                     .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
                     .shadow(color: .black.opacity(0.25), radius: 1.5, y: 0.5)
-                    .padding(.top, 8)
-                VStack(alignment: .leading, spacing: 0) {
+                VStack(alignment: .leading, spacing: 2) {
                     HStack(spacing: 6) {
                         Text(L("signal.title"))
-                            .font(.sf(Tokens.TypeSize.form))
+                            .font(.sf(Tokens.TypeSize.form, weight: .regular))
                             .foregroundStyle(Tokens.text1)
                             .lineLimit(1)
-                        NewBadge(text: L("signal.tag"), tint: Tokens.text2)
-                        Spacer(minLength: 12)
-                        Toggle("", isOn: Binding(
-                            get: { signalOn },
-                            set: { on in
-                                Haptics.levelChange()
-                                setSignal(on)
-                            }
-                        ))
-                        .labelsHidden()
-                        .toggleStyle(.switch)
-                        .controlSize(.mini)
-                        .tint(Tokens.switchTint)
+                        SettingsBadge(text: L("signal.tag"), variant: .secondary)
                     }
-                    .frame(height: 40)
                     if case .connected(let account) = signal.state {
                         HStack(spacing: 12) {
                             Text(signal.settingUpChat ? L("signal.settingUpChat") : L("signal.noteToSelfHint"))
@@ -6335,13 +5738,27 @@ struct InlineSettingsView: View {
                                 .textSelection(.enabled)
                             UnderlineLink(title: L("telegram.forget")) { signalConfirmForget = true }
                         }
-                        .padding(.top, -6)
                     }
                 }
+                Spacer(minLength: 12)
+                Toggle("", isOn: Binding(
+                    get: { signalOn },
+                    set: { on in
+                        Haptics.levelChange()
+                        setSignal(on)
+                    }
+                ))
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .controlSize(.mini)
+                .tint(Tokens.switchTint)
             }
+            .frame(minHeight: 40)
             if signalSettingUp {
-                VStack(alignment: .leading, spacing: 6) {
-                    signalStepRow(1, L("signal.step1")) {
+                let completed = max(0, signalCurrentStep - 1)
+                SettingsPlanSteps(title: L("signal.title"), completedCount: completed, totalCount: 3) {
+                    SettingsPlanStep(title: L("signal.step1"),
+                                     status: signalStepStatus(1)) {
                         switch signal.state {
                         case .installingCLI:
                             TelegramStepPill(title: L("signal.installing"), action: nil)
@@ -6360,11 +5777,16 @@ struct InlineSettingsView: View {
                         default:
                             EmptyView()
                         }
+                    } detail: {
+                        if signalCurrentStep == 1 {
+                            Text(L("signal.step1.detail"))
+                                .font(.sf(Tokens.TypeSize.meta))
+                                .foregroundStyle(Tokens.text3)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
                     }
-                    if signalCurrentStep == 1 {
-                        telegramStepNote(L("signal.step1.detail"))
-                    }
-                    signalStepRow(2, L("signal.step2")) {
+                    SettingsPlanStep(title: L("signal.step2"),
+                                     status: signalStepStatus(2)) {
                         switch signal.state {
                         case .checking:
                             TelegramStepPill(title: L("telegram.checking"), action: nil)
@@ -6379,34 +5801,36 @@ struct InlineSettingsView: View {
                         default:
                             EmptyView()
                         }
-                    }
-                    if case .linking(let uri) = signal.state {
-                        VStack(alignment: .leading, spacing: 8) {
-                            telegramStepNote(L("signal.step2.detail"))
-                            if let qr = SignalBridge.qrImage(for: uri) {
-                                Image(nsImage: qr)
-                                    .interpolation(.none)
-                                    .resizable()
-                                    .frame(width: 148, height: 148)
-                                    .padding(10)
-                                    .background(Color.white, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-                                    .padding(.leading, 18)
-                                    .padding(.top, 2)
+                    } detail: {
+                        if case .linking(let uri) = signal.state {
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text(L("signal.step2.detail"))
+                                    .font(.sf(Tokens.TypeSize.meta))
+                                    .foregroundStyle(Tokens.text3)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                if let qr = SignalBridge.qrImage(for: uri) {
+                                    Image(nsImage: qr)
+                                        .interpolation(.none)
+                                        .resizable()
+                                        .frame(width: 148, height: 148)
+                                        .padding(10)
+                                        .background(Color.white, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                                }
                             }
+                        } else if case .failed(let reason) = signal.state {
+                            Text(reason)
+                                .font(.sf(Tokens.TypeSize.meta, weight: .regular))
+                                .foregroundStyle(Tokens.danger)
+                                .fixedSize(horizontal: false, vertical: true)
                         }
-                    } else if case .failed(let reason) = signal.state {
-                        Text(reason)
-                            .font(.sf(Tokens.TypeSize.meta))
-                            .foregroundStyle(Tokens.danger)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .padding(.leading, 18)
                     }
-                    signalStepRow(3, L("signal.step3")) {
+                    SettingsPlanStep(title: L("signal.step3"),
+                                     status: signalStepStatus(3),
+                                     isLast: true) {
                         EmptyView()
                     }
                 }
-                .padding(.leading, 34)
-                .padding(.top, -4)
+                .padding(.top, 6)
                 .transition(.opacity)
             }
         }
@@ -6456,29 +5880,11 @@ struct InlineSettingsView: View {
         }
     }
 
-    private func signalStepRow<Action: View>(_ number: Int, _ title: String,
-                                             @ViewBuilder action: () -> Action) -> some View {
+    private func signalStepStatus(_ number: Int) -> SettingsPlanStepStatus {
         let current = signalCurrentStep
-        let done = number < current
-        return HStack(spacing: 8) {
-            Text("\(number)")
-                .font(.sf(Tokens.TypeSize.label).monospacedDigit())
-                .foregroundStyle(Tokens.text4)
-                .frame(width: 10, alignment: .leading)
-            Text(title)
-                .font(.sf(Tokens.TypeSize.label, weight: .regular))
-                .foregroundStyle(number == current ? Tokens.text2 : done ? Tokens.text3 : Tokens.text4)
-                .lineLimit(1)
-            Spacer(minLength: 12)
-            if done {
-                Image(systemName: "checkmark")
-                    .font(.sf(Tokens.TypeSize.meta, weight: .regular))
-                    .foregroundStyle(Tokens.text3)
-            } else if number == current {
-                action()
-            }
-        }
-        .frame(minHeight: 28)
+        if number < current { return .done }
+        if number == current { return .running }
+        return .pending
     }
 
     /// The setup steps are on screen.
@@ -6528,67 +5934,24 @@ struct InlineSettingsView: View {
         }
     }
 
-    /// One setup step: `permissionRow`'s label, a check once done, dim until
-    /// reached. The capsule shows only on the current step.
-    private func telegramStepRow<Action: View>(_ number: Int, _ title: String,
-                                               @ViewBuilder action: () -> Action) -> some View {
+    private func telegramStepStatus(_ number: Int) -> SettingsPlanStepStatus {
         let current = telegramCurrentStep
-        let done = number < current
-        return HStack(spacing: 8) {
-            Text("\(number)")
-                .font(.sf(Tokens.TypeSize.label).monospacedDigit())
-                .foregroundStyle(Tokens.text4)
-                .frame(width: 10, alignment: .leading)
-            Text(title)
-                .font(.sf(Tokens.TypeSize.label, weight: .regular))
-                .foregroundStyle(number == current ? Tokens.text2 : done ? Tokens.text3 : Tokens.text4)
-                .lineLimit(1)
-            Spacer(minLength: 12)
-            if done {
-                Image(systemName: "checkmark")
-                    .font(.sf(Tokens.TypeSize.meta, weight: .regular))
-                    .foregroundStyle(Tokens.text3)
-            } else if number == current {
-                action()
-            }
-        }
-        .frame(minHeight: 28)
+        if number < current { return .done }
+        if number == current { return .running }
+        return .pending
     }
 
-    private func telegramStepNote(_ text: String) -> some View {
-        Text(text)
-            .font(.sf(Tokens.TypeSize.meta))
-            .foregroundStyle(Tokens.text3)
-            .fixedSize(horizontal: false, vertical: true)
-            .padding(.leading, 18)
-            .padding(.top, -4)
-    }
-
-    /// The fallback for a token the clipboard watch did not catch. Same field
-    /// as `keenableKeyRow`'s.
     private var telegramTokenField: some View {
-        ZStack(alignment: .leading) {
-            if telegramToken.isEmpty {
-                Text(L("telegram.pasteToken"))
-                    .font(.sf(Tokens.TypeSize.form))
-                    .foregroundStyle(Tokens.text3)
-                    .allowsHitTesting(false)
+        SettingsTextField(
+            placeholder: L("telegram.pasteToken"),
+            text: $telegramToken,
+            invalid: telegram.state == .invalidToken,
+            onSubmit: { connectTelegram() },
+            onChange: { newValue in
+                model.noteUserTyping()
+                if TelegramBridge.looksLikeToken(newValue) { connectTelegram() }
             }
-            TextField("", text: $telegramToken)
-                .textFieldStyle(.plain)
-                .font(.sf(Tokens.TypeSize.form))
-                .foregroundStyle(Tokens.text1)
-                .onSubmit { connectTelegram() }
-                .onChange(of: telegramToken) {
-                    model.noteUserTyping()
-                    if TelegramBridge.looksLikeToken(telegramToken) { connectTelegram() }
-                }
-        }
-        .padding(.horizontal, 12)
-        .frame(height: 34)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .recessedSurface(in: RoundedRectangle.control, lit: true)
-        .padding(.leading, 18)
+        )
     }
 
     /// Saves Notchi's two eyes (`NotchiMarkEyes`, the resting notch's face)
@@ -6725,93 +6088,35 @@ struct InlineSettingsView: View {
     /// `keySection` — it stays folded until the user opens it, whatever the proxy
     /// currently is.
     private var advancedSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Button {
-                withAnimation(.easeOut(duration: 0.16)) { advancedSectionOpen.toggle() }
-            } label: {
-                HStack(spacing: 5) {
-                    Image(systemName: "chevron.right")
-                        .font(.sf(Tokens.TypeSize.badge, weight: .regular))
-                        .rotationEffect(.degrees(advancedSectionOpen ? 90 : 0))
-                    Text(L("general.advanced"))
-                        .font(.sf(Tokens.TypeSize.label, weight: .regular))
-                }
-                .foregroundStyle(Tokens.text1)
-                .padding(.horizontal, 10)
-                .frame(height: 26)
-                // The disclosure's own glass chip — a translucent pill that
-                // brightens under the pointer, so the fold itself reads as a
-                // control on the panel's glass rather than a bare line of text.
-                .background(
-                    Capsule(style: .continuous)
-                        .fill(Tokens.ink.opacity(hoveredDisclosure == .advanced ? 0.12 : 0.06))
-                )
-                .overlay(
-                    Capsule(style: .continuous)
-                        .strokeBorder(Tokens.ink.opacity(hoveredDisclosure == .advanced ? 0.22 : 0.12),
-                                      lineWidth: 0.5)
-                )
-                .contentShape(Capsule(style: .continuous))
-            }
-            .buttonStyle(.plain).exemptsDoubleClickPin()
-            .onHover { inside in
-                if inside { hoveredDisclosure = .advanced }
-                else if hoveredDisclosure == .advanced { hoveredDisclosure = nil }
-            }
-            .animation(.easeOut(duration: Tokens.hoverFade), value: hoveredDisclosure)
-
-            if advancedSectionOpen {
-                VStack(alignment: .leading, spacing: 12) {
-                    proxyRow
-                    weatherCityRow
-                }
-                // Unfolds downward out of the disclosure line rather than
-                // popping in at full height.
-                .transition(.opacity.combined(with: .move(edge: .top)))
+        SettingsCollapsible(
+            title: L("general.advanced"),
+            summary: model.proxyURL.isEmpty ? nil : model.proxyURL,
+            isOpen: $advancedSectionOpen
+        ) {
+            VStack(alignment: .leading, spacing: 14) {
+                proxyRow
+                weatherCityRow
             }
         }
-        .clipped()
     }
 
-    /// The proxy the whole app connects through — a manual value is forced onto
-    /// both the app's own requests (`ProxyConfig.urlSession`) and the spawned
-    /// agent CLIs. Empty = auto: the app follows the system proxy natively, and
-    /// the CLIs (which inherit launchd's sparse environment, never the
-    /// `HTTPS_PROXY` exported in a shell profile) fall back through the inherited
-    /// env, macOS Network settings, then the login shell. The caption spells out
-    /// what auto actually resolved to, so an empty field is never a mystery.
     private var proxyRow: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: 6) {
             Text(L("network.proxy"))
                 .font(.sf(Tokens.TypeSize.form, weight: .regular))
                 .foregroundStyle(Tokens.text1)
             SettingInfo(L("network.proxy.hint"))
-            ZStack(alignment: .topLeading) {
-                if model.proxyURL.isEmpty {
-                    Text(L("network.proxy.placeholder"))
-                        .font(.sf(Tokens.TypeSize.form))
-                        .foregroundStyle(Tokens.text3)
-                        .allowsHitTesting(false)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 8)
-                }
-                TextField("", text: Binding(
+            SettingsTextField(
+                placeholder: L("network.proxy.placeholder"),
+                text: Binding(
                     get: { model.proxyURL },
                     set: { model.proxyURL = $0 }
-                ))
-                    .textFieldStyle(.plain)
-                    .font(.sf(Tokens.TypeSize.form))
-                    .foregroundStyle(Tokens.text1)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                    // Typing here counts as activity so a drifting pointer can't
-                    // fold the panel mid-edit (same guard the API-key field uses).
-                    .onChange(of: model.proxyURL) {
-                        model.noteUserTyping()
-                        refreshProxyStatus()
-                    }
-            }
-            .recessedSurface(in: RoundedRectangle.control, lit: false)
+                ),
+                onChange: { _ in
+                    model.noteUserTyping()
+                    refreshProxyStatus()
+                }
+            )
             Text(proxyStatus)
                 .font(.sf(Tokens.TypeSize.meta))
                 .foregroundStyle(Tokens.text3)
@@ -6821,32 +6126,17 @@ struct InlineSettingsView: View {
         .onAppear { refreshProxyStatus() }
     }
 
-    /// The city `weather` falls back to when Location access is off. Same field
-    /// shape as the proxy row above it.
     private var weatherCityRow: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: 6) {
             Text(L("weather.city"))
                 .font(.sf(Tokens.TypeSize.form, weight: .regular))
                 .foregroundStyle(Tokens.text1)
             SettingInfo(L("weather.city.hint"))
-            ZStack(alignment: .topLeading) {
-                if weatherCity.isEmpty {
-                    Text(L("weather.city.placeholder"))
-                        .font(.sf(Tokens.TypeSize.form))
-                        .foregroundStyle(Tokens.text3)
-                        .allowsHitTesting(false)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 8)
-                }
-                TextField("", text: $weatherCity)
-                    .textFieldStyle(.plain)
-                    .font(.sf(Tokens.TypeSize.form))
-                    .foregroundStyle(Tokens.text1)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                    .onChange(of: weatherCity) { model.noteUserTyping() }
-            }
-            .recessedSurface(in: RoundedRectangle.control, lit: false)
+            SettingsTextField(
+                placeholder: L("weather.city.placeholder"),
+                text: $weatherCity,
+                onChange: { _ in model.noteUserTyping() }
+            )
         }
     }
 
@@ -7419,9 +6709,7 @@ struct InlineSettingsView: View {
             Group {
                 if promptShortcuts.isEmpty {
                     Text(L("shortcuts.promptAction.empty"))
-                        .font(.sf(Tokens.TypeSize.label))
-                        .foregroundStyle(Tokens.text3)
-                        .fixedSize(horizontal: false, vertical: true)
+                        .settingsDescription()
                         .padding(.horizontal, 2)
                 }
                 // One row of small cards running right, scrolled rather than
@@ -9618,7 +8906,7 @@ struct InlineSettingsView: View {
             surveyQuestion(L("survey.q.source")) {
                 FlowLayout(hSpacing: 6, vSpacing: 6) {
                     ForEach(Self.surveySources, id: \.id) { option in
-                        SurveyChoicePill(title: option.title(), active: surveySource == option.id) {
+                        SurveyChoicePill(title: option.title(), active: surveySource == option.id, mode: .radio) {
                             surveySource = option.id
                         }
                     }
@@ -9628,7 +8916,7 @@ struct InlineSettingsView: View {
                 }
             }
             surveyQuestion(L("survey.q.role")) {
-                surveyPills(Self.surveyRoles, key: "survey.role", selected: surveyRole.map { [$0] } ?? []) {
+                surveyPills(Self.surveyRoles, key: "survey.role", selected: surveyRole.map { [$0] } ?? [], mode: .radio) {
                     surveyRole = $0
                 }
                 if surveyRole == "other" {
@@ -9637,14 +8925,14 @@ struct InlineSettingsView: View {
             }
             surveyQuestion(L("survey.q.frequency")) {
                 surveyPills(Self.surveyFrequencies, key: "survey.frequency",
-                            selected: surveyFrequency.map { [$0] } ?? []) {
+                            selected: surveyFrequency.map { [$0] } ?? [], mode: .radio) {
                     surveyFrequency = $0
                 }
             }
             surveyQuestion(L("survey.q.alternatives")) {
                 FlowLayout(hSpacing: 6, vSpacing: 6) {
                     ForEach(Self.surveyAlternatives, id: \.id) { option in
-                        SurveyChoicePill(title: option.title(), active: surveyAlternatives.contains(option.id)) {
+                        SurveyChoicePill(title: option.title(), active: surveyAlternatives.contains(option.id), mode: .checkbox) {
                             toggleSurveyAlternative(option.id)
                         }
                     }
@@ -9654,7 +8942,7 @@ struct InlineSettingsView: View {
                 }
             }
             surveyQuestion(L("survey.q.uses")) {
-                surveyPills(Self.surveyUses, key: "survey.uses", selected: surveyUses) { id in
+                surveyPills(Self.surveyUses, key: "survey.uses", selected: surveyUses, mode: .checkbox) { id in
                     if surveyUses.contains(id) { surveyUses.remove(id) } else { surveyUses.insert(id) }
                 }
                 if surveyUses.contains("other") {
@@ -9706,62 +8994,34 @@ struct InlineSettingsView: View {
     }
 
     private func surveyPills(_ ids: [String], key: String, selected: Set<String>,
+                             mode: SettingsChoiceChip.Mode,
                              choose: @escaping (String) -> Void) -> some View {
         FlowLayout(hSpacing: 6, vSpacing: 6) {
             ForEach(ids, id: \.self) { id in
                 SurveyChoicePill(title: id == "other" ? L("survey.other") : L("\(key).\(id)"),
-                                 active: selected.contains(id)) { choose(id) }
+                                 active: selected.contains(id),
+                                 mode: mode) { choose(id) }
             }
         }
     }
 
-    /// The custom endpoint's field (`customField`) without its side label, on
-    /// the in-pane card radius.
     private func surveyField(_ placeholder: String, text: Binding<String>, lines: Int) -> some View {
-        ZStack(alignment: .topLeading) {
-            if text.wrappedValue.isEmpty {
-                Text(placeholder)
-                    .font(.sf(Tokens.TypeSize.form))
-                    .foregroundStyle(Tokens.text3)
-                    .lineLimit(1)
-                    .allowsHitTesting(false)
-            }
-            TextField("", text: text, axis: .vertical)
-                .textFieldStyle(.plain)
-                .lineLimit(lines, reservesSpace: true)
-                .font(.sf(Tokens.TypeSize.form))
-                .foregroundStyle(Tokens.text1)
-                .onChange(of: text.wrappedValue) { model.noteUserTyping() }
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .recessedSurface(in: RoundedRectangle.menu, lit: false)
+        SettingsTextField(
+            placeholder: placeholder,
+            text: text,
+            lines: lines > 1 ? lines...lines : nil,
+            onChange: { _ in model.noteUserTyping() }
+        )
     }
 
-    /// Settings' `connectButton` face.
     private var surveySubmitButton: some View {
-        Button {
+        SettingsButton(title: L("survey.submit"),
+                       variant: .primary,
+                       size: .md,
+                       loading: surveySending) {
             submitSurvey()
-        } label: {
-            HStack(spacing: 7) {
-                if surveySending {
-                    ProgressView().controlSize(.small)
-                }
-                Text(L("survey.submit"))
-                    .font(.sf(Tokens.TypeSize.form, weight: .regular))
-            }
-            .foregroundStyle(Tokens.text1)
-            .padding(.horizontal, 14)
-            .frame(height: 30)
-            .prominentSurface(in: Capsule(style: .continuous), lit: surveySubmitHovering && surveyReady)
-            .contentShape(Capsule(style: .continuous))
         }
-        .buttonStyle(GlassPressStyle())
         .disabled(!surveyReady || surveySending)
-        .opacity(surveyReady ? 1 : 0.45)
-        .onHover { surveySubmitHovering = $0 }
-        .animation(.easeOut(duration: Tokens.hoverFade), value: surveySubmitHovering)
     }
 
     private func submitSurvey() {
@@ -9801,14 +9061,11 @@ struct InlineSettingsView: View {
     private struct SurveyChoicePill: View {
         let title: String
         let active: Bool
+        var mode: SettingsChoiceChip.Mode = .radio
         let action: () -> Void
 
         var body: some View {
-            TabChip(title: title, active: active) {
-                // Two quick clicks toggle twice rather than pinning the panel.
-                NotchPanel.exemptNextDoubleClick()
-                action()
-            }
+            SettingsChoiceChip(title: title, active: active, mode: mode, action: action)
         }
     }
 
@@ -9888,6 +9145,7 @@ struct InlineSettingsView: View {
 
         var body: some View {
             Button(action: action) {
+                let shape = Capsule(style: .continuous)
                 HStack(spacing: 9) {
                     ZStack {
                         brandMark
@@ -9908,38 +9166,20 @@ struct InlineSettingsView: View {
                         .font(.sf(Tokens.TypeSize.label, weight: .regular))
                         .foregroundStyle(hovering ? Tokens.text1 : Tokens.text2)
                         .lineLimit(1)
-                        // The three buttons share the row equally; a title that
-                        // doesn't fit gives up a little size rather than a tail
-                        // of letters.
                         .minimumScaleFactor(0.78)
 
                     Spacer(minLength: 0)
                 }
                 .padding(.horizontal, 13)
-                .frame(maxWidth: .infinity, minHeight: 36, maxHeight: 36)
-                .background(
-                    Capsule(style: .continuous)
-                        .fill(Tokens.ink.opacity(hovering ? 0.075 : 0.04))
-                )
-                .overlay(
-                    Capsule(style: .continuous)
-                        .strokeBorder(Tokens.ink.opacity(hovering ? 0.16 : 0.08), lineWidth: 0.5)
-                )
-                .clipShape(Capsule(style: .continuous))
-                .contentShape(Capsule(style: .continuous))
+                .frame(maxWidth: .infinity, minHeight: 34, maxHeight: 34)
+                .background(shape.fill(Tokens.ink.opacity(hovering ? 0.075 : 0.04)))
+                .overlay(shape.strokeBorder(Tokens.ink.opacity(hovering ? 0.18 : 0.10), lineWidth: 0.5))
+                .clipShape(shape)
+                .contentShape(shape)
             }
-            .buttonStyle(AboutSocialPressStyle())
-            .scaleEffect(reduceMotion ? 1 : (hovering ? 1.02 : 1))
-            .onHover { inside in
-                hovering = inside
-                // One tap as the button catches under the cursor — the same one
-                // the island gets when it snaps open. Only on the way in;
-                // leaving is passive.
-                if inside { Haptics.alignment() }
-            }
-            .animation(.easeInOut(duration: reduceMotion ? 0.12 : 0.2), value: hovering)
-            .animation(reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.72),
-                       value: hovering)
+            .buttonStyle(.plain).exemptsDoubleClickPin()
+            .onHover { hovering = $0 }
+            .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
         }
 
         @ViewBuilder
@@ -10440,24 +9680,26 @@ private struct ShortcutChipStyle: ButtonStyle {
     /// The armed / recording chip: brighter wash and a full-weight ring.
     var active: Bool = false
     /// Resting wash and hairline, for chips that sit quieter than a chord (reset).
-    var rest: Double = 0.07
-    var restStroke: Double = 0.13
+    var rest: Double = 0.06
+    var restStroke: Double = 0.12
 
     @State private var hovering = false
+
+    private var shape: Capsule { Capsule(style: .continuous) }
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .exemptsDoubleClickPin(pressed: configuration.isPressed)
             .background(
-                Capsule(style: .continuous).fill(Tokens.ink.opacity(
-                    active ? 0.12 : (hovering ? rest + 0.055 : rest)))
+                shape.fill(Tokens.ink.opacity(
+                    active ? 0.12 : (hovering ? rest + 0.05 : rest)))
             )
             .overlay(
-                Capsule(style: .continuous).strokeBorder(
-                    Tokens.ink.opacity(active ? 0.45 : (hovering ? restStroke + 0.11 : restStroke)),
+                shape.strokeBorder(
+                    Tokens.ink.opacity(active ? 0.45 : (hovering ? restStroke + 0.10 : restStroke)),
                     lineWidth: active ? 1 : 0.5)
             )
-            .contentShape(Capsule(style: .continuous))
+            .contentShape(shape)
             .scaleEffect(configuration.isPressed ? Tokens.chipPressScale : 1)
             .onHover { hovering = $0 }
             .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
@@ -10527,10 +9769,8 @@ struct GlassPopoverBackground: ViewModifier {
     }
 }
 
-/// A bare word-action hanging off a settings row — Save / Test / Change /
-/// Cancel / Disconnect / Choose…. Quiet at rest (secondary ink, below its
-/// label, so the eye reads the setting before the escape hatch), full ink
-/// under the cursor.
+/// Inline ghost button for row actions — Save / Test / Change / Cancel /
+/// Disconnect / Choose…. Quiet at rest, reveals a subtle rounded surface on hover.
 struct SettingActionButton: View {
     var title: String
     /// Rest ink. Defaults to the secondary register; a de-emphasised action (a
@@ -10538,13 +9778,20 @@ struct SettingActionButton: View {
     var tone: Color = Tokens.text2
     var action: () -> Void
 
+    @Environment(\.isEnabled) private var isEnabled
     @State private var hovering = false
+
+    private var shape: Capsule { Capsule(style: .continuous) }
 
     var body: some View {
         Button(title, action: action)
             .buttonStyle(.plain).exemptsDoubleClickPin()
             .font(.sf(Tokens.TypeSize.meta, weight: .regular))
-            .foregroundStyle(hovering ? Tokens.text1 : tone)
+            .foregroundStyle(hovering && isEnabled ? Tokens.text1 : tone)
+            .padding(.horizontal, 8)
+            .frame(height: SettingsUI.heightSM)
+            .background(shape.fill(Tokens.ink.opacity(hovering && isEnabled ? 0.08 : 0)))
+            .contentShape(shape)
             .onHover { hovering = $0 }
             .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
     }
@@ -10646,14 +9893,14 @@ private enum SettingsType {
 /// read as small text spread over a large surface.
 private struct SettingsTypeFont: ViewModifier {
     var size: CGFloat
-    /// The weight in the window; the panel keeps regular.
+    var panelWeight: Font.Weight = .regular
     var windowWeight: Font.Weight = .regular
     @Environment(\.settingsWindowPaneHeight) private var windowPane
 
     func body(content: Content) -> some View {
         let inWindow = windowPane != nil
         return content.font(.sf(size + (inWindow ? SettingsMetrics.window.typeBump : 0),
-                                weight: inWindow ? windowWeight : .regular))
+                                weight: inWindow ? windowWeight : panelWeight))
     }
 }
 
@@ -10769,7 +10016,7 @@ struct UnderlineLink: View {
     var body: some View {
         Button(action: action) {
             label
-                .underline()
+                .underline(hovering)
                 .lineLimit(1)
                 .foregroundStyle(hovering ? Tokens.text1 : Tokens.text3)
                 .contentShape(Rectangle())
@@ -10780,7 +10027,7 @@ struct UnderlineLink: View {
     }
 }
 
-/// A text action on a small chip, drawn like the compose bar's Chat word.
+/// A secondary action button in Settings (`SettingsUI.controlRadius`, 28pt height).
 private struct ChipLink: View {
     let title: String
     /// A Buy License chip: `LicenseChipSurface` instead of the plain fill.
@@ -10790,19 +10037,24 @@ private struct ChipLink: View {
     @State private var hovering = false
 
     var body: some View {
-        let shape = RoundedRectangle(cornerRadius: 6, style: .continuous)
+        let shape = Capsule(style: .continuous)
         return Button(action: action) {
             Text(title)
-                .font(.sf(Tokens.TypeSize.meta))
+                .font(.sf(Tokens.TypeSize.meta, weight: .regular))
                 .foregroundStyle(Tokens.text1)
                 .lineLimit(1)
-                .padding(.horizontal, 7)
-                .padding(.vertical, 3.5)
+                .padding(.horizontal, 11)
+                .frame(height: SettingsUI.heightSM)
                 .background {
                     if license {
                         Color.clear.licenseChipSurface(shape, hovered: hovering)
                     } else {
-                        shape.fill(Tokens.ink.opacity(hovering ? 0.12 : 0.07))
+                        shape.fill(hovering ? Tokens.recessFillLit : Tokens.recessFill)
+                    }
+                }
+                .overlay {
+                    if !license {
+                        shape.strokeBorder(hovering ? Tokens.recessRimLit : Tokens.recessRim, lineWidth: 0.5)
                     }
                 }
                 .contentShape(shape)
@@ -10910,7 +10162,7 @@ struct GlassChipFace: View {
     /// Its corner is always height/2 — fully round, the same capsule the effort
     /// slider's thumb and the compose row's chips use.
     static let compactMetrics: Metrics = (Tokens.TypeSize.meta, Tokens.TypeSize.badge, 5, 20, 10, 8, 12)
-    static let regularMetrics: Metrics = (Tokens.TypeSize.form, Tokens.TypeSize.caption, 7, 30, 11, 9, 15)
+    static let regularMetrics: Metrics = (Tokens.TypeSize.label, Tokens.TypeSize.caption, 7, SettingsUI.heightMD, 11, 9, 15)
 
     private var metrics: Metrics { compact ? Self.compactMetrics : Self.regularMetrics }
 
@@ -10941,10 +10193,6 @@ struct GlassChipFace: View {
                 .font(.sf(m.chevron, weight: .regular))
                 .foregroundStyle(Tokens.text3)
         }
-        // Icon-only (empty title) pills get symmetric padding so the chevron
-        // sits centered; labelled pills keep the tighter trailing inset. A
-        // logo leads with the same 10pt inset the model chip uses, so the two
-        // stacked chips share one left edge.
         .padding(.leading, logoVendor != nil ? 10 : (title.isEmpty ? m.trail : m.lead))
         .padding(.trailing, m.trail)
         .frame(height: m.height)
@@ -11130,22 +10378,18 @@ private struct PickerCard<Content: View>: View {
     @State private var hovering = false
 
     var body: some View {
+        let cardShape = RoundedRectangle(cornerRadius: Tokens.Radius.inset, style: .continuous)
         Button(action: action) {
             VStack(spacing: 6) {
                 content()
                     .frame(width: Self.thumbWidth, height: Self.thumbHeight)
                     .background(
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .fill(Tokens.ink.opacity(hovering && !selected ? 0.09 : 0.06))
+                        cardShape.fill(Tokens.ink.opacity(selected ? 0.10 : (hovering ? 0.08 : 0.045)))
                     )
                     .overlay(
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .strokeBorder(Tokens.ink.opacity(0.10), lineWidth: 0.5)
-                    )
-                    .padding(3)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 11, style: .continuous)
-                            .strokeBorder(Self.selectionRing.opacity(selected ? 1 : 0), lineWidth: 2)
+                        cardShape.strokeBorder(
+                            selected ? Tokens.text1.opacity(0.85) : Tokens.ink.opacity(hovering ? 0.22 : 0.11),
+                            lineWidth: selected ? 1.5 : 0.5)
                     )
                 Text(label)
                     .font(.sf(Tokens.TypeSize.meta, weight: .regular))
@@ -11693,30 +10937,6 @@ private struct ListRowRemoveButton: View {
     }
 }
 
-/// The Markdown mark ("M↓" in a rounded frame), as an editor's file tree shows
-/// a .md file. Drawn from the mark's own 208×128 geometry; takes the
-/// foreground style.
-private struct MarkdownMark: View {
-    var body: some View {
-        Canvas { context, size in
-            let k = min(size.width / 208, size.height / 128)
-            let ox = (size.width - 208 * k) / 2, oy = (size.height - 128 * k) / 2
-            func p(_ x: CGFloat, _ y: CGFloat) -> CGPoint { CGPoint(x: ox + x * k, y: oy + y * k) }
-            let frame = Path(roundedRect: CGRect(origin: p(5, 5), size: CGSize(width: 198 * k, height: 118 * k)),
-                             cornerRadius: 10 * k)
-            context.stroke(frame, with: .foreground, lineWidth: max(1, 10 * k))
-            var glyphs = Path()
-            glyphs.addLines([p(30, 98), p(30, 30), p(50, 30), p(70, 55), p(90, 30), p(110, 30),
-                             p(110, 98), p(90, 98), p(90, 59), p(70, 84), p(50, 59), p(50, 98)])
-            glyphs.closeSubpath()
-            glyphs.addLines([p(155, 98), p(125, 65), p(145, 65), p(145, 30), p(165, 30), p(165, 65), p(185, 65)])
-            glyphs.closeSubpath()
-            context.fill(glyphs, with: .foreground)
-        }
-    }
-}
-
-
 private struct SettingsWindowPaneHeightKey: EnvironmentKey {
     static let defaultValue: CGFloat? = nil
 }
@@ -11857,6 +11077,39 @@ struct HostWindowProbe: NSViewRepresentable {
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
             box?.window = window
+        }
+    }
+}
+
+
+/// Shared privacy confirmation dialog shown before connecting any third-party
+/// (Composio-backed) connector, whether triggered from Settings or an in-chat card.
+struct ThirdPartyConnectorConsentOverlay: View {
+    let connector: MCPConnector
+    @ObservedObject var auth: MCPConnectorAuth
+    var floating: Bool = false
+
+    var body: some View {
+        ConfirmationDialogOverlay(onDismiss: { auth.pendingThirdPartyConsent = nil }, floating: floating) {
+            SettingsAlertDialog(
+                title: L("connector.thirdParty.title", connector.title),
+                description: L("connector.thirdParty.body", connector.title),
+                confirmTitle: L("connector.thirdParty.confirm"),
+                cancelTitle: L("clear.cancel"),
+                destructive: false,
+                onCancel: { auth.pendingThirdPartyConsent = nil },
+                onConfirm: {
+                    let target = connector
+                    auth.pendingThirdPartyConsent = nil
+                    auth.connect(target)
+                }
+            ) {
+                UnderlineLink(title: L("connector.thirdParty.privacy"), external: true) {
+                    if let url = URL(string: "https://composio.dev/privacy") {
+                        NSWorkspace.shared.open(url)
+                    }
+                }
+            }
         }
     }
 }

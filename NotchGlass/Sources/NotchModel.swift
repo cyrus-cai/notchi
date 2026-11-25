@@ -4312,10 +4312,6 @@ final class NotchModel: ObservableObject {
         withAnimation(.spring(response: 0.36, dampingFraction: 1)) { undoMemoryUpdate(capture) }
     }
 
-    /// A memory file for Settings → Memory to open when it next shows, set by
-    /// an "Updated memory" line.
-    @Published var memoryFileToOpen: String?
-
     /// Undo an "Updated memory" line: the file goes back as it was (or away,
     /// if it was new), and the line leaves the answer it was on, on screen and
     /// in Recent.
@@ -4366,14 +4362,18 @@ final class NotchModel: ObservableObject {
                 openApp(bundleID: "com.apple.iCal")
             }
         case .memory:
-            // The file the line names, open on Settings → Memory.
+            // Reveal the updated file in Finder, or open the memory folder directly.
+            try? FileManager.default.createDirectory(at: UserMemory.folder,
+                                                     withIntermediateDirectories: true)
             if let link = capture.link, let data = link.data(using: .utf8),
                let before = try? JSONDecoder().decode(MemoryFileBefore.self, from: data) {
-                memoryFileToOpen = before.file
+                let target = UserMemory.folder.appendingPathComponent(before.file)
+                if FileManager.default.fileExists(atPath: target.path) {
+                    NSWorkspace.shared.activateFileViewerSelecting([target])
+                    break
+                }
             }
-            settingsSection = InlineSettingsView.Section.memory.rawValue
-            openSettings()
-            return
+            NSWorkspace.shared.open(UserMemory.folder)
         }
         fullClose()
     }
@@ -8042,7 +8042,7 @@ final class NotchModel: ObservableObject {
             && !showSettings && !showWhatsNew && !showHistory
             && agentDetailTaskID == nil && !agentComposeActive
             && promptShortcutContext == nil && promptShortcutMode == nil
-            && selectionContext == nil && loopIntervalMinutes == nil
+            && loopIntervalMinutes == nil
             && askComposeImages.isEmpty && droppedFiles.isEmpty && recallPosition == nil
             && !noteSaving && lastSavedNote == nil && noteError == nil
     }
@@ -12646,6 +12646,21 @@ final class NotchModel: ObservableObject {
         return f
     }()
 
+    /// Automatically resumes the active conversation right after the user
+    /// connects an app from an in-chat `ConnectorInviteCard` and its MCP tools
+    /// have finished loading.
+    func continueAfterConnectorConnected(_ connector: MCPConnector) {
+        guard !LicenseLock.isLocked, !showSettings, !showWhatsNew,
+              !turns.isEmpty, !turns.contains(where: \.streaming) else { return }
+        let savedDraft = text
+        text = "I just connected \(connector.title). Please continue and complete my previous request using \(connector.title) now."
+        submit(hideUserBubble: true)
+        if !savedDraft.isEmpty {
+            text = savedDraft
+        }
+        if open { requestInputFocus() }
+    }
+
     func submit(hideUserBubble: Bool = false) {
         if LicenseLock.isLocked { return }
         // Unified threads: whether a NEW thread started by this round joins the
@@ -13701,11 +13716,13 @@ final class NotchModel: ObservableObject {
                 if walkedAway { thread.prepareCards(for: answerID) }
                 // The same exchange in the user's Telegram bot, so both places
                 // hold one history. A Telegram round is already there.
+                // Loop rounds go out without quoting the loop's prompt.
+                let mirroredQuestion = loopRound == nil ? q : ""
                 if nonoContext.surface != NoNoRequestContext.telegram {
-                    TelegramBridge.shared.mirror(threadID: threadID, question: q, answer: acc)
+                    TelegramBridge.shared.mirror(threadID: threadID, question: mirroredQuestion, answer: acc)
                 }
                 if nonoContext.surface != NoNoRequestContext.signal {
-                    SignalBridge.shared.mirror(threadID: threadID, question: q, answer: acc)
+                    SignalBridge.shared.mirror(threadID: threadID, question: mirroredQuestion, answer: acc)
                 }
                 if self.suggestFollowUpEnabled, loopRound == nil,
                    !acc.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {

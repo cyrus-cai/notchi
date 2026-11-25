@@ -295,6 +295,12 @@ struct ContentView: View {
                     }
                     return true
                 }
+                if MCPConnectorAuth.shared.pendingThirdPartyConsent != nil {
+                    withAnimation(.easeOut(duration: 0.16)) {
+                        MCPConnectorAuth.shared.pendingThirdPartyConsent = nil
+                    }
+                    return true
+                }
                 // `/` menu up → first Esc drops the command word and the menu with
                 // it, landing back on the blank prompt. One step out, like folding
                 // the recent list, not a panel close.
@@ -1232,6 +1238,9 @@ struct NotchIsland: View {
         // other screens, where the shape clipped it down to one stray button peeking
         // out of the black zone.
         .overlay {
+            ThirdPartyConsentHost(isOpen: isOpen, floating: metrics.floating)
+        }
+        .overlay {
             if model.confirmingClear, isOpen {
                 ClearHistoryConfirm(
                     lastDayCount: model.historyCountWithinLastDay,
@@ -1762,5 +1771,24 @@ private struct LidShut: ViewModifier, Animatable {
         content
             .scaleEffect(x: 1, y: 1 - 0.9 * p, anchor: .center)
             .opacity(1 - p * p)
+    }
+}
+
+/// Self-observing wrapper so `NotchIsland` doesn't redraw on unrelated auth
+/// updates, while still showing the third-party consent dialog over the whole
+/// island for both Settings and in-chat connector cards.
+private struct ThirdPartyConsentHost: View {
+    let isOpen: Bool
+    let floating: Bool
+    @ObservedObject private var auth = MCPConnectorAuth.shared
+
+    var body: some View {
+        Group {
+            if isOpen, let connector = auth.pendingThirdPartyConsent {
+                ThirdPartyConnectorConsentOverlay(connector: connector, auth: auth, floating: floating)
+                    .transition(.opacity.combined(with: .scale(scale: 0.96)))
+            }
+        }
+        .animation(.easeOut(duration: 0.16), value: auth.pendingThirdPartyConsent?.id)
     }
 }

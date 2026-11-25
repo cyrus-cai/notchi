@@ -958,6 +958,22 @@ final class MCPHub: ObservableObject {
         if loaded.fingerprint != loadedFingerprint { apply(loaded) }
     }
 
+    /// Waits until `name` finishes connecting and listing its tools (or fails / times out).
+    func waitUntilReady(_ name: String, timeout: TimeInterval = 12) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if let server = servers.first(where: { $0.name == name }) {
+                switch server.status {
+                case .ready: return true
+                case .failed, .off: return false
+                case .starting: break
+                }
+            }
+            try? await Task.sleep(nanoseconds: 120_000_000)
+        }
+        return false
+    }
+
     /// Restarts one server, from Settings.
     func restart(_ name: String) {
         // A server the file can't start (an unset secret) needs the file
@@ -1314,6 +1330,8 @@ struct MCPConnector: Identifiable, Sendable {
     let id: String
     let title: String
     let url: URL
+    /// One-line capability summary shown on in-chat connector invite cards.
+    var summary: String
     /// Scopes to ask for instead of every one the server lists.
     var scopes: [String]?
     /// Set for GitHub: its OAuth App signs in with the device flow, which needs
@@ -1340,7 +1358,21 @@ struct MCPConnector: Identifiable, Sendable {
     }
 
     enum Category: String, CaseIterable {
-        case docs, mail, projects, developer
+        case recommended, docs, mail, social, projects, developer, business
+    }
+
+    /// Top everyday connectors surfaced first under the Recommended tab (each
+    /// still lives in its own domain category too).
+    static let recommendedIDs: [String] = [
+        "notion", "gmail", "googlecalendar", "googledrive", "googledocs",
+        "googlesheets", "slack", "linear", "github", "figma",
+    ]
+
+    static func connectors(in category: Category) -> [MCPConnector] {
+        if category == .recommended {
+            return recommendedIDs.compactMap { find($0) }
+        }
+        return all.filter { $0.category == category }
     }
 
     /// A client Notchi was issued ahead of time.
@@ -1380,12 +1412,13 @@ struct MCPConnector: Identifiable, Sendable {
         authorize: URL(string: "https://login.microsoftonline.com/common/oauth2/v2.0/authorize")!,
         token: URL(string: "https://login.microsoftonline.com/common/oauth2/v2.0/token")!)
 
-    init(_ id: String, _ title: String, _ url: String, scopes: [String]? = nil,
+    init(_ id: String, _ title: String, _ url: String, summary: String = "", scopes: [String]? = nil,
          githubClientID: String? = nil, client: StaticClient? = nil, localFolder: Bool = false,
          composio: Bool = false, defaultTools: [String] = [], category: Category = .developer) {
         self.id = id
         self.title = title
         self.url = URL(string: url)!
+        self.summary = summary
         self.scopes = scopes
         self.githubClientID = githubClientID
         self.client = client
@@ -1409,68 +1442,113 @@ struct MCPConnector: Identifiable, Sendable {
         }
     }
 
-    private static func composioConnector(_ id: String, _ title: String, category: Category) -> MCPConnector {
+    private static func composioConnector(_ id: String, _ title: String, _ summary: String, category: Category) -> MCPConnector {
         MCPConnector(id, title, "https://api.notch.website/v1/connectors/\(id)/mcp",
-                     composio: true, category: category)
+                     summary: summary, composio: true, category: category)
     }
 
     private static let listed: [MCPConnector] = [
         // Docs & files
         MCPConnector("notion", "Notion", "https://mcp.notion.com/mcp",
+                     summary: "Search, read, and edit Notion pages and databases.",
                      defaultTools: ["notion-search", "notion-fetch", "notion-create-pages", "notion-update-page"], category: .docs),
-        composioConnector("googledrive", "Google Drive", category: .docs),
-        composioConnector("googledocs", "Google Docs", category: .docs),
-        composioConnector("googlesheets", "Google Sheets", category: .docs),
-        MCPConnector("dropbox", "Dropbox", "https://mcp.dropbox.com/mcp", category: .docs),
-        composioConnector("one_drive", "OneDrive", category: .docs),
-        composioConnector("airtable", "Airtable", category: .docs),
-        composioConnector("confluence", "Confluence", category: .docs),
-        MCPConnector("granola", "Granola", "https://mcp.granola.ai/mcp", category: .docs),
+        composioConnector("googledrive", "Google Drive", "Search, read, and organize Drive files.", category: .docs),
+        composioConnector("googledocs", "Google Docs", "Read, create, and edit Google Docs.", category: .docs),
+        composioConnector("googlesheets", "Google Sheets", "Read, write, and format spreadsheets.", category: .docs),
+        composioConnector("googleslides", "Google Slides", "Read and create presentations.", category: .docs),
+        MCPConnector("dropbox", "Dropbox", "https://mcp.dropbox.com/mcp",
+                     summary: "Search and access files in Dropbox.", category: .docs),
+        composioConnector("one_drive", "OneDrive", "Search, read, and upload OneDrive files.", category: .docs),
+        composioConnector("airtable", "Airtable", "Query and update Airtable bases and records.", category: .docs),
+        composioConnector("confluence", "Confluence", "Search, read, and update Confluence pages.", category: .docs),
+        composioConnector("notebook_lm", "NotebookLM", "Query and manage NotebookLM notebooks.", category: .docs),
+        MCPConnector("granola", "Granola", "https://mcp.granola.ai/mcp",
+                     summary: "Search and read Granola meeting notes.", category: .docs),
+        composioConnector("fathom", "Fathom", "Search and read Fathom meeting transcripts.", category: .docs),
 
-        // Mail & calendar
-        composioConnector("gmail", "Gmail", category: .mail),
-        composioConnector("googlecalendar", "Google Calendar", category: .mail),
-        composioConnector("outlook", "Outlook", category: .mail),
-        composioConnector("slack", "Slack", category: .mail),
-        composioConnector("discord", "Discord", category: .mail),
-        composioConnector("microsoft_teams", "Microsoft Teams", category: .mail),
-        composioConnector("calendly", "Calendly", category: .mail),
+        // Mail & meetings
+        composioConnector("gmail", "Gmail", "Search, read, draft, and send emails.", category: .mail),
+        composioConnector("googlecalendar", "Google Calendar", "Check availability and manage calendar events.", category: .mail),
+        composioConnector("outlook", "Outlook", "Read, search, and draft Outlook emails.", category: .mail),
+        composioConnector("zoom", "Zoom", "Schedule and manage Zoom meetings.", category: .mail),
+        composioConnector("googlemeet", "Google Meet", "Create and check Google Meet calls.", category: .mail),
+        composioConnector("calendly", "Calendly", "Check bookings and scheduling links.", category: .mail),
+        composioConnector("cal", "Cal.com", "Manage Cal.com bookings and availability.", category: .mail),
 
-        // Projects
+        // Chat & social
+        composioConnector("slack", "Slack", "Search channels, read threads, and post messages.", category: .social),
+        composioConnector("discord", "Discord", "Read channels and send Discord messages.", category: .social),
+        composioConnector("microsoft_teams", "Microsoft Teams", "Read chats and post updates in Teams.", category: .social),
+        composioConnector("whatsapp", "WhatsApp", "Send and manage WhatsApp messages.", category: .social),
+        composioConnector("youtube", "YouTube", "Search videos, channels, and playlists.", category: .social),
+        composioConnector("reddit", "Reddit", "Search posts, threads, and subreddits.", category: .social),
+
+        // Projects & tasks
         MCPConnector("linear", "Linear", "https://mcp.linear.app/mcp",
+                     summary: "Search, create, and update Linear issues and projects.",
                      defaultTools: ["list_issues", "get_issue", "create_issue", "update_issue",
                                     "list_projects", "list_teams", "create_comment"], category: .projects),
         MCPConnector("github", "GitHub", "https://api.githubcopilot.com/mcp/",
+                     summary: "Read repos, search code, and manage issues and PRs.",
                      scopes: ["repo", "read:org", "read:user", "user:email", "notifications", "gist", "read:project"],
                      githubClientID: "Ov23lixrOXQWEKxIYhBX",
                      defaultTools: ["get_me", "search_repositories", "get_file_contents", "search_code",
                                     "search_issues", "issue_read", "issue_write", "search_pull_requests",
                                     "pull_request_read", "list_issues"], category: .projects),
-        composioConnector("figma", "Figma", category: .projects),
-        composioConnector("jira", "Jira", category: .projects),
-        composioConnector("asana", "Asana", category: .projects),
-        composioConnector("clickup", "ClickUp", category: .projects),
-        composioConnector("trello", "Trello", category: .projects),
-        composioConnector("monday", "Monday", category: .projects),
-        composioConnector("hubspot", "HubSpot", category: .projects),
-        MCPConnector("miro", "Miro", "https://mcp.miro.com/", category: .projects),
+        composioConnector("figma", "Figma", "Inspect Figma designs, comments, and components.", category: .projects),
+        composioConnector("canva", "Canva", "Browse and export Canva designs.", category: .projects),
+        composioConnector("jira", "Jira", "Search, create, and update Jira issues.", category: .projects),
+        composioConnector("asana", "Asana", "Track and update Asana tasks and projects.", category: .projects),
+        composioConnector("clickup", "ClickUp", "Manage ClickUp tasks, lists, and docs.", category: .projects),
+        composioConnector("trello", "Trello", "Read and update Trello boards and cards.", category: .projects),
+        composioConnector("monday", "Monday", "Query and update Monday.com boards.", category: .projects),
+        composioConnector("todoist", "Todoist", "View, add, and complete Todoist tasks.", category: .projects),
+        composioConnector("ticktick", "TickTick", "View, add, and complete TickTick tasks.", category: .projects),
+        composioConnector("googletasks", "Google Tasks", "View and manage Google Tasks lists.", category: .projects),
+        MCPConnector("miro", "Miro", "https://mcp.miro.com/",
+                     summary: "Read and collaborate on Miro boards.", category: .projects),
 
-        // Developer
-        MCPConnector("vercel", "Vercel", "https://mcp.vercel.com"),
-        MCPConnector("cloudflare", "Cloudflare", "https://mcp.cloudflare.com/mcp"),
+        // Developer & analytics
+        MCPConnector("vercel", "Vercel", "https://mcp.vercel.com",
+                     summary: "Inspect Vercel deployments, logs, and projects."),
+        MCPConnector("cloudflare", "Cloudflare", "https://mcp.cloudflare.com/mcp",
+                     summary: "Manage Cloudflare Workers, DNS, and storage."),
         MCPConnector("supabase", "Supabase", "https://mcp.supabase.com/mcp",
+                     summary: "Query Supabase tables, logs, and projects.",
                      defaultTools: ["list_projects", "list_tables", "execute_sql", "get_logs", "search_docs"]),
-        MCPConnector("stripe", "Stripe", "https://mcp.stripe.com"),
+        MCPConnector("stripe", "Stripe", "https://mcp.stripe.com",
+                     summary: "Inspect Stripe payments, customers, and subscriptions."),
         // Netlify lists a scope of its own for Claude; ask only for the general ones.
         MCPConnector("netlify", "Netlify", "https://netlify-mcp.netlify.app/mcp",
+                     summary: "Manage Netlify sites and deployments.",
                      scopes: ["offline_access", "read", "write"]),
-        MCPConnector("huggingface", "Hugging Face", "https://huggingface.co/mcp"),
-        composioConnector("sentry", "Sentry", category: .developer),
-        composioConnector("bitbucket", "Bitbucket", category: .developer),
+        MCPConnector("huggingface", "Hugging Face", "https://huggingface.co/mcp",
+                     summary: "Search Hugging Face models, datasets, and Spaces."),
+        composioConnector("gitlab", "GitLab", "Inspect GitLab repos, issues, and merge requests.", category: .developer),
+        composioConnector("bitbucket", "Bitbucket", "Read Bitbucket repos and pull requests.", category: .developer),
+        composioConnector("sentry", "Sentry", "Inspect Sentry errors, traces, and issues.", category: .developer),
+        composioConnector("google_analytics", "Google Analytics", "Query website traffic and analytics reports.", category: .developer),
+        composioConnector("google_search_console", "Google Search Console", "Check search performance and indexing data.", category: .developer),
+
+        // Business & CRM
+        composioConnector("hubspot", "HubSpot", "Search and update HubSpot contacts and deals.", category: .business),
+        composioConnector("attio", "Attio", "Query and update Attio CRM records.", category: .business),
+        composioConnector("intercom", "Intercom", "Read and reply to Intercom customer conversations.", category: .business),
+        composioConnector("zendesk", "Zendesk", "Search and manage Zendesk support tickets.", category: .business),
+        composioConnector("typeform", "Typeform", "Inspect Typeform forms and responses.", category: .business),
+        composioConnector("gumroad", "Gumroad", "Check Gumroad products and sales.", category: .business),
     ]
 
     static func find(_ id: String?) -> MCPConnector? {
         all.first { $0.id == id }
+    }
+
+    /// Compact list of connectors supported by Notchi that are not yet connected,
+    /// injected into the system prompt so the model can offer an inline card.
+    static func unconnectedPromptCatalog() -> String {
+        all.filter { !$0.isConnected }
+            .map { "\($0.id) (\($0.title))" }
+            .joined(separator: ", ")
     }
 }
 
@@ -1782,6 +1860,9 @@ final class MCPConnectorAuth: ObservableObject {
 
     @Published private(set) var phases: [String: Phase] = [:]
     @Published private(set) var connected: Set<String>
+    /// Set when the user clicks Connect on a third-party (Composio) connector
+    /// from Settings or an in-chat card; cleared on confirm or cancel.
+    @Published var pendingThirdPartyConsent: MCPConnector? = nil
 
     private struct Pending {
         let connector: MCPConnector
@@ -1804,6 +1885,10 @@ final class MCPConnectorAuth: ObservableObject {
     private var pendingComposio: PendingComposio?
     private var current: String?
     private var timeoutTask: Task<Void, Never>?
+    private var initiatedFromChat: Set<String> = []
+    /// Invoked after a connector initiated from an in-chat card finishes OAuth
+    /// and its MCP server has loaded its tools, so the active thread can resume.
+    var onChatConnectorReady: ((MCPConnector) -> Void)?
     private static let timeout: TimeInterval = 300
 
     private init() {
@@ -1819,14 +1904,39 @@ final class MCPConnectorAuth: ObservableObject {
         }
     }
 
-    /// True while a connector sign-in is waiting for the user to finish in the
-    /// browser; keeps the notch panel open while they switch to the browser and back.
+    /// True while a connector sign-in (or third-party privacy confirmation) is
+    /// active; keeps the notch panel open while the user checks the privacy
+    /// policy or finishes in the browser.
     var holdsPanel: Bool {
-        current != nil || phases.values.contains {
+        pendingThirdPartyConsent != nil || current != nil || phases.values.contains {
             switch $0 {
             case .waiting, .code: return true
             default: return false
             }
+        }
+    }
+
+    /// Entry point for Connect buttons in both Settings and in-chat cards:
+    /// gates third-party connectors behind the privacy confirmation overlay.
+    func requestConnect(_ connector: MCPConnector, fromChat: Bool = false) {
+        if fromChat {
+            initiatedFromChat.insert(connector.id)
+        } else {
+            initiatedFromChat.remove(connector.id)
+        }
+        if connector.composio {
+            pendingThirdPartyConsent = connector
+        } else {
+            connect(connector)
+        }
+    }
+
+    private func notifyIfFromChat(_ connector: MCPConnector) {
+        guard initiatedFromChat.remove(connector.id) != nil else { return }
+        Task { @MainActor [weak self] in
+            let ready = await MCPHub.shared.waitUntilReady(connector.id, timeout: 12)
+            guard ready, let self else { return }
+            self.onChatConnectorReady?(connector)
         }
     }
 
@@ -2037,6 +2147,7 @@ final class MCPConnectorAuth: ObservableObject {
                 phases[connector.id] = .idle
                 current = nil
                 MCPHub.shared.reload()
+                notifyIfFromChat(connector)
                 return
             }
         }
@@ -2128,6 +2239,7 @@ final class MCPConnectorAuth: ObservableObject {
             current = nil
             pendingComposio = nil
             MCPHub.shared.reload()
+            notifyIfFromChat(composio.connector)
             return
         }
         guard let pending else {
@@ -2171,6 +2283,7 @@ final class MCPConnectorAuth: ObservableObject {
             current = nil
             self.pending = nil
             MCPHub.shared.reload()
+            notifyIfFromChat(pending.connector)
         } catch {
             fail(error.localizedDescription)
         }

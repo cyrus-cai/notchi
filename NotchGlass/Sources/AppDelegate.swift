@@ -426,6 +426,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // the first question. Servers from mcp.json and other apps stay off
         // (`MCPConfig.userServersEnabled`).
         MCPHub.shared.reload()
+        MCPConnectorAuth.shared.onChatConnectorReady = { [weak self] connector in
+            self?.model.continueAfterConnectorConnected(connector)
+        }
         // Same reason: resolving the proxy may spawn a login shell, and the first
         // agent run must not wait on it.
         ProxyConfig.warmUp()
@@ -2837,9 +2840,9 @@ enum AppIconStyle: String, CaseIterable, Identifiable {
     var image: NSImage? {
         switch self {
         case .original:
-            return Self.systemUsesDarkAppearance ? Self.originalDark : NSImage(named: "AppIcon")
+            return Self.systemUsesDarkAppearance ? Self.originalDark : NSImage(named: "OriginalAppIcon")
         case .eyes:
-            return Self.systemUsesDarkAppearance ? Self.eyesDark : Self.eyesLight
+            return Self.systemUsesDarkAppearance ? Self.eyesDark : NSImage(named: "AppIcon")
         case .dot:
             return NSImage(named: Self.systemUsesDarkAppearance
                            ? "DarkModeAppIcon"
@@ -2847,10 +2850,10 @@ enum AppIconStyle: String, CaseIterable, Identifiable {
         }
     }
 
-    /// Whether the current appearance matches the light `AppIcon` shipped in
+    /// Whether the current appearance matches the light Eyes `AppIcon` shipped in
     /// the bundle, so AppKit can draw the native bundle icon without an override.
     var usesBundleDefault: Bool {
-        self == .original && !Self.systemUsesDarkAppearance
+        self == .eyes && !Self.systemUsesDarkAppearance
     }
 
     private static var systemUsesDarkAppearance: Bool {
@@ -2859,11 +2862,11 @@ enum AppIconStyle: String, CaseIterable, Identifiable {
 
     /// The original tile inverted for dark mode: the off-white paper tile
     /// becomes `ink` (`#26262A`) and the dark mark becomes `eyeInk` (`#ECEBE6`),
-    /// matching `eyesDark`'s palette while keeping `AppIcon`'s exact mark
+    /// matching `eyesDark`'s palette while keeping `OriginalAppIcon`'s exact mark
     /// geometry and edge anti-aliasing. Rendered at 256×256 px (max Dock @2x
     /// resolution = 256 KB) instead of 1024×1024 px.
     private static func originalDarkImage() -> NSImage? {
-        guard let base = NSImage(named: "AppIcon") else { return nil }
+        guard let base = NSImage(named: "OriginalAppIcon") else { return nil }
         let side = 256
         guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
               let ctx = CGContext(
@@ -2974,7 +2977,6 @@ enum AppIconStyle: String, CaseIterable, Identifiable {
         return NSImage(cgImage: cgImage, size: NSSize(width: 128, height: 128))
     }
 
-    private static let eyesLight = eyesImage(dark: false)
     private static let eyesDark = eyesImage(dark: true)
 
     /// Styles that follow the system's light / dark appearance.

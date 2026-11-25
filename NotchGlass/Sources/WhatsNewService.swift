@@ -125,6 +125,24 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.9.46",
+            date: "2026-11-25",
+            headline: "Notchi connects to 30+ more apps.",
+            heroAssetName: "WhatsNew0946Promo",
+            blurb: "Connect Google Workspace, Slack, Discord, Microsoft Teams, Zoom, WhatsApp, Figma, Jira, HubSpot, and more in Settings → Connectors — or straight from a card in chat when Notchi needs one. Once you sign in, Notchi picks up where you left off.",
+            features: [
+                "Added 43 new built-in connectors across docs (Google Drive, Google Docs, Google Sheets, Google Slides, OneDrive, Airtable, Confluence, NotebookLM, Fathom), mail and meetings (Gmail, Google Calendar, Outlook, Zoom, Google Meet, Calendly, Cal.com), chat and social (Slack, Discord, Microsoft Teams, WhatsApp, YouTube, Reddit), projects and design (Figma, Canva, Jira, Asana, ClickUp, Trello, Monday, Todoist, TickTick, Google Tasks), developer and analytics (GitLab, Bitbucket, Sentry, Google Analytics, Google Search Console), and business (HubSpot, Attio, Intercom, Zendesk, Typeform, Gumroad).",
+                "When a request needs an unconnected app, Notchi shows an inline card to connect it and automatically finishes your request once authorized.",
+                "Third-party connectors powered by Composio show a privacy confirmation and policy link before connecting.",
+            ],
+            improvements: [
+                "Organized Connectors in Settings with a Recommended tab and new Chat & Social and Business & CRM categories.",
+                "Refreshed Settings controls and confirmation dialogs, and memory links now open directly in Finder.",
+                "Updated the default app icon to the Eyes style, and refined Notchi's conversational tone.",
+                "Loop updates mirrored to Telegram and Signal no longer repeat the loop prompt.",
+            ]
+        ),
+        Entry(
             version: "0.9.45",
             date: "2026-11-24",
             improvements: [

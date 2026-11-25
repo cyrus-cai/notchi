@@ -55,6 +55,9 @@ enum VisualSpec: Equatable {
     /// One figure with an optional change.
     case stat(label: String, value: String, delta: String?, note: String?)
     case entity(VisualEntity)
+    /// Inline connector authorization card: lets the user connect an app right
+    /// inside the conversation without opening Settings.
+    case connector(id: String, reason: String?)
 
     var isEmpty: Bool {
         switch self {
@@ -63,6 +66,7 @@ enum VisualSpec: Equatable {
         case .donut(_, let items): return items.isEmpty
         case .stat(_, let value, _, _): return value.isEmpty
         case .entity(let e): return e.title.isEmpty
+        case .connector(let id, _): return MCPConnector.find(id) == nil
         }
     }
 }
@@ -96,12 +100,14 @@ private struct Payload: Decodable {
     var points: [Item]?
     var facts: [[String]]?
     var action: Action?
+    var id: String?
+    var reason: String?
 }
 
 enum VisualSpecParser {
-    /// The fence tags an answer may use. Both are ordinary code fences to the
+    /// The fence tags an answer may use. All are ordinary code fences to the
     /// markdown parser, so nothing upstream has to know about them.
-    static let languages: Set<String> = ["viz", "chart", "card"]
+    static let languages: Set<String> = ["viz", "chart", "card", "connector"]
 
     private final class Box {
         let spec: VisualSpec?
@@ -127,20 +133,24 @@ enum VisualSpecParser {
         guard isVisual(language) else { return nil }
         let key = "\(language ?? "")\u{1e}\(text)" as NSString
         if let hit = cache.object(forKey: key) { return hit.spec }
-        let spec = build(text)
+        let spec = build(text, language: language)
         cache.setObject(Box(spec), forKey: key)
         return spec
     }
 
-    private static func build(_ text: String) -> VisualSpec? {
+    private static func build(_ text: String, language: String?) -> VisualSpec? {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmed.hasPrefix("{"), trimmed.hasSuffix("}"),
               let data = trimmed.data(using: .utf8),
               let payload = try? JSONDecoder().decode(Payload.self, from: data) else {
             return nil
         }
-        let type = (payload.type ?? "").lowercased()
+        let type = (payload.type ?? (language?.lowercased() == "connector" ? "connector" : "")).lowercased()
         switch type {
+        case "connector":
+            guard let rawID = clean(payload.id)?.lowercased(),
+                  MCPConnector.find(rawID) != nil else { return nil }
+            return .connector(id: rawID, reason: clean(payload.reason) ?? clean(payload.subtitle))
         case "barh", "bar", "rank", "ranking":
             guard let items = normalized(payload.items) else { return nil }
             return .ranked(title: clean(payload.title) ?? "", total: clean(payload.total),
@@ -220,11 +230,15 @@ struct VisualBlockView: View {
     var baseFont: CGFloat = Tokens.TypeSize.reading
 
     var body: some View {
-        if case .entity(let entity) = spec {
+        switch spec {
+        case .entity(let entity):
             // A card sits in the answer as text does: no panel of its own.
             EntityCardView(entity: entity)
                 .frame(maxWidth: .infinity, alignment: .leading)
-        } else {
+        case .connector(let id, let reason):
+            ConnectorInviteCard(connectorID: id, reason: reason)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        default:
             boxed
         }
     }
@@ -241,7 +255,7 @@ struct VisualBlockView: View {
             case .stat(let label, let value, let delta, let note):
                 StatView(label: label, value: value, delta: delta, note: note)
                     .padding(.vertical, Viz.bodyPadding)
-            case .entity:
+            case .entity, .connector:
                 EmptyView()
             }
         }
@@ -683,6 +697,8 @@ private struct EntityCardView: View {
 /// What the answer shows while the fence is still open — the shape of the block
 /// about to arrive, so the thread does not jump from a line of text to a chart.
 struct VisualSkeletonView: View {
+    @Environment(\.chatBubbleGlass) private var onDesktop
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             RoundedRectangle(cornerRadius: 3)
@@ -699,6 +715,263 @@ struct VisualSkeletonView: View {
         .frame(minWidth: 240, idealWidth: 280, maxWidth: .infinity, alignment: .leading)
         .background(RoundedRectangle.control.fill(Color.white.opacity(0.04)))
         .overlay(RoundedRectangle.control.strokeBorder(Tokens.hairline, lineWidth: 0.5))
+        .modifier(OptionalSmokedGlass(radius: Tokens.Radius.control, on: onDesktop))
         .accessibilityHidden(true)
+    }
+}
+
+
+// MARK: - In-chat connector authorization card
+
+/// Extracts a clean brand background color and high-contrast foreground ink
+/// from a connector's logo image, cached once per connector id.
+private enum ConnectorBrandPalette {
+    struct Palette {
+        let background: Color
+        let ink: Color
+        let muted: Color
+        let badgeFill: Color
+        let buttonFill: Color
+        let buttonInk: Color
+    }
+
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var cache: [String: Palette] = [:]
+
+    /// Monochrome / neutral brands use the warm-ivory paper card (same as
+    /// `NotchiPageCard` and light `LinkCardView`s).
+    private static let paper = Palette(
+        background: Color(red: 0.96, green: 0.96, blue: 0.95),
+        ink: Color(red: 0x1D / 255, green: 0x1D / 255, blue: 0x1F / 255),
+        muted: Color(red: 0x5A / 255, green: 0x5A / 255, blue: 0x62 / 255),
+        badgeFill: Color.black.opacity(0.08),
+        buttonFill: Color(red: 0x16 / 255, green: 0x16 / 255, blue: 0x18 / 255),
+        buttonInk: .white
+    )
+
+    static func palette(for id: String) -> Palette {
+        lock.lock()
+        if let hit = cache[id] { lock.unlock(); return hit }
+        lock.unlock()
+        let computed = compute(for: id)
+        lock.lock()
+        cache[id] = computed
+        lock.unlock()
+        return computed
+    }
+
+    private static func compute(for id: String) -> Palette {
+        guard let img = NSImage(named: "ConnectorLogo-\(id)"),
+              let cg = img.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+            return paper
+        }
+        let dim = 24
+        var rgba = [UInt8](repeating: 0, count: dim * dim * 4)
+        guard let ctx = CGContext(
+            data: &rgba, width: dim, height: dim, bitsPerComponent: 8,
+            bytesPerRow: dim * 4, space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return paper }
+        ctx.draw(cg, in: CGRect(x: 0, y: 0, width: dim, height: dim))
+
+        // Bucket colorful pixels by hue (12 buckets) and pick the dominant
+        // saturated brand color, ignoring near-white canvas and near-black outlines.
+        struct Bucket { var count = 0; var r = 0.0; var g = 0.0; var b = 0.0; var score = 0.0 }
+        var buckets = [Bucket](repeating: Bucket(), count: 12)
+        for i in stride(from: 0, to: rgba.count, by: 4) {
+            let a = Double(rgba[i + 3]) / 255.0
+            guard a > 0.5 else { continue }
+            let r = Double(rgba[i]) / 255.0
+            let g = Double(rgba[i + 1]) / 255.0
+            let b = Double(rgba[i + 2]) / 255.0
+            let maxC = max(r, max(g, b))
+            let minC = min(r, min(g, b))
+            let delta = maxC - minC
+            let sat = maxC > 0 ? delta / maxC : 0
+            // Skip white background, dark grays, and desaturated fringes.
+            guard sat > 0.28, maxC > 0.22, !(maxC > 0.92 && sat < 0.35) else { continue }
+            var hue: Double = 0
+            if delta > 0 {
+                if maxC == r { hue = ((g - b) / delta).truncatingRemainder(dividingBy: 6) }
+                else if maxC == g { hue = (b - r) / delta + 2 }
+                else { hue = (r - g) / delta + 4 }
+                hue *= 60
+                if hue < 0 { hue += 360 }
+            }
+            let idx = min(11, max(0, Int(hue / 30.0)))
+            let weight = sat * (0.5 + 0.5 * maxC)
+            buckets[idx].count += 1
+            buckets[idx].r += r * weight
+            buckets[idx].g += g * weight
+            buckets[idx].b += b * weight
+            buckets[idx].score += weight
+        }
+
+        guard let best = buckets.max(by: { $0.score < $1.score }), best.count >= 6, best.score > 0 else {
+            return paper
+        }
+        let r = best.r / best.score
+        let g = best.g / best.score
+        let b = best.b / best.score
+        // Relative luminance (WCAG) to pick crisp white or dark ink.
+        let lum = 0.2126 * r + 0.7152 * g + 0.0722 * b
+        let useDarkInk = lum > 0.62
+        return Palette(
+            background: Color(red: r, green: g, blue: b),
+            ink: useDarkInk ? Color(red: 0x16 / 255, green: 0x16 / 255, blue: 0x18 / 255) : .white,
+            muted: useDarkInk ? Color.black.opacity(0.68) : Color.white.opacity(0.84),
+            badgeFill: useDarkInk ? Color.black.opacity(0.11) : Color.white.opacity(0.20),
+            buttonFill: useDarkInk ? Color(red: 0x16 / 255, green: 0x16 / 255, blue: 0x18 / 255) : .white,
+            buttonInk: useDarkInk ? .white : Color(red: 0x16 / 255, green: 0x16 / 255, blue: 0x18 / 255)
+        )
+    }
+}
+
+/// Inline card rendered from a ```connector fence inside an answer: solid
+/// brand-colored rounded card (matching `LinkCardView`), with the brand icon,
+/// title + Third-party badge + summary on the left and a high-contrast Connect
+/// action pill on the right.
+struct ConnectorInviteCard: View {
+    let connectorID: String
+    var reason: String? = nil
+    @ObservedObject private var auth = MCPConnectorAuth.shared
+    @Environment(\.chatBubbleGlass) private var onDesktop
+
+    private var connector: MCPConnector? { MCPConnector.find(connectorID) }
+
+    var body: some View {
+        if let connector {
+            let phase = auth.phase(connector.id)
+            let isConnected = auth.connected.contains(connector.id)
+            let isWaiting = auth.isWaiting(connector.id)
+            let palette = ConnectorBrandPalette.palette(for: connector.id)
+            let shape = RoundedRectangle(cornerRadius: ChatBubbleChrome.cardRadius, style: .continuous)
+
+            HStack(alignment: .center, spacing: 11) {
+                Image("ConnectorLogo-\(connector.id)")
+                    .resizable()
+                    .interpolation(.high)
+                    .frame(width: 30, height: 30)
+                    .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                    .shadow(color: .black.opacity(0.18), radius: 2, y: 1)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 6) {
+                        Text(connector.title)
+                            .font(.sf(Tokens.TypeSize.form, weight: .semibold))
+                            .foregroundStyle(palette.ink)
+                            .lineLimit(1)
+                        if connector.composio {
+                            Text("Third-party")
+                                .font(.sf(Tokens.TypeSize.caption, weight: .medium))
+                                .foregroundStyle(palette.ink.opacity(0.88))
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 1.5)
+                                .background(palette.badgeFill, in: Capsule(style: .continuous))
+                                .fixedSize()
+                        }
+                    }
+                    subtitle(for: connector, phase: phase, palette: palette)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+                actionPill(connector: connector, isConnected: isConnected, isWaiting: isWaiting, palette: palette)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 11)
+            .background(shape.fill(palette.background))
+            .overlay(shape.strokeBorder(Color.white.opacity(0.14), lineWidth: 0.75))
+            .background {
+                if onDesktop { LightGlassShadow(shape: shape) }
+            }
+            .contentShape(shape)
+            .onTapGesture {
+                if !isConnected && !isWaiting {
+                    auth.requestConnect(connector, fromChat: true)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func actionPill(
+        connector: MCPConnector,
+        isConnected: Bool,
+        isWaiting: Bool,
+        palette: ConnectorBrandPalette.Palette
+    ) -> some View {
+        if isConnected {
+            HStack(spacing: 4) {
+                Image(systemName: "checkmark")
+                    .font(.system(size: 10.5, weight: .bold))
+                Text("Connected")
+                    .font(.sf(Tokens.TypeSize.meta, weight: .semibold))
+            }
+            .foregroundStyle(palette.ink)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .background(palette.badgeFill, in: Capsule(style: .continuous))
+            .fixedSize()
+        } else if isWaiting {
+            Button {
+                auth.cancel()
+            } label: {
+                Text(L("connector.cancel"))
+                    .font(.sf(Tokens.TypeSize.meta, weight: .semibold))
+                    .foregroundStyle(palette.ink)
+                    .padding(.horizontal, 13)
+                    .padding(.vertical, 6)
+                    .background(palette.badgeFill, in: Capsule(style: .continuous))
+            }
+            .buttonStyle(PlatePressStyle())
+            .fixedSize()
+        } else {
+            Button {
+                auth.requestConnect(connector, fromChat: true)
+            } label: {
+                Text(L("connector.connect"))
+                    .font(.sf(Tokens.TypeSize.meta, weight: .semibold))
+                    .foregroundStyle(palette.buttonInk)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 6)
+                    .background(palette.buttonFill, in: Capsule(style: .continuous))
+                    .shadow(color: .black.opacity(0.16), radius: 3, y: 1)
+            }
+            .buttonStyle(PlatePressStyle())
+            .fixedSize()
+        }
+    }
+
+    @ViewBuilder
+    private func subtitle(
+        for connector: MCPConnector,
+        phase: MCPConnectorAuth.Phase,
+        palette: ConnectorBrandPalette.Palette
+    ) -> some View {
+        switch phase {
+        case .code(let code):
+            Text(L("connector.code", code))
+                .font(.sf(Tokens.TypeSize.meta))
+                .foregroundStyle(palette.muted)
+                .lineLimit(2)
+        case .waiting:
+            Text(L("connector.waiting"))
+                .font(.sf(Tokens.TypeSize.meta))
+                .foregroundStyle(palette.muted)
+                .lineLimit(1)
+        case .failed(let message):
+            Text(message)
+                .font(.sf(Tokens.TypeSize.meta))
+                .foregroundStyle(palette.ink)
+                .lineLimit(2)
+        case .idle:
+            let text = (reason?.isEmpty == false ? reason : nil) ?? connector.summary
+            if !text.isEmpty {
+                Text(text)
+                    .font(.sf(Tokens.TypeSize.meta))
+                    .foregroundStyle(palette.muted)
+                    .lineLimit(2)
+            }
+        }
     }
 }

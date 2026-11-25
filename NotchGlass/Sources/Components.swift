@@ -2705,28 +2705,15 @@ struct AccountDisconnectConfirm: View {
 
     var body: some View {
         ConfirmationDialogOverlay(onDismiss: onCancel) {
-            VStack(spacing: 14) {
-                VStack(spacing: 6) {
-                    Text(L("model.disconnect.confirm.title", account))
-                        .sfFont(Tokens.TypeSize.reading, weight: .medium)
-                        .foregroundStyle(Tokens.text1)
-                    Text(L("model.disconnect.confirm.body"))
-                        .sfFont(Tokens.TypeSize.label)
-                        .foregroundStyle(Tokens.text3)
-                        .multilineTextAlignment(.center)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-
-                HStack(spacing: 10) {
-                    ConfirmDialogButton(title: L("clear.cancel"), kind: .neutral, action: onCancel)
-                    ConfirmDialogButton(title: L("model.disconnect"),
-                                        kind: .destructive,
-                                        action: onConfirm)
-                }
-            }
-            .padding(.horizontal, 20)
-            .padding(.vertical, 18)
-            .frame(maxWidth: 280)
+            SettingsAlertDialog(
+                title: L("model.disconnect.confirm.title", account),
+                description: L("model.disconnect.confirm.body"),
+                confirmTitle: L("model.disconnect"),
+                cancelTitle: L("clear.cancel"),
+                destructive: true,
+                onCancel: onCancel,
+                onConfirm: onConfirm
+            )
         }
     }
 }
@@ -4411,9 +4398,8 @@ struct AnswerCard<Content: View>: View {
     /// so that card gets the padding back.
     private var glassBody: some View {
         let pad = visible && !bare && !flat
-        let showsGlass = visible && !flat
-        let surfaceRadius = bare ? Tokens.Radius.control : radius
-        let shape = RoundedRectangle(cornerRadius: surfaceRadius, style: .continuous)
+        let showsGlass = pad
+        let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)
         return FractionWidthLayout(fraction: visible && !flat ? widthFraction : 1,
                                    hugs: visible && hugs && !flat, idealAtLeast: idealAtLeast) {
             content
@@ -4421,7 +4407,7 @@ struct AnswerCard<Content: View>: View {
                 .padding(.leading, pad && !chrome ? ChatBubbleChrome.horizontalPad : 0)
                 .padding(.horizontal, pad ? ChatBubbleChrome.glassHorizontalPad : 0)
                 .padding(.vertical, pad ? ChatBubbleChrome.glassVerticalPad : 0)
-                .modifier(OptionalSmokedGlass(radius: surfaceRadius, on: showsGlass))
+                .modifier(OptionalSmokedGlass(radius: radius, on: showsGlass))
                 .contentShape(shape)
                 .onGeometryChange(for: CGFloat.self) { $0.size.height } action: {
                     cardHeight = $0
@@ -5347,11 +5333,19 @@ enum MarkdownParser {
         parseTracking(source).blocks
     }
 
-    /// Whether `source` is one table and nothing else.
+    /// Whether `source` is one self-boxed block (a table or a connector invite
+    /// card) and nothing else, so `AnswerCard` drops its outer bubble chrome.
     static func isTableOnly(_ source: String) -> Bool {
         let blocks = parseCached(source)
-        guard blocks.count == 1, case .table = blocks[0] else { return false }
-        return true
+        guard blocks.count == 1 else { return false }
+        switch blocks[0] {
+        case .table:
+            return true
+        case .code(let language, _):
+            return language?.trimmingCharacters(in: .whitespaces).lowercased() == "connector"
+        default:
+            return false
+        }
     }
 
     /// The parse, plus the last point it can restart from: the line after a

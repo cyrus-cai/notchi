@@ -229,9 +229,20 @@ enum LinkCardSplitter {
             }
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             if trimmed.hasPrefix("```") || trimmed.hasPrefix("~~~") {
-                if !inFence { breakBefore(line) }
+                let fenceTag = String(trimmed.dropFirst(3)).trimmingCharacters(in: .whitespaces).lowercased()
+                if !inFence {
+                    if fenceTag == "connector" {
+                        flush()
+                    } else {
+                        breakBefore(line)
+                    }
+                }
                 inFence.toggle()
                 append(line, trimmed)
+                if !inFence, let first = buffer.first?.trimmingCharacters(in: .whitespaces).lowercased(),
+                   first == "```connector" || first == "~~~connector" {
+                    flush()
+                }
                 continue
             }
             if inFence {
@@ -305,8 +316,11 @@ enum LinkCardSplitter {
         if inList, isListItem(next) || isIndented(line) { return false }
         // A chart or a card belongs to the sentence that introduces it: the
         // blank line in front of its fence is breathing room, not a new bubble.
-        if next.hasPrefix("```") || next.hasPrefix("~~~"),
-           VisualSpecParser.isVisual(String(next.dropFirst(3))) { return false }
+        // A `connector` card is its own bubble so it never draws a box inside a box.
+        if next.hasPrefix("```") || next.hasPrefix("~~~") {
+            let tag = String(next.dropFirst(3)).trimmingCharacters(in: .whitespaces).lowercased()
+            if VisualSpecParser.isVisual(tag), tag != "connector" { return false }
+        }
         return true
     }
 

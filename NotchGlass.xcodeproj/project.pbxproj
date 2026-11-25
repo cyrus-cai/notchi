@@ -19,6 +19,7 @@
 		A100001A /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000A /* ContentView.swift */; };
 		A100001B /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000C /* SettingsView.swift */; };
 		A1000051 /* InlineSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000050 /* InlineSettingsView.swift */; };
+		A1000ED1 /* SettingsPrimitives.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000ED0 /* SettingsPrimitives.swift */; };
 		A1000731 /* ModelPickerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000730 /* ModelPickerView.swift */; };
 		A1000741 /* VendorLogos.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000740 /* VendorLogos.swift */; };
 		A1000DA1 /* WalletPocket.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000DA0 /* WalletPocket.swift */; };
@@ -171,6 +172,7 @@
 		A100000A /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		A100000C /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		A1000050 /* InlineSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InlineSettingsView.swift; sourceTree = "<group>"; };
+		A1000ED0 /* SettingsPrimitives.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsPrimitives.swift; sourceTree = "<group>"; };
 		A1000730 /* ModelPickerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelPickerView.swift; sourceTree = "<group>"; };
 		A1000740 /* VendorLogos.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VendorLogos.swift; sourceTree = "<group>"; };
 		A1000DA0 /* WalletPocket.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WalletPocket.swift; sourceTree = "<group>"; };
@@ -297,6 +299,7 @@
 				A100000A /* ContentView.swift */,
 				A100000C /* SettingsView.swift */,
 				A1000050 /* InlineSettingsView.swift */,
+				A1000ED0 /* SettingsPrimitives.swift */,
 				A1000730 /* ModelPickerView.swift */,
 				A1000740 /* VendorLogos.swift */,
 				A1000DA0 /* WalletPocket.swift */,
@@ -480,6 +483,7 @@
 				A100001A /* ContentView.swift in Sources */,
 				A100001B /* SettingsView.swift in Sources */,
 				A1000051 /* InlineSettingsView.swift in Sources */,
+				A1000ED1 /* SettingsPrimitives.swift in Sources */,
 				A1000731 /* ModelPickerView.swift in Sources */,
 				A1000741 /* VendorLogos.swift in Sources */,
 				A1000DA1 /* WalletPocket.swift in Sources */,
@@ -569,7 +573,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.9.45;
+				MARKETING_VERSION = 0.9.46;
 				PRODUCT_BUNDLE_IDENTIFIER = com.notchglass.app;
 				PRODUCT_NAME = Notchi;
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -592,7 +596,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.9.45;
+				MARKETING_VERSION = 0.9.46;
 				PRODUCT_BUNDLE_IDENTIFIER = com.notchglass.app;
 				PRODUCT_NAME = Notchi;
 				SWIFT_EMIT_LOC_STRINGS = YES;
