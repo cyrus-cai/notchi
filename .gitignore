@@ -72,6 +72,8 @@ scripts/seed-history.py
 ops/
 # Use-case eval run against the app's harness.
 scripts/usecase_eval/
+# Local test board (node scripts/test-board/server.mjs). Local only.
+scripts/test-board/
 # Posts each release to the private Discord channel.
 scripts/notify-discord.mjs
 
