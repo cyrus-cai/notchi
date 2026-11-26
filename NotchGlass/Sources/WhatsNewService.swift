@@ -125,6 +125,25 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.9.47",
+            date: "2026-11-26",
+            headline: "Notchi can make websites.",
+            heroAssetName: "WhatsNew0947Promo",
+            blurb: "Ask Notchi to turn notes, reports, or live trackers into standalone web pages with outlines, tabs, callouts, and charts. Pages stay private by default with shareable access links, and you can browse them anytime from the Websites drawer.",
+            features: [
+                "Ask Notchi to create and update standalone web pages with automatic outlines, callouts, collapsible sections, tabs, tables, and charts; copying a private page link includes its access key so it opens directly when shared.",
+                "Ongoing topics and loops organize into dedicated sub-threads while keeping your main conversation clean with concise updates only when something matters; browse Sub-threads and Code threads from the side drawer.",
+                "Copy history now has its own switch separate from Memory, with search, optional auto-delete schedules (7 days to 1 year, or forever), and per-app exclusions (password managers excluded by default).",
+                "Messages and photos sent from Telegram or Signal now mirror to the other connected channel so both keep the full conversation.",
+            ],
+            improvements: [
+                "Notification banners now show your question or task as the title and the reply as the body, and the menu bar card sits below Notification Center so banners always appear on top.",
+                "Replies hide intermediate pre-tool chatter, address you directly as \"you\", and lead with the result instead of a work report.",
+                "Double-clicking on buttons, toggles, links, or other controls no longer accidentally pins the panel.",
+                "Older request audit entries automatically prune saved request bodies to keep disk usage small, alongside refined send button, caption, and card styling.",
+            ]
+        ),
+        Entry(
             version: "0.9.46",
             date: "2026-11-25",
             headline: "Notchi connects to 30+ more apps.",

@@ -23,8 +23,8 @@ final class UserMemory: ObservableObject {
 
     @Published private(set) var entries: [Entry] = []
     /// The master switch, on for new installs, off for existing ones. Off, nothing reads or writes the
-    /// folder, copies included, and no clipboard history is kept
-    /// (`ClipboardHistory.recording`). Turning it on builds the memory from past
+    /// folder, and copies are not judged for memory
+    /// (`ClipboardHistory.feedsMemory`); copy history itself has its own switch. Turning it on builds the memory from past
     /// conversations (`NotchModel.scanHistoryForMemories`); turning it off
     /// deletes every file, so the next time it is on it builds again.
     @Published var enabled: Bool = OnboardingService.firstRunDefault(UserMemory.enabledKey, fresh: true, existing: false) {
@@ -211,9 +211,8 @@ final class UserMemory: ObservableObject {
 
     func delete(_ id: String) { remove(id) }
 
-    /// Every file, and the clipboard history the folder is filed from.
+    /// Every file. Copy history has its own switch and is kept.
     func deleteAll() {
-        ClipboardHistory.shared.clear()
         let items = (try? FileManager.default.contentsOfDirectory(at: Self.folder,
                                                                  includingPropertiesForKeys: nil)) ?? []
         for url in items { try? FileManager.default.removeItem(at: url) }

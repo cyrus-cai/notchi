@@ -1142,17 +1142,19 @@ struct SendButton: View {
         .contentShape(Capsule(style: .continuous))
     }
 
-    /// The bare form: just the send arrow in a glass circle (mid-thread follow-up).
+    /// The bare form: the send arrow on a solid ink circle (mid-thread follow-up).
     private var glyphCircle: some View {
         Image(systemName: icon)
             .sfFont(Tokens.TypeSize.form, weight: .semibold)
-            .foregroundStyle(hovering ? Tokens.text1 : Tokens.text2)
+            .foregroundStyle(Self.glyphOnInk)
             .id(icon)
             .transition(.scale(scale: 0.55).combined(with: .opacity))
             .frame(width: size, height: size)
-            .glassCapsule(in: Circle(), brighter: hovering)
+            .background(Circle().fill(Tokens.ink.opacity(hovering ? 1 : 0.9)))
             .contentShape(Circle())
     }
+
+    private static let glyphOnInk = Tokens.adaptive(dark: .black, light: .white)
 }
 
 /// Shown while an ask is streaming. Esc already stops the round; this is the
@@ -2146,14 +2148,19 @@ struct CaptureLineLink: View {
 
     var body: some View {
         Button { action?() } label: {
-            HStack(spacing: 3) {
+            HStack(alignment: .firstTextBaseline, spacing: 3) {
                 Text(label)
                     .sfFont(font)
                     .lineLimit(1)
                 // Only under the cursor: at rest every tag looks the same.
+                // A fixed square centred on the glyphs, like the web-search
+                // line's chevron, so the arrow adds no height and the tag
+                // doesn't move up or down when it appears.
                 if hovering {
                     Image(systemName: "arrow.up.right")
                         .sfFont(Tokens.TypeSize.badge, weight: .semibold)
+                        .frame(width: 9, height: 9)
+                        .centeredOnTextGlyphs(fontSize: font)
                 }
             }
                 .foregroundStyle(hovering ? Tokens.text2 : Tokens.text3)
@@ -2176,6 +2183,40 @@ extension View {
             .padding(.vertical, active ? 2 : 0)
             .background(Tokens.ink.opacity(active ? (hovered ? 0.10 : 0.06) : 0), in: shape)
             .contentShape(shape)
+    }
+}
+
+/// Sub-thread tag above a main-thread report, in `processTag` face like
+/// `CaptureLineLink` / `CloudMachineMark`. Clicking opens the sub-thread.
+struct SubThreadMark: View {
+    let title: String
+    let font: CGFloat
+    let action: () -> Void
+    @State private var hovering = false
+
+    private var label: String { L("agent.process.usedSubThread") }
+
+    var body: some View {
+        Button(action: action) {
+            HStack(alignment: .firstTextBaseline, spacing: 3) {
+                Text(label)
+                    .sfFont(font)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                if hovering {
+                    Image(systemName: "arrow.up.right")
+                        .sfFont(Tokens.TypeSize.badge, weight: .semibold)
+                        .frame(width: 9, height: 9)
+                        .centeredOnTextGlyphs(fontSize: font)
+                }
+            }
+            .foregroundStyle(hovering ? Tokens.text2 : Tokens.text3)
+            .processTag(hovered: hovering)
+        }
+        .buttonStyle(.plain).exemptsDoubleClickPin()
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
+        .accessibilityLabel(label)
     }
 }
 
@@ -3353,6 +3394,10 @@ struct AssistantTurnView: View {
     var usedCloudMachine: Bool = false
     /// Folders on this Mac this answer worked in (`Turn.folders`).
     var folders: [String] = []
+    /// The sub-thread this main-thread report came from, drawn in `processTag`
+    /// face above the answer. Clicking opens it.
+    var subThreadTitle: String? = nil
+    var onOpenSubThread: (() -> Void)? = nil
     /// Opens a filed note or reminder in its app. `nil` draws the line as text.
     var onOpenCapture: ((NotchModel.Turn.Capture) -> Void)? = nil
     /// The "Undo" beside an "Updated memory" line.
@@ -3796,6 +3841,11 @@ struct AssistantTurnView: View {
     /// follows it continuously.
     private static let blockMotion: TimeInterval = 0.26
 
+    /// Sub-thread tag on a main-thread report, in the same row as the other marks.
+    private var showsSubThreadMark: Bool {
+        subThreadTitle != nil && onOpenSubThread != nil && agentTrail.isEmpty && hasText
+    }
+
     /// "Used cloud machine", once the answer has text. An agent turn's work
     /// trail already lists each step, so it gets no second mention.
     private var showsCloudMark: Bool { usedCloudMachine && agentTrail.isEmpty && hasText }
@@ -3805,7 +3855,7 @@ struct AssistantTurnView: View {
 
     /// Either line is up: they sit beside "Searched the web", or in the
     /// capture row when there is no search.
-    private var showsMarks: Bool { showsCloudMark || showsFolderMark }
+    private var showsMarks: Bool { showsSubThreadMark || showsCloudMark || showsFolderMark }
 
     /// Captures of one kind share a tag, which opens the first.
     @ViewBuilder
@@ -3818,9 +3868,12 @@ struct AssistantTurnView: View {
         }
     }
 
-    /// "Used cloud machine" and the folder line, in that order.
+    /// Sub-thread tag, "Used cloud machine", and the folder line.
     @ViewBuilder
     private var marks: some View {
+        if let subThreadTitle, let onOpenSubThread, showsSubThreadMark {
+            SubThreadMark(title: subThreadTitle, font: waitFont, action: onOpenSubThread)
+        }
         if showsCloudMark {
             CloudMachineMark(font: waitFont)
         }

@@ -908,8 +908,8 @@ func proactiveWakeSystemPrompt(tools: Bool) -> String {
     WAKE: <yyyy-MM-dd HH:mm local time, the next time something here needs a \
     look, or NONE>
     MESSAGE: <one or two short sentences to send now, in the language the user \
-    writes in, naming the thing so it reads clearly on its own, no greeting; \
-    or NONE>
+    writes in, addressed to them as "you" ("你"), naming the thing so it reads \
+    clearly on its own, no greeting; or NONE>
     BASIS: <what the message rests on: the conversation line or the URL; empty with NONE>
     """
 }

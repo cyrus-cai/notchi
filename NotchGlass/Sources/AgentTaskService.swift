@@ -2387,8 +2387,8 @@ final class AgentTaskManager: ObservableObject {
             if let loop = t.loop {
                 if loopPaused {
                     subtitle = L("notify.loop.doneSuggested")
-                } else if loop.active, let round = run.loopRound {
-                    subtitle = L("notify.loop.round", round)
+                } else if loop.active, run.loopRound != nil {
+                    subtitle = ""
                     silent = true
                 }
             }

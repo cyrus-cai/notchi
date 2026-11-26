@@ -301,6 +301,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        DoubleClickPress.install()
         // `current_context` reads the app before Notchi; start watching now.
         _ = FrontAppTracker.shared
         // Register the message tones before the first send needs them.
@@ -2500,6 +2501,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let full = screen.frame
         let corner = Self.isCorner(id, on: screen)
         if corner { cornerDisplays.insert(id) } else { cornerDisplays.remove(id) }
+        (panel as? NotchPanel)?.setRestLevel(corner ? NotchPanel.cardLevel : NotchPanel.restingLevel)
         var x = corner
             ? full.maxX - canvasWidth
             : full.midX - canvasWidth / 2

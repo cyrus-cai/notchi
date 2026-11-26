@@ -25,6 +25,7 @@
 		A1000DA1 /* WalletPocket.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000DA0 /* WalletPocket.swift */; };
 		A1000961 /* NoNoAccount.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000960 /* NoNoAccount.swift */; };
 		A1000C71 /* ClipPrivacy.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000C70 /* ClipPrivacy.swift */; };
+		A1000C73 /* ClipboardStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000C72 /* ClipboardStore.swift */; };
 		A1000D91 /* LinkGate.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000D90 /* LinkGate.swift */; };
 		A1000EC1 /* PagesService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000EC0 /* PagesService.swift */; };
 		A1000DE1 /* DecisionModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000DE0 /* DecisionModel.swift */; };
@@ -178,6 +179,7 @@
 		A1000DA0 /* WalletPocket.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WalletPocket.swift; sourceTree = "<group>"; };
 		A1000960 /* NoNoAccount.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NoNoAccount.swift; sourceTree = "<group>"; };
 		A1000C70 /* ClipPrivacy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClipPrivacy.swift; sourceTree = "<group>"; };
+		A1000C72 /* ClipboardStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClipboardStore.swift; sourceTree = "<group>"; };
 		A1000D90 /* LinkGate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LinkGate.swift; sourceTree = "<group>"; };
 		A1000EC0 /* PagesService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PagesService.swift; sourceTree = "<group>"; };
 		A1000DE0 /* DecisionModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DecisionModel.swift; sourceTree = "<group>"; };
@@ -305,6 +307,7 @@
 				A1000DA0 /* WalletPocket.swift */,
 				A1000960 /* NoNoAccount.swift */,
 				A1000C70 /* ClipPrivacy.swift */,
+				A1000C72 /* ClipboardStore.swift */,
 				A1000D90 /* LinkGate.swift */,
 				A1000EC0 /* PagesService.swift */,
 				A1000DE0 /* DecisionModel.swift */,
@@ -489,6 +492,7 @@
 				A1000DA1 /* WalletPocket.swift in Sources */,
 				A1000961 /* NoNoAccount.swift in Sources */,
 				A1000C71 /* ClipPrivacy.swift in Sources */,
+				A1000C73 /* ClipboardStore.swift in Sources */,
 				A1000D91 /* LinkGate.swift in Sources */,
 				A1000EC1 /* PagesService.swift in Sources */,
 				A1000DE1 /* DecisionModel.swift in Sources */,
@@ -573,7 +577,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.9.46;
+				MARKETING_VERSION = 0.9.47;
 				PRODUCT_BUNDLE_IDENTIFIER = com.notchglass.app;
 				PRODUCT_NAME = Notchi;
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -596,7 +600,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.9.46;
+				MARKETING_VERSION = 0.9.47;
 				PRODUCT_BUNDLE_IDENTIFIER = com.notchglass.app;
 				PRODUCT_NAME = Notchi;
 				SWIFT_EMIT_LOC_STRINGS = YES;

@@ -3000,3 +3000,80 @@ extension ToolRegistry {
         OpenURLTool(),
     ]) }
 }
+
+// MARK: - Sub-threads
+
+/// Files this round in a new sub-thread instead of the main thread. Offered on
+/// main-thread rounds only. The round's question and answer move there when
+/// the answer settles, and the main thread keeps a line that links to it.
+struct CreateThreadTool: NotchTool {
+    static let toolName = "create_thread"
+    let name = toolName
+    let description = """
+    Files this exchange in a new sub-thread instead of the main conversation. \
+    Use it when the user starts a separate piece of work that will run over \
+    several exchanges or days: a project, a research topic, a recurring job \
+    (call it before manage_loop, so the loop runs in the sub-thread). Do not \
+    use it for a one-off question, small talk, or a follow-up on what was just \
+    said. If one of the sub-threads listed with the message already covers the \
+    topic, use move_to_thread instead. Call it at most once, before answering, \
+    then answer normally.
+    """
+    let schema: [String: Any] = [
+        "type": "object",
+        "properties": [
+            "title": [
+                "type": "string",
+                "description": "The sub-thread's name, 2 to 6 words, in the user's language.",
+            ],
+        ],
+        "required": ["title"],
+    ]
+
+    let create: @Sendable (String) async -> String
+
+    func execute(_ input: [String: Any]) async throws -> String {
+        let title = (input["title"] as? String ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty else { throw SubThreadToolError(message: "title is required") }
+        return await create(String(title.prefix(40)))
+    }
+}
+
+/// Files this round in an existing sub-thread. Returns that thread's recent
+/// messages so the answer can build on them.
+struct MoveToThreadTool: NotchTool {
+    static let toolName = "move_to_thread"
+    let name = toolName
+    let description = """
+    Files this exchange in an existing sub-thread, by the id from the \
+    sub-thread list sent with the message. Use it when the message continues \
+    the topic of one of those sub-threads. Returns that sub-thread's recent \
+    messages: read them, then answer as a follow-up in it. Call it at most \
+    once, before answering.
+    """
+    let schema: [String: Any] = [
+        "type": "object",
+        "properties": [
+            "thread_id": [
+                "type": "string",
+                "description": "The sub-thread's id from the list.",
+            ],
+        ],
+        "required": ["thread_id"],
+    ]
+
+    let move: @Sendable (String) async throws -> String
+
+    func execute(_ input: [String: Any]) async throws -> String {
+        let id = (input["thread_id"] as? String ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !id.isEmpty else { throw SubThreadToolError(message: "thread_id is required") }
+        return try await move(id)
+    }
+}
+
+struct SubThreadToolError: LocalizedError {
+    let message: String
+    var errorDescription: String? { message }
+}

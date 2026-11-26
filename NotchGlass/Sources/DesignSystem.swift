@@ -253,7 +253,6 @@ struct LowBalanceTag: View {
     var body: some View {
         Text(Self.label)
             .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
-            .tracking(0.8)
             .foregroundStyle(Self.smoke.opacity(0.78))
             .padding(.horizontal, 5)
             .padding(.vertical, 2)
@@ -265,7 +264,7 @@ struct LowBalanceTag: View {
     static var width: CGFloat {
         let font = NSFont.systemFont(ofSize: Tokens.TypeSize.badge, weight: .semibold)
         let text = NSAttributedString(string: label,
-                                      attributes: [.font: font, .kern: 0.8])
+                                      attributes: [.font: font])
         return ceil(text.size().width) + 10
     }
 
@@ -309,7 +308,6 @@ private struct PriceTag: View {
     var body: some View {
         Text(text)
             .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
-            .tracking(0.8)
             .foregroundStyle(Self.teal.opacity(0.85))
             .padding(.horizontal, 5)
             .padding(.vertical, 2)
@@ -508,10 +506,10 @@ enum Haptics {
 }
 
 extension View {
-    /// The panel's ONE small-caps caption register: the title over a full-panel
-    /// module (SETTINGS / WHAT'S NEW) and the section headings inside one
-    /// (FEATURES / FIXES, the model picker's provider groups). Caption size,
-    /// semibold, tracked out — quiet enough to label without competing with
+    /// The panel's ONE caption register: the title over a full-panel module
+    /// (Settings / What's New) and the section headings inside one (Features /
+    /// Fixes, the model picker's provider groups). Caption size, semibold, in
+    /// the case it is written in — never forced to capitals. Quiet enough to label without competing with
     /// the content it sits over.
     ///
     /// `color` exists for the one caller whose captions are also a CONTROL — the
@@ -521,8 +519,6 @@ extension View {
     /// wants a different register, not an argument here.
     func captionLabel(color: Color = Tokens.text4) -> some View {
         font(.sf(Tokens.TypeSize.caption, weight: .semibold))
-            .tracking(0.8)
-            .textCase(.uppercase)
             .foregroundStyle(color)
     }
 }

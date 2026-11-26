@@ -310,7 +310,12 @@ final class BothSidesModifierMonitor {
 
     private func handle(_ event: NSEvent) {
         if event.type == .keyDown {
-            firedOrDirty = true
+            // A key typed with no modifier held is not part of a chord. Marking
+            // it dirty would stick until the next modifier release, so the first
+            // Left + Right press after typing was swallowed.
+            if !event.modifierFlags.intersection(Self.watched).isEmpty {
+                firedOrDirty = true
+            }
             return
         }
         guard !flag.isEmpty, leftMask != 0, rightMask != 0 else { return }

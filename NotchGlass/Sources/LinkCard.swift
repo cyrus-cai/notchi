@@ -468,7 +468,9 @@ extension Array where Element == NotchModel.Turn {
             let layout = LinkCardSplitter.layout(
                 text, streaming: false, sources: turn.sources,
                 question: question(at: j), shared: turn.sharedLinks)
-            for case .link(let url, _) in layout.rest { keys.insert(LinkLine.key(url)) }
+            for case .link(let url, _) in layout.rest where PagesService.slug(from: url) == nil {
+                keys.insert(LinkLine.key(url))
+            }
         }
         return keys
     }

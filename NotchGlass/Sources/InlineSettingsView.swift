@@ -340,6 +340,13 @@ struct InlineSettingsView: View {
     @ObservedObject private var clipboardHistory = ClipboardHistory.shared
     /// A Forget waiting on its confirmation (turning Memory off deletes every file).
     @State private var memoryForgetTarget: MemoryForgetTarget?
+    /// A Copy history change that deletes saved copies, waiting on its confirmation.
+    @State private var clipboardConfirm: ClipboardConfirm?
+    private enum ClipboardConfirm: Equatable {
+        case turnOff(count: Int)
+        case shorten(ClipboardRetention, count: Int)
+        case clearAll(count: Int)
+    }
     private struct MemoryForgetTarget: Equatable {
         /// Turning Memory off, which deletes every file.
         var turnsOff = false
@@ -527,6 +534,7 @@ struct InlineSettingsView: View {
         case balances = "Balances" // Blend1 gifts and purchases — reached from the wallet's links
         case privacy = "Privacy" // what happens to a Blend1 request — reached from the wallet's links
         case pages = "Pages"     // Notchi pages (*.notch.website) — reached from Chat
+        case clipboard = "Clipboard" // saved copies (`ClipboardHistory`) — reached from Memory
         case whatsNew = "WhatsNew" // the release notes — reached from About
         var id: String { rawValue }
 
@@ -541,7 +549,7 @@ struct InlineSettingsView: View {
         /// across the whole panel, and left through the header's back pill or Esc.
         var isDetail: Bool {
             self == .licenses || self == .survey || self == .usage || self == .pricing || self == .balances
-                || self == .privacy || self == .pages || self == .whatsNew
+                || self == .privacy || self == .pages || self == .whatsNew || self == .clipboard
         }
 
         /// The section a sub-page sits under — where back (and ⎋) returns to.
@@ -551,6 +559,7 @@ struct InlineSettingsView: View {
             case .licenses, .survey, .whatsNew: return .about
             case .usage, .pricing, .balances, .privacy: return .model
             case .pages:  return .chat
+            case .clipboard: return .memories
             default:               return nil
             }
         }
@@ -595,6 +604,7 @@ struct InlineSettingsView: View {
             case .balances:   return L("nono.balances")
             case .privacy:    return L("nono.privacy.title")
             case .pages:      return L("pages.title")
+            case .clipboard:  return L("clipboardHistory.title")
             case .whatsNew:   return L("whatsnew.title")
             }
         }
@@ -803,6 +813,10 @@ struct InlineSettingsView: View {
                 }
                 windowBackRow()
                 paneContent
+                    // Exact width in the panel, for the same reason as the
+                    // category pane's below.
+                    .frame(width: inWindow ? nil : SettingsMetrics.panelBodyWidth - 16,
+                           alignment: .topLeading)
                     // The header's own 8pt side inset, so the page starts
                     // under the back pill's left edge and ends under the pin.
                     .padding(.horizontal, 8)
@@ -827,6 +841,14 @@ struct InlineSettingsView: View {
                         windowBackRow(leading: 18)
                         paneContent
                     }
+                        // The panel's pane gets an exact width. Left flexible, a
+                        // pane whose content asked for a few points more than
+                        // the slot (Model asked 425.5 of 420) widened the whole
+                        // body past `openWidthSettings`, and the centred overflow
+                        // moved both side margins. The window keeps its
+                        // flexible column (it can be resized).
+                        .frame(width: inWindow ? nil : SettingsMetrics.panelPaneWidth,
+                               alignment: .topLeading)
                         .padding(.leading, 14)
                         .background {
                             // Settings window only: the right pane is a darker
@@ -874,6 +896,9 @@ struct InlineSettingsView: View {
         // Only soften the Settings content behind the template picker. A small
         // radius breaks the legibility of the old cards without erasing their
         // shapes or colours, and the modal overlay mounted below stays crisp.
+        // The whole body at the panel's exact width too, so nothing below
+        // (a header item, a pushed page) can widen it and shift the gutters.
+        .frame(width: inWindow ? nil : SettingsMetrics.panelBodyWidth, alignment: .topLeading)
         .blur(radius: license.locked ? 14 : (promptTemplatePickerOpen ? 2.5 : 0))
         .allowsHitTesting(!license.locked)
         // Trial ended: Settings is one page over the blurred panes, with Buy
@@ -941,7 +966,7 @@ struct InlineSettingsView: View {
                 ConfirmationDialogOverlay(onDismiss: { memoryForgetTarget = nil }) {
                     SettingsAlertDialog(
                         title: L("memory.clearAll"),
-                        description: L("memory.forgetAll.confirm"),
+                        description: target.turnsOff ? L("memory.off.confirm") : L("memory.forgetAll.confirm"),
                         confirmTitle: L("memory.clearAll"),
                         cancelTitle: L("clear.cancel"),
                         destructive: true,
@@ -953,6 +978,31 @@ struct InlineSettingsView: View {
                                     memory.enabled = false   // which forgets everything
                                 } else {
                                     memory.deleteAll()
+                                }
+                            }
+                        }
+                    )
+                }
+                .padding(.horizontal, -NotchBody.panelPadding)
+                .padding(.top, -NotchBody.panelPadding)
+                .padding(.bottom, -NotchBody.panelPadding)
+                .transition(.opacity.combined(with: .scale(scale: 0.96)))
+            } else if let confirm = clipboardConfirm {
+                ConfirmationDialogOverlay(onDismiss: { clipboardConfirm = nil }) {
+                    SettingsAlertDialog(
+                        title: clipboardConfirmTitle(confirm),
+                        description: clipboardConfirmText(confirm),
+                        confirmTitle: clipboardConfirmTitle(confirm),
+                        cancelTitle: L("clear.cancel"),
+                        destructive: true,
+                        onCancel: { clipboardConfirm = nil },
+                        onConfirm: {
+                            clipboardConfirm = nil
+                            withAnimation(.easeOut(duration: Tokens.hoverFade)) {
+                                switch confirm {
+                                case .turnOff: clipboardHistory.enabled = false   // which deletes every copy
+                                case .shorten(let option, _): clipboardHistory.retention = option
+                                case .clearAll: clipboardHistory.clear()
                                 }
                             }
                         }
@@ -1039,6 +1089,7 @@ struct InlineSettingsView: View {
         .animation(.easeOut(duration: 0.16), value: model.confirmingDisconnect)
         .animation(.easeOut(duration: 0.16), value: connectorAuth.pendingThirdPartyConsent?.id)
         .animation(.easeOut(duration: 0.16), value: memoryForgetTarget)
+        .animation(.easeOut(duration: 0.16), value: clipboardConfirm)
         .animation(.easeOut(duration: 0.16), value: telegramConfirmForget)
         .animation(.easeOut(duration: 0.16), value: signalConfirmForget)
         .animation(.easeOut(duration: 0.16), value: promptTemplatePickerOpen)
@@ -1418,13 +1469,25 @@ struct InlineSettingsView: View {
                     .padding(.top, metrics.groupHeadingGap)
                 copySenseRow
             case .memories:
+                // One group: what Notchi writes about you, then the text you
+                // copied, as it was.
+                Text(L("memory.title"))
+                    .settingsHeading()
                 memoryEnableRow
                 if memory.enabled {
-                    if ClipboardHistory.available { memoryClipboardRow }
                     UnderlineLink(title: L("memory.manage"), external: true) {
                         try? FileManager.default.createDirectory(at: UserMemory.folder,
                                                                  withIntermediateDirectories: true)
                         NSWorkspace.shared.open(UserMemory.folder)
+                    }
+                }
+                if ClipboardHistory.available {
+                    clipboardHistoryRow
+                    if clipboardHistory.enabled {
+                        clipboardRetentionRow
+                        UnderlineLink(title: L("clipboardHistory.manage"), external: true) {
+                            NSWorkspace.shared.activateFileViewerSelecting([ClipboardHistory.fileURL])
+                        }
                     }
                 }
             case .general:
@@ -1507,6 +1570,10 @@ struct InlineSettingsView: View {
                 NonoPrivacyNote()
             case .pages:
                 NotchiPagesPane()
+            case .clipboard:
+                ClipboardHistoryPane(onClearAll: {
+                    clipboardConfirm = .clearAll(count: clipboardHistory.count())
+                })
             case .whatsNew:
                 // Drawn beside this scroller, not in it (see `paneContent`).
                 EmptyView()
@@ -2583,17 +2650,18 @@ struct InlineSettingsView: View {
                     .lineLimit(1)
                     .frame(width: SettingsMetrics.searchKeyLabelWidth, alignment: .leading)
 
+                Spacer(minLength: 8)
                 ZStack(alignment: .leading) {
                     if editingKeenableKey {
                         if keenableKey.isEmpty {
                             Text(L("model.keenablePasteKey"))
-                                .font(.sf(Tokens.TypeSize.form))
+                                .font(.sf(Tokens.TypeSize.label))
                                 .foregroundStyle(Tokens.placeholder)
                                 .allowsHitTesting(false)
                         }
                         TextField("", text: $keenableKey)
                             .textFieldStyle(.plain)
-                            .font(.sf(Tokens.TypeSize.form))
+                            .font(.sf(Tokens.TypeSize.label))
                             .foregroundStyle(Tokens.text1)
                             .disabled(keenableEnvOverride)
                             .focused($searchKeyFocused)
@@ -2602,12 +2670,13 @@ struct InlineSettingsView: View {
                             .onChange(of: keenableKey) { model.noteUserTyping() }
                     } else {
                         Text(maskedKeenableKey)
-                            .font(.sf(Tokens.TypeSize.form))
+                            .font(.sf(Tokens.TypeSize.label))
                             .foregroundStyle(Tokens.text2)
                             .lineLimit(1)
                     }
                 }
-                .settingsInputBox(focused: searchKeyFocused)
+                .settingsInputBox(focused: searchKeyFocused, height: Tokens.Control.header)
+                .frame(width: 252)
                 .opacity(keenableEnvOverride ? 0.5 : 1)
 
                 if editingKeenableKey {
@@ -2665,17 +2734,18 @@ struct InlineSettingsView: View {
                     .lineLimit(1)
                     .frame(width: SettingsMetrics.searchKeyLabelWidth, alignment: .leading)
 
+                Spacer(minLength: 8)
                 ZStack(alignment: .leading) {
                     if editingExaKey {
                         if exaKey.isEmpty {
                             Text(L("model.exaPasteKey"))
-                                .font(.sf(Tokens.TypeSize.form))
+                                .font(.sf(Tokens.TypeSize.label))
                                 .foregroundStyle(Tokens.placeholder)
                                 .allowsHitTesting(false)
                         }
                         TextField("", text: $exaKey)
                             .textFieldStyle(.plain)
-                            .font(.sf(Tokens.TypeSize.form))
+                            .font(.sf(Tokens.TypeSize.label))
                             .foregroundStyle(Tokens.text1)
                             .disabled(exaEnvOverride)
                             .focused($searchKeyFocused)
@@ -2684,12 +2754,13 @@ struct InlineSettingsView: View {
                             .onChange(of: exaKey) { model.noteUserTyping() }
                     } else {
                         Text(maskedExaKey)
-                            .font(.sf(Tokens.TypeSize.form))
+                            .font(.sf(Tokens.TypeSize.label))
                             .foregroundStyle(Tokens.text2)
                             .lineLimit(1)
                     }
                 }
-                .settingsInputBox(focused: searchKeyFocused)
+                .settingsInputBox(focused: searchKeyFocused, height: Tokens.Control.header)
+                .frame(width: 252)
                 .opacity(exaEnvOverride ? 0.5 : 1)
 
                 if editingExaKey {
@@ -2748,17 +2819,18 @@ struct InlineSettingsView: View {
                     .lineLimit(1)
                     .frame(width: SettingsMetrics.searchKeyLabelWidth, alignment: .leading)
 
+                Spacer(minLength: 8)
                 ZStack(alignment: .leading) {
                     if editingAnySearchKey {
                         if anySearchKey.isEmpty {
                             Text(L("model.anysearchPasteKey"))
-                                .font(.sf(Tokens.TypeSize.form))
+                                .font(.sf(Tokens.TypeSize.label))
                                 .foregroundStyle(Tokens.placeholder)
                                 .allowsHitTesting(false)
                         }
                         TextField("", text: $anySearchKey)
                             .textFieldStyle(.plain)
-                            .font(.sf(Tokens.TypeSize.form))
+                            .font(.sf(Tokens.TypeSize.label))
                             .foregroundStyle(Tokens.text1)
                             .disabled(anySearchEnvOverride)
                             .focused($searchKeyFocused)
@@ -2766,12 +2838,13 @@ struct InlineSettingsView: View {
                             .onChange(of: anySearchKey) { model.noteUserTyping() }
                     } else {
                         Text(maskedAnySearchKey)
-                            .font(.sf(Tokens.TypeSize.form))
+                            .font(.sf(Tokens.TypeSize.label))
                             .foregroundStyle(Tokens.text2)
                             .lineLimit(1)
                     }
                 }
-                .settingsInputBox(focused: searchKeyFocused)
+                .settingsInputBox(focused: searchKeyFocused, height: Tokens.Control.header)
+                .frame(width: 252)
                 .opacity(anySearchEnvOverride ? 0.5 : 1)
 
                 if editingAnySearchKey {
@@ -2818,17 +2891,18 @@ struct InlineSettingsView: View {
                     .lineLimit(1)
                     .frame(width: SettingsMetrics.searchKeyLabelWidth, alignment: .leading)
 
+                Spacer(minLength: 8)
                 ZStack(alignment: .leading) {
                     if editingDeepSeekSearchKey {
                         if deepSeekSearchKey.isEmpty {
                             Text(L("model.deepseekSearchPasteKey"))
-                                .font(.sf(Tokens.TypeSize.form))
+                                .font(.sf(Tokens.TypeSize.label))
                                 .foregroundStyle(Tokens.placeholder)
                                 .allowsHitTesting(false)
                         }
                         TextField("", text: $deepSeekSearchKey)
                             .textFieldStyle(.plain)
-                            .font(.sf(Tokens.TypeSize.form))
+                            .font(.sf(Tokens.TypeSize.label))
                             .foregroundStyle(Tokens.text1)
                             .disabled(deepSeekSearchEnvOverride)
                             .focused($searchKeyFocused)
@@ -2836,12 +2910,13 @@ struct InlineSettingsView: View {
                             .onChange(of: deepSeekSearchKey) { model.noteUserTyping() }
                     } else {
                         Text(maskedDeepSeekSearchKey)
-                            .font(.sf(Tokens.TypeSize.form))
+                            .font(.sf(Tokens.TypeSize.label))
                             .foregroundStyle(Tokens.text2)
                             .lineLimit(1)
                     }
                 }
-                .settingsInputBox(focused: searchKeyFocused)
+                .settingsInputBox(focused: searchKeyFocused, height: Tokens.Control.header)
+                .frame(width: 252)
                 .opacity(deepSeekSearchEnvOverride ? 0.5 : 1)
 
                 if editingDeepSeekSearchKey {
@@ -2945,9 +3020,6 @@ struct InlineSettingsView: View {
                     }
                 } else if let snapshot {
                     HStack(spacing: 8) {
-                        if snapshot.isEmpty {
-                            LowBalanceTag()
-                        }
                         nonoFigure(snapshot, prominent: false)
                         Image(systemName: "chevron.right")
                             .font(.sf(Tokens.TypeSize.badge, weight: .regular))
@@ -4938,7 +5010,7 @@ struct InlineSettingsView: View {
     /// Memory's master switch, as a plain row; the folder opens in Finder from
     /// the "Manage your memories" link under the group.
     private var memoryEnableRow: some View {
-        settingRow(label: L("memory.enable"), info: L("memory.info"), aligned: true) {
+        settingRow(label: L("memory.toggle"), info: L("memory.info"), aligned: true) {
             memoryToggle
         }
     }
@@ -5454,19 +5526,84 @@ struct InlineSettingsView: View {
         }
     }
 
-    /// Under Memory: whether copies feed it (`ClipboardHistory.enabled`). Off
-    /// clears the clipboard history.
-    private var memoryClipboardRow: some View {
-        settingRow(label: L("memory.clipboard"), info: L("memory.clipboard.info"), aligned: true) {
+    /// Copy history's own switch (`ClipboardHistory.enabled`). Off deletes
+    /// every saved copy, so with any saved it asks first.
+    private var clipboardHistoryRow: some View {
+        settingRow(label: L("clipboardHistory.toggle"), info: L("clipboardHistory.info"), aligned: true) {
             Toggle("", isOn: Binding(
                 get: { clipboardHistory.enabled },
-                set: { Haptics.levelChange(); clipboardHistory.enabled = $0 }
+                set: { on in
+                    Haptics.levelChange()
+                    let saved = on ? 0 : clipboardHistory.count()
+                    guard saved == 0 else {
+                        clipboardConfirm = .turnOff(count: saved)
+                        return
+                    }
+                    clipboardHistory.enabled = on
+                }
             ))
             .labelsHidden()
             .toggleStyle(.switch)
             .controlSize(.mini)
             .tint(Tokens.switchTint)
         }
+    }
+
+    private func clipboardConfirmTitle(_ confirm: ClipboardConfirm) -> String {
+        switch confirm {
+        case .turnOff: return L("clipboardHistory.off")
+        case .shorten: return L("clipboardHistory.shorten")
+        case .clearAll: return L("clipboardHistory.clearAll")
+        }
+    }
+
+    private func clipboardConfirmText(_ confirm: ClipboardConfirm) -> String {
+        switch confirm {
+        case .turnOff(let count): return L("clipboardHistory.off.confirm", count)
+        case .shorten(let option, let count): return L("clipboardHistory.shorten.confirm", option.label, count)
+        case .clearAll(let count): return L("clipboardHistory.clearAll.confirm", count)
+        }
+    }
+
+    /// How long copies are kept (`ClipboardHistory.retention`): an Auto delete
+    /// switch, off by default (`forever`), and once on, the period, 7 days to
+    /// start. A period that would delete saved copies asks first.
+    @ViewBuilder
+    private var clipboardRetentionRow: some View {
+        let autoDelete = clipboardHistory.retention != .forever
+        settingRow(label: L("clipboardHistory.autoDelete"), aligned: true) {
+            Toggle("", isOn: Binding(
+                get: { autoDelete },
+                set: { on in
+                    Haptics.levelChange()
+                    setClipboardRetention(on ? ClipboardRetention.autoDeleteDefault : .forever)
+                }
+            ))
+            .labelsHidden()
+            .toggleStyle(.switch)
+            .controlSize(.mini)
+            .tint(Tokens.switchTint)
+        }
+        if autoDelete {
+            settingRow(label: L("clipboardHistory.retention"), aligned: true) {
+                GlassMenu(title: clipboardHistory.retention.label, items: ClipboardRetention.periods.map { option in
+                    GlassMenuItem(title: option.label, selected: clipboardHistory.retention == option) {
+                        guard clipboardHistory.retention != option else { return }
+                        Haptics.levelChange()
+                        setClipboardRetention(option)
+                    }
+                })
+            }
+        }
+    }
+
+    private func setClipboardRetention(_ option: ClipboardRetention) {
+        let doomed = clipboardHistory.count(olderThan: option)
+        guard doomed == 0 else {
+            clipboardConfirm = .shorten(option, count: doomed)
+            return
+        }
+        clipboardHistory.retention = option
     }
 
     /// Whether a finished answer gets a predicted next question in the reply
@@ -9787,6 +9924,8 @@ struct SettingActionButton: View {
         Button(title, action: action)
             .buttonStyle(.plain).exemptsDoubleClickPin()
             .font(.sf(Tokens.TypeSize.meta, weight: .regular))
+            .lineLimit(1)
+            .fixedSize()
             .foregroundStyle(hovering && isEnabled ? Tokens.text1 : tone)
             .padding(.horizontal, 8)
             .frame(height: SettingsUI.heightSM)
@@ -10297,7 +10436,7 @@ private struct GlassMenuCard: View {
             (item.title, item.tag == nil ? nil : "MMMMMM")
         }
         let headers: [(String, String?)] = (items.map(\.header) + [title]).compactMap { header in
-            header.map { ($0.uppercased(), nil) }
+            header.map { ($0, nil) }
         }
         return MenuCard.width(titles: rows + headers, max: 300)
     }
@@ -10378,7 +10517,7 @@ private struct PickerCard<Content: View>: View {
     @State private var hovering = false
 
     var body: some View {
-        let cardShape = RoundedRectangle(cornerRadius: Tokens.Radius.inset, style: .continuous)
+        let cardShape = RoundedRectangle(cornerRadius: Tokens.Radius.window, style: .continuous)
         Button(action: action) {
             VStack(spacing: 6) {
                 content()
@@ -11007,6 +11146,13 @@ struct SettingsMetrics {
     /// leading inset, and the pane's side insets.
     static let windowWidth: CGFloat = 15 * 2 + window.sidebarWidth + 12 + 14
         + window.paneSideInset * 2 + (window.contentMaxWidth ?? 560)
+
+    /// Settings' width inside the panel: the island's settings width less the
+    /// body's 15pt gutters.
+    static let panelBodyWidth: CGFloat = Tokens.openWidthSettings - 2 * NotchBody.panelPadding
+    /// The category pane's exact width in the panel: the body less the
+    /// category column, its 12pt gap and the pane's 14pt leading inset.
+    static let panelPaneWidth: CGFloat = panelBodyWidth - panel.sidebarWidth - 12 - 14
 }
 
 extension EnvironmentValues {
@@ -11113,3 +11259,4 @@ struct ThirdPartyConnectorConsentOverlay: View {
         }
     }
 }
+

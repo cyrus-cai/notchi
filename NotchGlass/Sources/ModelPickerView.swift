@@ -1115,7 +1115,7 @@ struct ModelDetailCard: View {
                     // hair above its geometric one.
                     .offset(y: -1)
 
-                CurvedText(text: L("model.detail.value").uppercased(),
+                CurvedText(text: L("model.detail.value"),
                            font: Self.labelFont,
                            radius: Self.labelRadius)
                     .foregroundStyle(Tokens.ink.opacity(0.50))
@@ -3337,7 +3337,7 @@ private struct AskModelSubmenuCard: View {
 }
 
 /// Footer shown under a Notchi model list when the balance is empty: one
-/// `LowBalanceTag` for the whole list and an Add button that jumps to the
+/// plain "No credit" line for the whole list and an Add button that jumps to the
 /// Balances top-up flow, instead of repeating NO CREDIT on every row.
 private struct ModelNoCreditFooter: View {
     let onAdd: () -> Void
@@ -3356,7 +3356,10 @@ private struct ModelNoCreditFooter: View {
                 .padding(.vertical, MenuCard.pickerRuleGap)
 
             HStack(spacing: 6) {
-                LowBalanceTag()
+                Text(L("model.detail.nono.empty"))
+                    .font(.sf(Tokens.TypeSize.meta))
+                    .foregroundStyle(Tokens.text3)
+                    .lineLimit(1)
                 Spacer(minLength: 0)
                 Button(action: onAdd) {
                     Text(L("nono.addShort"))

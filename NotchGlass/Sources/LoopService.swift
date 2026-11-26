@@ -43,19 +43,20 @@ enum LoopInterval {
             schedule += " until "
                 + endsAt.formatted(.iso8601.year().month().day().time(includingFractionalSeconds: false))
         }
-        let roundText = round.map { "This is round \($0) of a loop that \(schedule)." }
-            ?? "This task is a loop that \(schedule)."
+        let roundText = "This is a recurring task that \(schedule)."
         let pageText = pageSlug.map {
-            " This loop already has a live page (\($0), https://\($0).\(PagesService.domain))."
-                + " Append this round's full findings to that page with page(action=\"append\", page_id=\"\($0)\", text=...),"
+            " This task already has a live page (\($0), https://\($0).\(PagesService.domain))."
+                + " Append the full findings to that page with page(action=\"append\", page_id=\"\($0)\", text=...),"
                 + " and keep your reply in this thread to one brief sentence plus the page URL on its own line."
         } ?? ""
         return "\n\n(" + roundText
+            + " State the finding directly as a normal update — never mention round numbers or check framing"
+            + " (no \"Round N\", \"第 N 轮\", \"本轮\", \"这一轮\", \"本次巡检\")."
             + " The app runs the schedule. You cannot start, stop, pause or re-time this loop,"
             + " and you have no tool for it, so never say you changed it."
             + " Only if the message above names a condition for stopping and that condition is now met,"
             + " end your reply with \(doneMarker); the app then pauses the loop and asks the user."
-            + " A round that finds nothing new is not a reason to stop."
+            + " Finding nothing new is not a reason to stop."
             + pageText + ")"
     }
 
@@ -251,7 +252,7 @@ final class ChatLoopManager: ObservableObject {
         /// The loop's own id.
         let id: UUID
         /// The thread its rounds answer in — also its Recent row's id.
-        let threadID: UUID
+        var threadID: UUID
         let prompt: String
         var intervalMinutes: Int
         var startedAt: Date
@@ -387,6 +388,14 @@ final class ChatLoopManager: ObservableObject {
 
     /// The loop with this id.
     func loop(for id: UUID) -> ChatLoop? { loops.first { $0.id == id } }
+
+    /// Moves a loop's later rounds to another thread (a loop moved out of the
+    /// main thread into a sub-thread of its own).
+    func rehome(loopID: UUID, to threadID: UUID) {
+        guard let i = loops.firstIndex(where: { $0.id == loopID }) else { return }
+        loops[i].threadID = threadID
+        persist()
+    }
     func isActive(_ id: UUID) -> Bool { loop(for: id)?.active == true }
 
     /// Binds a Notchi page to a loop so subsequent rounds automatically append
@@ -567,7 +576,7 @@ final class ChatLoopManager: ObservableObject {
             return
         }
         LoopLog.write("round \(LoopLog.short(id)) #\(loopRound ?? 0) \(failed ? "failed" : "ok")")
-        notify(loop, subtitle: L("notify.loop.round", loop.rounds),
+        notify(loop, subtitle: "",
                silent: true, answer: answer)
         // A failed round does not end the loop; only Stop does. Offline, the
         // next round runs as soon as the network is back.

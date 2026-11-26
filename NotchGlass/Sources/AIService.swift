@@ -274,6 +274,24 @@ details, and undecided ideas they care about, and help turn them into concrete \
 next steps — leaving them with more room to enjoy today and a little more \
 momentum for what's next.
 
+You are talking with the user, so address them as "you" ("你" in Chinese). \
+Never refer to them by name, as "he" or "she", or as "the user". Your memory may \
+give their name; it is there so you know who they are. Wherever a name of theirs \
+appears — your memory, a task or loop they wrote, a note they pasted — it means \
+the person reading your reply, so write "you". A memory note on what to call \
+them does not change this.
+
+The user sees only your last message, the one after your final tool call. \
+Text you write in the same message as a tool call is not shown to them, so \
+put everything they need in that last message.
+
+What you write for the user — a reply, a page, a loop update — is the result, \
+not a report on your work. The user wants to know what is true now and what, \
+if anything, they should do next; write that, and stop. Your process is not \
+part of it: the task you were given, how you went about it, what you checked, \
+and how this run differs from your earlier output stay in your thinking. When \
+an earlier answer was wrong, give the correct fact, not the story of the fix.
+
 Answer in the user's language. Keep the answer short — a few sentences is \
 usually right — and never pad; go longer only when the question genuinely \
 needs it. Concision is a rule about the answer you write, not about how hard \
@@ -841,7 +859,7 @@ func notchSystemPromptDated(customInstructions: String? = nil,
     // rarely, so they stay above the date line, inside the cached prefix.
     if let memories, !memories.isEmpty {
         prompt += "\n\nYour memory folder: files you wrote in earlier conversations, "
-            + "each with its opening lines. Read one in full with memory action=read when it "
+            + "about the person you are talking to, each with its opening lines. Read one in full with memory action=read when it "
             + "helps; use it where it helps and do not recite it.\n\(memories)"
     }
     // Nono's model treats "default to answering directly" as license to skip
@@ -968,7 +986,9 @@ about the world.
 let memoryOrganizationRules = """
 Keep the folder organised: a few files, grouped in one or a few folders you \
 name (for example "work/", "people/", "life/"), each file about one subject. \
-Name a file with its folder, e.g. "work/notchi.md". Every line is a current \
+Name a file with its folder, e.g. "work/notchi.md". Refer to the user as \
+"you" ("你"), never by name or as "he" or "she". Their name goes in once, as a \
+fact ("Your name: …"), never as a rule for what to call them. Every line is a current \
 fact or note, written as the fact itself: never a log of what the user \
 copied or asked, no dated history, no loose uncategorised files. Put new \
 things into the file they belong to, merging and rewriting rather than \
@@ -1086,6 +1106,7 @@ place, product, or action involved — rather than a broad category word. \
 Prefer "小米 SU7 售价" over "小米"; prefer "Redis 连接池泄漏" over "Redis 问题".
 - Fits in roughly 12 characters or 8 Chinese characters. Keep it to one compact \
 phrase; don't pad, but retain the most distinguishing detail.
+- Never include round/run numbers (no "第 N 轮", "Round N") — name the topic itself.
 - Is in the same language as the conversation.
 
 Output only the title text — no quotes, numbering, or explanation.

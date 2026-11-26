@@ -241,6 +241,10 @@ final class RequestAudit: @unchecked Sendable {
     /// file. The pair bounds both the file and how far back the chart can page.
     private let maxEntries = 1000
     private let maxAge: TimeInterval = 90 * 24 * 60 * 60
+    /// How many of the newest records keep their copy of what was sent. A chat
+    /// body is the whole conversation, so a copy per record for all 1,000 runs
+    /// past 60 MB; older records keep their line and lose the copy.
+    private let maxPayloads = 200
     /// Serial queue that owns all reads and writes of `requests.json` so the
     /// full 1,000-entry array never needs to stay resident in memory.
     private let writes = DispatchQueue(label: "com.notchglass.request-audit")
@@ -266,7 +270,9 @@ final class RequestAudit: @unchecked Sendable {
         return payloads
     }()
 
-    private init() {}
+    private init() {
+        writes.async { self.sweepPayloads() }
+    }
 
     // MARK: - Recording
 
@@ -291,10 +297,11 @@ final class RequestAudit: @unchecked Sendable {
     fileprivate func append(_ entry: Entry, request: URLRequest?, payload: [String: Any]?) {
         writes.async { [fileURL, payloadDirectory] in
             var current = self.loadFromDisk()
-            let before = Set(current.map(\.id))
+            let before = Set(current.suffix(self.maxPayloads).map(\.id))
             current.append(entry)
             self.prune(&current, now: entry.at)
-            let dropped = before.subtracting(current.map(\.id))
+            let dropped = before.subtracting(current.suffix(self.maxPayloads).map(\.id))
+            self.markPayloadless(&current)
 
             if let dir = payloadDirectory {
                 // Parsed and pretty-printed here, on the write queue: a chat body
@@ -303,7 +310,7 @@ final class RequestAudit: @unchecked Sendable {
                 let kept = request.map(RequestAudit.describe) ?? payload
                 if let kept, let payloadData = try? JSONSerialization.data(
                     withJSONObject: kept,
-                    options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]) {
+                    options: [.sortedKeys, .withoutEscapingSlashes]) {
                     try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
                     try? payloadData.write(to: dir.appendingPathComponent("\(entry.id.uuidString).json"),
                                            options: .atomic)
@@ -333,6 +340,13 @@ final class RequestAudit: @unchecked Sendable {
         guard let dir = payloadDirectory,
               let data = try? Data(contentsOf: dir.appendingPathComponent("\(id.uuidString).json"))
         else { return nil }
+        // Stored compact; pretty-printed only here, when someone reads it.
+        if let object = try? JSONSerialization.jsonObject(with: data),
+           let pretty = try? JSONSerialization.data(
+               withJSONObject: object,
+               options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]) {
+            return String(data: pretty, encoding: .utf8)
+        }
         return String(data: data, encoding: .utf8)
     }
 
@@ -463,6 +477,38 @@ final class RequestAudit: @unchecked Sendable {
         var kept = Array(restored.suffix(maxEntries))
         prune(&kept, now: Date())
         return kept
+    }
+
+    /// Records older than the newest `maxPayloads` no longer have a copy on
+    /// disk; say so, so Details doesn't offer one.
+    private func markPayloadless(_ list: inout [Entry]) {
+        let firstWithCopy = max(0, list.count - maxPayloads)
+        for i in 0..<firstWithCopy where list[i].hasPayload == true {
+            list[i].hasPayload = false
+        }
+    }
+
+    /// Once per launch: delete every payload file that no record among the
+    /// newest `maxPayloads` points to — copies left behind by records pruned
+    /// before files were deleted with them, and copies past the window. The
+    /// list is rewritten when that changes which records have a copy.
+    private func sweepPayloads() {
+        guard let dir = payloadDirectory,
+              let files = try? FileManager.default.contentsOfDirectory(
+                  at: dir, includingPropertiesForKeys: nil)
+        else { return }
+        var current = loadFromDisk()
+        let keep = Set(current.suffix(maxPayloads).map { $0.id.uuidString })
+        for file in files where file.pathExtension == "json" {
+            let name = file.deletingPathExtension().lastPathComponent
+            if !keep.contains(name) { try? FileManager.default.removeItem(at: file) }
+        }
+        let flagged = current.filter { $0.hasPayload == true }.count
+        markPayloadless(&current)
+        if current.filter({ $0.hasPayload == true }).count != flagged,
+           let url = fileURL, let data = try? JSONEncoder().encode(current) {
+            try? data.write(to: url, options: .atomic)
+        }
     }
 
     /// Drop the tail past the count cap and anything past the age cap. Oldest

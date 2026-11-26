@@ -112,25 +112,30 @@ final class NotificationService: NSObject {
     ///   - subtitle: a loop round's "Loop Round 4 ready" / "Loop ended · 7 rounds",
     ///     used as the banner title so the round number is the first line.
     ///   - silent: a loop's in-between rounds replace their banner without a sound.
+    ///   - proactive: a message Notchi wrote on its own (a reminder, an event).
+    ///     No title, so the banner's first line is the app name.
     func postAnswerReady(threadID: UUID, title: String?, question: String,
                          answer: String? = nil,
-                         subtitle: String? = nil, silent: Bool = false) {
+                         subtitle: String? = nil, silent: Bool = false,
+                         proactive: Bool = false) {
         ensureAuthorization { [weak self] granted in
             guard granted, let self else { return }
             let content = UNMutableNotificationContent()
             if let subtitle {
-                content.title = subtitle
-                content.subtitle = question
+                if !subtitle.isEmpty { content.title = subtitle }
                 let reply = (answer ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
                 content.body = reply.isEmpty ? question : reply
             } else {
-                content.title = L("notify.answerReady.title")
-                // The body is the reply itself; the title/question only fills in
-                // when there is no reply text.
                 let reply = MarkdownParser.plainText(answer ?? "")
                     .trimmingCharacters(in: .whitespacesAndNewlines)
-                content.body = reply.isEmpty
-                    ? (title?.isEmpty == false ? title! : question) : reply
+                let asked = Self.oneLine(title?.isEmpty == false ? title! : question)
+                if proactive {
+                    content.body = reply.isEmpty ? asked : reply
+                } else {
+                    // Title: what was asked. Body: the reply.
+                    content.title = asked.isEmpty ? L("notify.answerReady.title") : asked
+                    content.body = reply.isEmpty ? asked : reply
+                }
             }
             content.categoryIdentifier = Self.answerCategory
             content.userInfo = [Self.threadIDKey: threadID.uuidString]
@@ -174,10 +179,14 @@ final class NotificationService: NSObject {
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             let reply = (answer ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             if let subtitle {
-                content.title = subtitle
-                content.subtitle = prompt
+                if !subtitle.isEmpty { content.title = subtitle }
                 content.body = (!success && !reason.isEmpty) ? reason
                     : (reply.isEmpty ? prompt : reply)
+            } else if success, !reply.isEmpty {
+                // Title: the task. Body: the result.
+                let task = Self.oneLine(prompt)
+                content.title = task.isEmpty ? L("notify.agent.done", engineName) : task
+                content.body = MarkdownParser.plainText(reply)
             } else {
                 content.title = L(success ? "notify.agent.done" : "notify.agent.failed",
                                   engineName)
@@ -193,6 +202,14 @@ final class NotificationService: NSObject {
                 identifier: "agentTask", content: content, trigger: nil)
             self.center.add(request, withCompletionHandler: nil)
         }
+    }
+
+    /// First line of `text`, whitespace collapsed, for a banner title.
+    private static func oneLine(_ text: String) -> String {
+        let plain = MarkdownParser.plainText(text)
+        let first = plain.split(whereSeparator: \.isNewline)
+            .first(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty }) ?? ""
+        return first.split(whereSeparator: \.isWhitespace).joined(separator: " ")
     }
 
     /// Request authorization the first time we need it, then run `completion`

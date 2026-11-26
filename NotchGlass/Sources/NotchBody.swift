@@ -392,6 +392,7 @@ struct NotchBody: View {
                 // closes it too.
                 resultView
                     .simultaneousGesture(TapGesture().onEnded {
+                        guard model.showRoutines else { return }
                         DispatchQueue.main.async {
                             guard Date().timeIntervalSince(sidePageToggledAt) > 0.3 else { return }
                             withAnimation(.spring(response: 0.4, dampingFraction: 0.86)) {
@@ -399,16 +400,21 @@ struct NotchBody: View {
                             }
                         }
                     }, including: model.showRoutines ? .all : .subviews)
+                    .onChange(of: model.showRoutines) { _, isOpen in
+                        if isOpen { sidePageToggledAt = Date() }
+                    }
                     .overlay {
                         if model.showRoutines {
                             GeometryReader { geo in
-                                RoutinesPanel(tab: model.sidePageTab, onClose: {
+                                RoutinesPanel(tab: model.sidePageTab, model: model, onClose: {
                                     withAnimation(.spring(response: 0.4, dampingFraction: 0.86)) {
                                         model.showRoutines = false
                                     }
-                                }, copies: { AnyView(copyThreadTab) })
-                                .frame(width: geo.size.width * (metrics.floating ? 0.75 : 0.58))
+                                }, copies: { AnyView(copyThreadTab) },
+                                   subThread: { id in AnyView(subThreadTab(id)) })
+                                .frame(width: geo.size.width * ((metrics.floating || model.activeSubThreadID != nil) ? 0.75 : 0.58))
                                 .frame(maxWidth: .infinity, alignment: .trailing)
+                                .animation(.spring(response: 0.36, dampingFraction: 0.86), value: model.activeSubThreadID)
                             }
                             .padding(.trailing, -NotchBody.panelPadding)
                             .padding(.top, -NotchBody.panelPadding)
@@ -1103,14 +1109,7 @@ struct NotchBody: View {
     /// the pull hands over to mounts in the same layout.
     private func revealThread(_ turns: [NotchModel.Turn], in thread: [NotchModel.Turn],
                               measures: Bool) -> some View {
-        // A pull draws the copy marks the result page draws. The one under the
-        // newest turn is not in the peek, so it grows in with the pull below
-        // the stack (`RevealCopyMarkTail`) and the turns above rise to make room.
         let drawnThread = thread.filter(\.isDrawn)
-        let marks = measures
-            ? model.copyThreadMarks(for: drawnThread, in: model.threadPullItemID) : [:]
-        let lastID = turns.last?.id
-        let tail = lastID.flatMap { marks[$0] }
         let drawnCount = drawnThread.count
         let record = { (height: CGFloat) in
             revealThreadPartial = turns.count < drawnCount
@@ -1125,24 +1124,12 @@ struct NotchBody: View {
                     turnView(turn, thread: thread, peek: true)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .id(turn.id)
-                    if turn.id != lastID, let mark = marks[turn.id] {
-                        CopyMarkLine(mark: mark, engaged: false) {}
-                    }
                 }
             }
             .fixedSize(horizontal: false, vertical: true)
             .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height in
                 guard measures else { return }
-                record(height + (tail == nil ? 0 : copyMarkTailHeight))
-            }
-            if let tail {
-                RevealCopyMarkTail(live: model.threadPullLive, mark: tail) { height in
-                    guard copyMarkTailHeight != height else { return }
-                    copyMarkTailHeight = height
-                    if measures, revealThreadHeight > 0 {
-                        record(revealThreadHeight + height)
-                    }
-                }
+                record(height)
             }
         }
         .padding(.trailing, 8)
@@ -1194,7 +1181,10 @@ struct NotchBody: View {
         let fieldHeight = PromptField.lineHeight(for: Self.followUpFontSize)
         let rowHeight = max(slotFloor, fieldHeight)
         let shape = NotchBody.composerShape(height: rowHeight + 12)
-        return HStack(alignment: .bottom, spacing: 8) {
+        return HStack(alignment: .bottom, spacing: 6) {
+            if !license.locked {
+                AttachPlusChip(flat: false, action: {}, chipSize: Self.splitRailChip)
+            }
             HStack(alignment: .bottom, spacing: 6) {
                 ZStack(alignment: .leading) {
                     if model.text.isEmpty {
@@ -1609,7 +1599,8 @@ struct NotchBody: View {
                         },
                         toggleRecent: { model.showHistory = true },
                         openSettings: { model.openSettings() },
-                        openReleaseNotes: { model.showWhatsNew = true })
+                        openReleaseNotes: { model.showWhatsNew = true },
+                        openHistory: { HistoryArchiveWindowController.shared.present(model: model) })
                         .transition(.scale(scale: 0.7).combined(with: .opacity))
                 }
             }
@@ -1713,6 +1704,12 @@ struct NotchBody: View {
                 withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
                     model.openWhatsNew(on: nil)
                 }
+            } : nil,
+            openHistory: moreMenu ? {
+                withAnimation(.spring(response: 0.42, dampingFraction: 0.82)) {
+                    _ = model.collapseHistory()
+                }
+                HistoryArchiveWindowController.shared.present(model: model)
             } : nil
         )
     }
@@ -1819,10 +1816,12 @@ struct NotchBody: View {
 
     /// + on the left of the bottom row: attach files or photos, or a folder
     /// (`NotchModel.pickAttachmentFiles` / `pickAttachmentFolder`).
-    private var attachChip: some View {
-        AttachPlusChip(flat: model.unifiedThreadsEnabled) {
+    private var attachChip: some View { attachChip(flat: model.unifiedThreadsEnabled) }
+
+    private func attachChip(flat: Bool, chipSize: CGFloat = Tokens.Control.chip) -> some View {
+        AttachPlusChip(flat: flat, action: {
             model.isAttachMenuOpen.toggle()
-        }
+        }, chipSize: chipSize)
         .modifier(MenuCardWindow(
             open: model.isAttachMenuOpen && ownsSharedMenus,
             onDismiss: { _ in model.isAttachMenuOpen = false },
@@ -3313,13 +3312,11 @@ struct NotchBody: View {
         compact: Bool = false,
         unified: Bool = false
     ) -> some View {
-        let showsSeeAll = (unified ? model.unifiedHistoryCount
-                                  : model.recentScopeHistoryCount)
-            > NotchModel.notchRecentCap
-        // The combined browser contains durable Agent records alongside Chat,
-        // Notes and Reminders. Keep its footer non-destructive rather than showing
-        // a bucket-scoped Clear button under a list that no longer has buckets.
-        let showsClear = !unified && !model.agentComposeActive
+        // The archive holds every row, the threads from before sub-threads
+        // included, so it is always offered. Clear is gone: the list shows
+        // sub-threads, not a log to wipe.
+        let showsSeeAll = !model.history.isEmpty
+        let showsClear = false
         if showsSeeAll || showsClear {
         VStack(alignment: .leading, spacing: 10) {
             if ruled {
@@ -3356,13 +3353,7 @@ struct NotchBody: View {
                         NotificationCenter.default.post(
                             name: .openHistoryArchiveRequested,
                             object: nil,
-                            userInfo: [
-                                "scope": unified
-                                    ? HistoryArchiveScope.all.rawValue
-                                    : (model.agentComposeActive
-                                        ? HistoryArchiveScope.agent.rawValue
-                                        : HistoryArchiveScope.chat.rawValue)
-                            ]
+                            userInfo: ["scope": HistoryArchiveScope.all.rawValue]
                         )
                     }
                 }
@@ -3976,6 +3967,8 @@ struct NotchBody: View {
                                    sentAt: item.conversation.timestamp(for: turn.id))
             }
         } else {
+            let subReportTarget = turn.threadReport ? turn.threadLink : nil
+            let subReportTitle = subReportTarget.flatMap { model.subThreadTitle(for: $0) }
             VStack(alignment: .leading, spacing: 14) {
                 AssistantTurnView(
                     text: turn.text,
@@ -4002,6 +3995,13 @@ struct NotchBody: View {
                     captures: turn.captures,
                     usedCloudMachine: turn.usedCloudMachine,
                     folders: turn.folders,
+                    subThreadTitle: subReportTitle,
+                    onOpenSubThread: subReportTarget.map { target in {
+                        sidePageToggledAt = Date()
+                        withAnimation(.spring(response: 0.4, dampingFraction: 0.86)) {
+                            model.openSubThread(target)
+                        }
+                    } },
                     onOpenCapture: { model.openTurnCapture($0) },
                     onUndoCapture: { model.undoTurnCapture($0) },
                     sentAt: item.conversation.timestamp(for: turn.id)
@@ -4327,8 +4327,9 @@ struct NotchBody: View {
                 // with the recent list like everything else — instead of pinned above
                 // it (immersive: in the floating header; compact: a fixed sibling). So
                 // a live task scrolls away normally rather than fixed over the top.
-                if (model.agentComposeActive && !agentManager.tasks.isEmpty)
-                    || (!model.agentComposeActive && !chatLoops.listed.isEmpty) {
+                // A chat loop has no row of its own: its thread's row shows
+                // the next round.
+                if model.agentComposeActive && !agentManager.tasks.isEmpty {
                     // No extra gap here: each agent row already carries the same 9pt
                     // vertical pad as a Recent row, so the last agent row meets the
                     // first history row on the same 18pt rhythm as any two rows.
@@ -4346,7 +4347,7 @@ struct NotchBody: View {
                                 .lineLimit(1)
                                 .truncationMode(.tail)
                                 .layoutPriority(-1)
-                            if item.loopBorn { loopTag }
+                            // A loop thread shows its next round in the trailing slot.
                             Spacer(minLength: 0)
                             // Ask rows show how long ago; Note/Reminder captures
                             // show where tapping goes, in the same trailing slot —
@@ -4372,10 +4373,22 @@ struct NotchBody: View {
                                             .sfFont(Tokens.TypeSize.meta, weight: .medium)
                                             .foregroundStyle(Tokens.danger.opacity(0.9))
                                     }
-                                    Text(relativeTime(item.t))
+                                    if let next = chatLoops.loops
+                                        .filter({ $0.threadID == item.id && $0.active })
+                                        .compactMap(\.nextRoundAt).min() {
+                                        HStack(spacing: 4) {
+                                            Image(systemName: "repeat")
+                                                .sfFont(Tokens.TypeSize.badge, weight: .semibold)
+                                            Text(SubThreadList.nextRun(next))
+                                        }
                                         .font(.sf(Tokens.TypeSize.meta).monospacedDigit())
-                                        .tracking(0.2)
                                         .foregroundStyle(Tokens.text4)
+                                    } else {
+                                        Text(relativeTime(item.t))
+                                            .font(.sf(Tokens.TypeSize.meta).monospacedDigit())
+                                            .tracking(0.2)
+                                            .foregroundStyle(Tokens.text4)
+                                    }
                                 }
                             } else {
                                 // The jump to Notes/Reminders lives on its OWN button,
@@ -5147,8 +5160,6 @@ struct NotchBody: View {
             let end = mountedEnd(of: visible)
             // What copies did in the copy thread, under the round they came
             // after. Off during a pull: the peek it folds into doesn't draw it.
-            let copyMarks = model.threadPullProgress == nil
-                ? model.copyThreadMarks(for: visible) : [:]
             ForEach(visible[min(mountedStart(of: visible), end)..<end]) { turn in
                 let live = turn.streaming || turn.id == lastID
                 FarTurnStandIn(id: turn.id, keepsContent: live,
@@ -5161,13 +5172,6 @@ struct NotchBody: View {
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .id(turn.id)
-                if let mark = copyMarks[turn.id] {
-                    CopyMarkLine(mark: mark,
-                                 engaged: model.showRoutines && model.sidePageTab == .copies) {
-                        toggleSidePage(.copies)
-                    }
-                        .transition(.opacity)
-                }
             }
             // The unified threads guide's ending, under its answer.
             if let intro = model.unifiedIntro, let answerID = intro.answerID,
@@ -5208,6 +5212,41 @@ struct NotchBody: View {
     /// triggers goes into, read like any thread. Each copy with its emoji,
     /// then the reply with the lines for the reminder, event or memory it
     /// filed, or the answer to a copied question as it is written.
+    /// A single sub-thread's conversation, drawn inside the right-side drawer
+    /// (`RoutinesPanel`) so the main thread stays underneath.
+    @ViewBuilder
+    private func subThreadTab(_ id: UUID) -> some View {
+        let turns = model.subThreadConversation(for: id).filter(\.isDrawn)
+        if turns.isEmpty {
+            Text(L("subThread.empty"))
+                .sfFont(Tokens.TypeSize.label)
+                .foregroundStyle(Tokens.text4)
+                .multilineTextAlignment(.center)
+                .padding(.top, 8)
+            Spacer(minLength: 0)
+        } else {
+            let start = copyWindowStart(of: turns)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    ForEach(turns[start...]) { turn in
+                        turnView(turn, thread: turns)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+                .padding(.bottom, NotchBody.panelPadding)
+                .background(OlderTurnsLoader(hasOlder: start > 0, load: {
+                    let current = copyWindowStart(of: turns)
+                    guard current > 0 else { return }
+                    copyWindowStartID = turns[Self.threadWindowStart(of: turns, before: current)].id
+                }))
+            }
+            .scrollIndicators(.never)
+            .modifier(SidePageScrollAnchor())
+            .environment(\.cardWidthFraction, 1)
+            .onChange(of: id) { _, _ in copyWindowStartID = nil }
+        }
+    }
+
     @ViewBuilder
     private var copyThreadTab: some View {
         let turns = model.copyThreadConversation.filter(\.isDrawn)
@@ -5688,6 +5727,9 @@ struct NotchBody: View {
     /// loop. The first question (the loop's prompt) heads the record and is in
     /// no segment; a later round's question is hidden, a typed follow-up's shows.
     private var loopSegments: [LoopSegment]? {
+        // A loop thread reads like any thread: its rounds' answers in order,
+        // with no round column.
+        return nil
         guard model.conversation.hasLoopRound else { return nil }
         let turns = model.turns
         let threadID = model.threadHistoryID
@@ -5743,6 +5785,11 @@ struct NotchBody: View {
                                   isFollowUp: segment.isFollowUp, running: segment.running)
         }
         let selected = selectedLoopRound(in: items)
+        // The column shows at most `railCap` rounds around the chosen one, so a
+        // loop with many rounds does not stretch the record past its content.
+        let railCap = 10
+        let lo = max(0, min(selected - railCap / 2, items.count - railCap))
+        let railItems = Array(items[lo..<min(items.count, lo + railCap)])
         return VStack(alignment: .leading, spacing: 16) {
             if let first = model.turns.first(where: { $0.role == "user" }) {
                 turnView(first)
@@ -5764,10 +5811,10 @@ struct NotchBody: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.trailing, LoopRoundSidebar.width + 12)
-            .frame(minHeight: LoopRoundSidebar.height(rows: items.count),
+            .frame(minHeight: LoopRoundSidebar.height(rows: railItems.count),
                    alignment: .top)
             .overlay(alignment: .topTrailing) {
-                LoopRoundSidebar(items: items, selected: selected) {
+                LoopRoundSidebar(items: railItems, selected: selected) {
                     pickLoopRound($0, in: items)
                 }
             }
@@ -6140,7 +6187,9 @@ struct NotchBody: View {
             : thread?.lastIndex(where: { $0.id == turn.id })
         let thread = thread ?? model.turns
         let turnTime = index.flatMap { thread.timestamp(at: $0) } ?? turn.sentAt
-        if let example = turn.example {
+        if let target = turn.threadLink, !turn.threadReport {
+            SubThreadLinkLine(title: turn.text) { model.openSubThread(target) }
+        } else if let example = turn.example {
             WelcomeExampleCard(example: example,
                                showsAnswer: !model.welcomeHeldAnswers.contains(turn.id),
                                showsLink: !model.welcomeHeldLinks.contains(turn.id))
@@ -6193,6 +6242,8 @@ struct NotchBody: View {
             // each new question, so it belongs to the newest streaming answer only.
             // An older answer still streaming beside it shows its own values.
             let ownsPanelWait = thread.last(where: { $0.role == "assistant" && $0.streaming })?.id == turn.id
+            let subReportTarget = turn.threadReport ? turn.threadLink : nil
+            let subReportTitle = subReportTarget.flatMap { model.subThreadTitle(for: $0) }
             VStack(alignment: .leading, spacing: 14) {
               LiveTurnText(live: turn.streaming ? model.liveAnswer : .inert,
                            id: turn.id, fallback: turn.text) { text in
@@ -6255,6 +6306,13 @@ struct NotchBody: View {
                     captures: turn.captures,
                     usedCloudMachine: turn.usedCloudMachine,
                     folders: turn.folders,
+                    subThreadTitle: subReportTitle,
+                    onOpenSubThread: subReportTarget.map { target in {
+                        sidePageToggledAt = Date()
+                        withAnimation(.spring(response: 0.4, dampingFraction: 0.86)) {
+                            model.openSubThread(target)
+                        }
+                    } },
                     onOpenCapture: { model.openTurnCapture($0) },
                     onUndoCapture: { model.undoTurnCapture($0) },
                     turnID: turn.id,
@@ -7010,6 +7068,9 @@ struct NotchBody: View {
             // Box and ⌘ chip share the split rail's 34pt, bottom-aligned.
             HStack(alignment: .bottom, spacing: 8) {
                 HStack(alignment: .bottom, spacing: 6) {
+                    if !license.locked {
+                        attachChip(flat: false, chipSize: Self.splitRailChip)
+                    }
                     // Locked while a guide (unified threads, emoji reactions) runs in this thread.
                     followUpComposer
                         .frame(maxWidth: .infinity)
@@ -7794,10 +7855,17 @@ struct SelectionContextChip: View {
 
     var body: some View {
         HStack(spacing: 5) {
-            Image(systemName: icon ?? (isReply ? "arrowshape.turn.up.left" : "text.quote"))
-                .sfFont(Tokens.TypeSize.badge, weight: .semibold)
-                .foregroundStyle(Tokens.text4)
-            Text(label ?? (isReply ? preview
+            if isReply && icon == nil {
+                Capsule(style: .continuous)
+                    .fill(Tokens.text4)
+                    .frame(width: 2, height: 12)
+                    .padding(.trailing, 1)
+            } else {
+                Image(systemName: icon ?? "text.quote")
+                    .sfFont(Tokens.TypeSize.badge, weight: .semibold)
+                    .foregroundStyle(Tokens.text4)
+            }
+            Text(label ?? (isReply ? L("message.reply.quoted", wordCount)
                  : source.map { L("selection.context.from", $0) } ?? L("selection.context")))
                 .sfFont(Tokens.TypeSize.meta, weight: .medium)
                 .foregroundStyle(hovering && !isReply ? Tokens.text2 : Tokens.text3)
@@ -7822,14 +7890,20 @@ struct SelectionContextChip: View {
         .contentShape(Capsule(style: .continuous))
         // The chip names the source; the tooltip shows what is actually riding
         // along, so "which selection?" is answerable without sending anything.
-        // The reply chip already shows the quoted line and has no hover effect.
-        .notchTooltip(preview, shows: !isReply)
+        // The reply chip shows only a word count, so its tooltip carries the quote.
+        .notchTooltip(preview)
         .onHover { inside in
             hovering = inside
             if !inside { hoveringDrop = false }
         }
         .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
         .animation(.easeOut(duration: Tokens.hoverFade), value: hoveringDrop)
+    }
+
+    private var wordCount: Int {
+        var n = 0
+        selection.enumerateSubstrings(in: selection.startIndex..., options: .byWords) { _, _, _, _ in n += 1 }
+        return max(n, 1)
     }
 
     /// One line of the selection for the tooltip — enough to recognise it by,
@@ -7876,6 +7950,46 @@ private struct CopyMarkLine: View {
         .accessibilityLabel(mark.summary)
     }
 }
+/// Where a round was filed in a sub-thread: the sub-thread's title in plain
+/// grey text with an arrow, like `CopyMarkLine`. Opens it.
+struct SubThreadLinkLine: View {
+    /// The sub-thread's title, then on a second line of the text what its
+    /// newest round said (a report line).
+    let title: String
+    let open: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        let parts = title.split(separator: "\n", maxSplits: 1).map(String.init)
+        Button(action: open) {
+            HStack(spacing: 6) {
+                Image(systemName: "arrow.turn.down.right")
+                    .sfFont(Tokens.TypeSize.badge, weight: .semibold)
+                Text(parts.first ?? title)
+                    .sfFont(Tokens.TypeSize.meta, weight: parts.count > 1 ? .medium : .regular)
+                    .lineLimit(1)
+                    .layoutPriority(1)
+                if parts.count > 1 {
+                    Text(parts[1])
+                        .sfFont(Tokens.TypeSize.meta)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+                Image(systemName: "chevron.right")
+                    .sfFont(Tokens.TypeSize.badge, weight: .semibold)
+                    .offset(x: hovering ? 2 : 0)
+            }
+            .foregroundStyle(hovering ? Tokens.text2 : Tokens.text4)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .padding(.leading, 12)
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
+        .accessibilityLabel(title)
+    }
+}
+
 /// The copy mark under the newest turn during a pull: its slot grows from
 /// nothing at progress 0 (the peek has no mark) to its full height at 1 (the
 /// result page draws it), fading in as it grows. Reads the progress itself,
@@ -8185,6 +8299,8 @@ struct IdleTrailingCluster: View {
     /// Release notes, History (the Recent toggle) and Settings.
     var openSettings: (() -> Void)? = nil
     var openReleaseNotes: (() -> Void)? = nil
+    /// The ⋯ group's clock: opens the conversation history window.
+    var openHistory: (() -> Void)? = nil
 
     /// Nothing to draw when neither segment is live — an empty capsule of glass
     /// would still read as a control. A live run always draws (the "N running"
@@ -8278,17 +8394,19 @@ struct IdleTrailingCluster: View {
             .combined(with: .opacity)
         return HStack(spacing: 6) {
             if moreExpanded {
+                // The history window holds every conversation, so the clock
+                // shows even when this compose mode's Recent list is empty.
+                if showsRecent || openHistory != nil {
+                    segment(.recent, action: openHistory ?? toggleRecent,
+                            tooltip: L("history.window.title")) {
+                        LucideIcon(mark: LucideIcons.clock, size: glyphSize + 2)
+                    }
+                    .transition(chipTransition)
+                }
                 if let openReleaseNotes {
                     segment(.releaseNotes, action: openReleaseNotes,
                             tooltip: L("recent.menu.releaseNotes")) {
                         LucideIcon(mark: LucideIcons.scrollText, size: glyphSize + 2)
-                    }
-                    .transition(chipTransition)
-                }
-                if showsRecent {
-                    segment(.recent, action: toggleRecent,
-                            tooltip: L("recent.recent")) {
-                        LucideIcon(mark: LucideIcons.clock, size: glyphSize + 2)
                     }
                     .transition(chipTransition)
                 }
@@ -8553,6 +8671,8 @@ struct ResultTrailingCluster: View {
     /// The side page on its From copies tab, a row in the ⋯ menu under Routines.
     var copiesOpen = false
     var toggleCopies: (() -> Void)? = nil
+    var codeOpen = false
+    var toggleCode: (() -> Void)? = nil
     /// The side page on its Websites tab, a row in the ⋯ menu under Sub-thread.
     var websitesOpen = false
     var toggleWebsites: (() -> Void)? = nil
@@ -8583,7 +8703,7 @@ struct ResultTrailingCluster: View {
                 more.showsTooltip = false
                 segs.append(more)
             }
-            if detach == nil && (showsCloud || toggleRoutines != nil || toggleCopies != nil || toggleWebsites != nil) {
+            if detach == nil && (showsCloud || toggleRoutines != nil || toggleCopies != nil || toggleCode != nil || toggleWebsites != nil) {
                 var cloudMore = GlassSegmentCluster.Segment(id: "cloudMore",
                                   engaged: moreOpen,
                                   tooltip: L("nono.more"),
@@ -8621,6 +8741,12 @@ struct ResultTrailingCluster: View {
                 MenuCardRow(title: copies, selected: copiesOpen) {
                     moreOpen = false
                     toggleCopies()
+                }
+            }
+            if let toggleCode {
+                MenuCardRow(title: L("codeThread.tab"), selected: codeOpen) {
+                    moreOpen = false
+                    toggleCode()
                 }
             }
             if let toggleWebsites {
@@ -8661,6 +8787,12 @@ struct ResultTrailingCluster: View {
                 MenuCardRow(title: copies, selected: copiesOpen) {
                     moreOpen = false
                     toggleCopies()
+                }
+            }
+            if let toggleCode {
+                MenuCardRow(title: L("codeThread.tab"), selected: codeOpen) {
+                    moreOpen = false
+                    toggleCode()
                 }
             }
             if let toggleWebsites {
@@ -9009,13 +9141,15 @@ struct UserQuestionBubble: View {
                         NSWorkspace.shared.open(url)
                     }
                 } label: {
-                    HStack(spacing: 3) {
+                    HStack(alignment: .firstTextBaseline, spacing: 3) {
                         Text(L("signal.forwarded"))
                             .sfFont(max(Tokens.TypeSize.meta, bubbleFont - 2))
                             .lineLimit(1)
                         if hoveringForwarded {
                             Image(systemName: "arrow.up.right")
                                 .sfFont(Tokens.TypeSize.badge, weight: .semibold)
+                                .frame(width: 9, height: 9)
+                                .centeredOnTextGlyphs(fontSize: max(Tokens.TypeSize.meta, bubbleFont - 2))
                         }
                     }
                     .foregroundStyle(hoveringForwarded ? Tokens.text2 : Tokens.text3)
@@ -9031,7 +9165,7 @@ struct UserQuestionBubble: View {
                     if let url = TelegramBridge.shared.botChatURL { NSWorkspace.shared.open(url) }
                 } label: {
                     // Drawn like an answer's capture line (`CaptureLineLink`).
-                    HStack(spacing: 3) {
+                    HStack(alignment: .firstTextBaseline, spacing: 3) {
                         Text(L("telegram.forwarded"))
                             .sfFont(max(Tokens.TypeSize.meta, bubbleFont - 2))
                             .lineLimit(1)
@@ -9039,6 +9173,8 @@ struct UserQuestionBubble: View {
                         if hoveringForwarded {
                             Image(systemName: "arrow.up.right")
                                 .sfFont(Tokens.TypeSize.badge, weight: .semibold)
+                                .frame(width: 9, height: 9)
+                                .centeredOnTextGlyphs(fontSize: max(Tokens.TypeSize.meta, bubbleFont - 2))
                         }
                     }
                     .foregroundStyle(hoveringForwarded ? Tokens.text2 : Tokens.text3)
@@ -11101,10 +11237,13 @@ struct RoutinesPanel: View {
 
     /// Which page this is: Routines or Sub-thread. Each ⋯ row opens its own.
     var tab: NotchModel.SidePageTab
+    var model: NotchModel
     var onClose: () -> Void
     /// The copy thread's content, drawn by `NotchBody` (it reads the
     /// thread the way the result page does).
     var copies: () -> AnyView
+    /// A specific sub-thread's conversation, drawn inside this side drawer.
+    var subThread: (UUID) -> AnyView
     /// Drawn on the menu bar chat's card, which has its own glass and
     /// follows the system appearance (`SidePageChrome.onCard`).
     var onCard = false
@@ -11163,8 +11302,18 @@ struct RoutinesPanel: View {
                     Spacer(minLength: 0)
                 }
             case .copies:
-                sectionHead(L("copyThread.tab"), closes: true)
-                copies()
+                if let subID = model.activeSubThreadID {
+                    subThreadHead(model.subThreadTitle(for: subID) ?? L("copyThread.tab"))
+                    subThread(subID)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                } else {
+                    sectionHead(L("copyThread.tab"), closes: true)
+                    SubThreadList(model: model, code: false, onOpen: onClose)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                }
+            case .codeThreads:
+                sectionHead(L("codeThread.tab"), closes: true)
+                SubThreadList(model: model, code: true, onOpen: onClose)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             case .websites:
                 sectionHead("Websites", closes: true)
@@ -11173,6 +11322,44 @@ struct RoutinesPanel: View {
             }
         }
         .modifier(SidePageChrome(onCard: onCard))
+    }
+
+    /// Header when viewing a specific sub-thread inside the right-side drawer:
+    /// `<` returns to the sub-thread list, `×` closes the drawer.
+    private func subThreadHead(_ title: String) -> some View {
+        let head = HStack(spacing: 6) {
+            Button {
+                withAnimation(.spring(response: 0.34, dampingFraction: 0.86)) {
+                    model.activeSubThreadID = nil
+                }
+            } label: {
+                Image(systemName: "chevron.left")
+                    .sfFont(Tokens.TypeSize.badge, weight: .semibold)
+                    .foregroundStyle(Tokens.text3)
+                    .frame(width: 22, height: 22)
+                    .contentShape(Circle())
+            }
+            .buttonStyle(.plain)
+            Text(title)
+                .captionLabel()
+                .lineLimit(1)
+                .truncationMode(.tail)
+            Spacer(minLength: 0)
+            SidePageCloseButton(action: onClose)
+        }
+        .frame(height: 24)
+        return Group {
+            if onCard {
+                head
+                    .padding(.leading, 8)
+                    .padding(.trailing, 8)
+                    .padding(.vertical, 6)
+                    .smokedGlass(radius: 18)
+                    .frame(width: NotchMetrics.chatWidth * cardFraction)
+            } else {
+                head
+            }
+        }
     }
 
     /// A section's caption, the panel's group-heading style, and on the
@@ -11288,8 +11475,7 @@ struct RoutinesPanel: View {
             .buttonStyle(.plain)
 
             Button {
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(page.url, forType: .string)
+                Task { await PagesService.shared.copyLink(page) }
                 copiedPageSlug = page.slug
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
                     if copiedPageSlug == page.slug { copiedPageSlug = nil }
@@ -11323,8 +11509,7 @@ struct RoutinesPanel: View {
                 if let url = page.pageURL { PagesService.shared.open(url) }
             }
             Button("Copy Link") {
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(page.url, forType: .string)
+                Task { await PagesService.shared.copyLink(page) }
             }
             Divider()
             Button(page.isPublic ? "Make Private" : "Share Publicly") {
@@ -11557,3 +11742,85 @@ struct SidePageChrome: ViewModifier {
     }
 }
 
+
+
+/// The Sub-thread and Code-thread pages: one row per thread, newest first.
+/// A row opens its thread the way a Recent row did (`openHistory`).
+struct SubThreadList: View {
+    @ObservedObject var model: NotchModel
+    @ObservedObject private var chatLoops = ChatLoopManager.shared
+    /// Code-threads (agent runs) instead of sub-threads.
+    let code: Bool
+    /// Closes the side page once a thread opens.
+    let onOpen: () -> Void
+
+    private var rows: [NotchModel.HistoryItem] {
+        code ? model.history.filter { $0.source == .agent && !$0.pending } : model.subThreads
+    }
+
+    var body: some View {
+        let rows = rows
+        if rows.isEmpty {
+            Text(L(code ? "codeThread.empty" : "subThread.empty"))
+                .sfFont(Tokens.TypeSize.label)
+                .foregroundStyle(Tokens.text4)
+                .frame(maxWidth: .infinity)
+                .padding(.top, 8)
+            Spacer(minLength: 0)
+        } else {
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    ForEach(rows) { item in
+                        Button {
+                            if code {
+                                onOpen()
+                                model.openHistory(item)
+                            } else {
+                                withAnimation(.spring(response: 0.36, dampingFraction: 0.86)) {
+                                    model.openSubThread(item.id)
+                                }
+                            }
+                        } label: {
+                            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                                Text(item.displayTitle)
+                                    .sfFont(Tokens.TypeSize.form)
+                                    .foregroundStyle(Tokens.text2)
+                                    .lineLimit(1)
+                                    .truncationMode(.tail)
+                                    .layoutPriority(-1)
+                                Spacer(minLength: 0)
+                                Text(meta(for: item))
+                                    .font(.sf(Tokens.TypeSize.meta).monospacedDigit())
+                                    .foregroundStyle(Tokens.text4)
+                            }
+                            .padding(.vertical, 9)
+                            .padding(.horizontal, 8)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(HistoryRowStyle())
+                    }
+                }
+            }
+        }
+    }
+
+    /// A thread with a running loop shows its next round; any other its last
+    /// activity.
+    private func meta(for item: NotchModel.HistoryItem) -> String {
+        if !code,
+           let next = chatLoops.loops
+            .filter({ $0.threadID == item.id && $0.active })
+            .compactMap(\.nextRoundAt).min() {
+            return SubThreadList.nextRun(next)
+        }
+        return SubThreadList.relative(item.t)
+    }
+
+    static func nextRun(_ date: Date) -> String {
+        Calendar.current.isDateInToday(date)
+            ? date.formatted(date: .omitted, time: .shortened)
+            : date.formatted(.dateTime.month().day().hour().minute())
+    }
+
+    static func relative(_ date: Date) -> String { relativeTime(date) }
+}

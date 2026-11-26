@@ -125,7 +125,7 @@ struct MenuBarChat: View {
 
     /// Sub-thread is open: the copy thread takes the messages' place and is
     /// drawn by the same `messages`.
-    private var showsCopies: Bool { model.showRoutines && model.sidePageTab == .copies }
+    private var showsCopies: Bool { false }
 
     /// The thread on screen, else the main thread; the copy thread while
     /// Sub-thread is open.
@@ -455,13 +455,47 @@ struct MenuBarChat: View {
     /// Routines and Sub-thread, in the messages' place. The card has no
     /// panel for the side page to cover, so it takes the messages' column.
     private var sidePage: some View {
-        RoutinesPanel(tab: model.sidePageTab, onClose: { model.showRoutines = false },
+        RoutinesPanel(tab: model.sidePageTab, model: model, onClose: { model.showRoutines = false },
                       copies: { AnyView(copyThreadTab) },
+                      subThread: { id in AnyView(subThreadTab(id)) },
                       onCard: true)
             // The messages' column: full width, bubbles at the card's own
             // fraction (`cardWidthFraction` from the body), so every bubble
             // and its actions sit where the thread's do.
             .frame(width: NotchMetrics.chatWidth, height: sidePageHeight)
+    }
+
+    @ViewBuilder
+    private func subThreadTab(_ id: UUID) -> some View {
+        let subTurns = model.subThreadConversation(for: id).filter(\.isDrawn)
+        if subTurns.isEmpty {
+            VStack(spacing: 0) {
+                Text(L("subThread.empty"))
+                    .sfFont(Tokens.TypeSize.label)
+                    .foregroundStyle(Tokens.text4)
+                    .multilineTextAlignment(.center)
+                    .padding(.top, 8)
+                Spacer(minLength: 0)
+            }
+        } else {
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 14) {
+                    ForEach(Array(subTurns.enumerated()), id: \.element.id) { index, turn in
+                        ChatRow(turn: turn, model: model,
+                                isLast: index == subTurns.count - 1,
+                                question: subTurns.question(at: index),
+                                recentCards: subTurns.recentCards(at: index),
+                                timestamp: subTurns.timestamp(at: index),
+                                onScreen: false,
+                                live: nil, streamingNow: false, askFailed: false,
+                                editable: false, quotable: false)
+                            .equatable()
+                    }
+                }
+                .padding(.bottom, 12)
+            }
+            .scrollIndicators(.never)
+        }
     }
 
     /// The messages' own height, so opening the page moves neither the card
@@ -965,7 +999,9 @@ private struct ChatRow: View, Equatable {
     }
 
     var body: some View {
-        if let example = turn.example {
+        if let target = turn.threadLink, !turn.threadReport {
+            SubThreadLinkLine(title: turn.text) { model.openSubThread(target) }
+        } else if let example = turn.example {
             WelcomeExampleCard(example: example, showsAnswer: !holdsAnswer, showsLink: !holdsLink)
         } else if turn.licenseCard {
             WelcomeLicenseCard(model: model)
@@ -1010,6 +1046,8 @@ private struct ChatRow: View, Equatable {
     }
 
     private var assistantRow: some View {
+        let subReportTarget = turn.threadReport ? turn.threadLink : nil
+        let subReportTitle = subReportTarget.flatMap { model.subThreadTitle(for: $0) }
         return LiveText(live: turn.streaming ? model.liveAnswer : .inert,
                         id: turn.id, fallback: turn.text) { text in
             AssistantTurnView(
@@ -1049,6 +1087,8 @@ private struct ChatRow: View, Equatable {
                 captures: turn.captures,
                 usedCloudMachine: turn.usedCloudMachine,
                 folders: turn.folders,
+                subThreadTitle: subReportTitle,
+                onOpenSubThread: subReportTarget.map { target in { model.openSubThread(target) } },
                 onOpenCapture: { model.openTurnCapture($0) },
                 onUndoCapture: { model.undoTurnCapture($0) },
                 turnID: turn.id,

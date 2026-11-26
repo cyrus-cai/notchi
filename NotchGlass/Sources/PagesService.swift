@@ -332,6 +332,18 @@ final class PagesService: ObservableObject {
         return url
     }
 
+    /// Puts a page's link on the pasteboard: the `?k=` link for a private page,
+    /// so it opens and previews in Discord or Telegram, the bare URL for a
+    /// public one or when the key cannot be fetched.
+    func copyLink(_ page: PageSummary) async {
+        var link = page.url
+        if !page.isPublic, let url = try? await accessURL(slug: page.slug) {
+            link = url.absoluteString
+        }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(link, forType: .string)
+    }
+
     /// Rewrites bare `https://<slug>.notch.website` URLs owned by this Mac in
     /// `text` to include their permanent `#k=<secret>` fragment so private pages
     /// open directly from Signal or Telegram.
@@ -429,8 +441,16 @@ struct PageTool: NotchTool {
     to read better as a standalone page than a chat bubble, or when the user asks \
     for a page. After creating or updating a page, put its URL on its own line in \
     your reply and keep the chat text brief. \
-    Content is Markdown and supports ```viz blocks (barh, line, donut, stat, card); \
-    do not write raw HTML. \
+    Content is Markdown; do not write raw HTML. Besides headings, lists, tables and code, \
+    pages support: callouts (`> [!NOTE]`, `> [!TIP]`, `> [!WARNING]`, `> [!CAUTION]`, or \
+    `:::tip Title` … `:::`), folded sections (`:::details Title` … `:::`), tabs \
+    (`:::tabs` with `@tab Label` lines, closed by `:::`), and ```viz blocks: \
+    barh/bar/line/area/donut/pie with `items` [{label, value}], or bar/line with \
+    `data` rows plus `series` {key: {label}} for several series; stat {label, value, delta}; \
+    stats with `items` [{label, value, delta}] for a row of figures; card {title, subtitle, facts}. \
+    H2/H3 headings build the page outline. Keep `body` as the current state of the topic \
+    (rewrite it with update when facts change) and put each round's news in append; \
+    readers see body and updates in separate tabs. \
     Actions: \
     action=create makes a new page (`title`, optional `body`, optional `slug_hint` in ASCII). \
     action=append prepends a timestamped update (`page_id`, `text`) — preferred for loop rounds and ongoing logs. \
@@ -709,8 +729,7 @@ struct NotchiPagesPane: View {
             .font(.system(size: 12))
 
             Button(copiedSlug == page.slug ? "Copied" : "Copy") {
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(page.url, forType: .string)
+                Task { await service.copyLink(page) }
                 copiedSlug = page.slug
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
                     if copiedSlug == page.slug { copiedSlug = nil }

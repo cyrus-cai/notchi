@@ -704,9 +704,9 @@ private struct ImageLightbox: View {
             Image(nsImage: image)
                 .resizable()
                 .frame(width: size.width * fit, height: size.height * fit)
-                .clipShape(RoundedRectangle.inset)
+                .clipShape(RoundedRectangle.window)
                 .overlay(
-                    RoundedRectangle.inset
+                    RoundedRectangle.window
                         .strokeBorder(Tokens.hairline, lineWidth: 0.5)
                 )
                 .shadow(color: .black.opacity(0.45), radius: 24, y: 10)

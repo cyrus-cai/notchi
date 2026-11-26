@@ -16,6 +16,20 @@ final class NotchPanel: NSPanel {
     /// Resting level: above the menu bar and every normal window, where the island
     /// belongs when it isn't being typed into.
     static let restingLevel: NSWindow.Level = .statusBar
+    /// Resting level of a top-right card (the menu bar card and corner panels).
+    /// Notification Center draws its banners at window layer 23; the card sits
+    /// one below it so a banner shows over the card. The card hangs under the
+    /// menu bar (24), so it does not need to clear it.
+    static let cardLevel = NSWindow.Level(rawValue: 22)
+    /// This panel's resting level: `restingLevel` for a notch, `cardLevel` for
+    /// a card. Set by `AppDelegate.position`.
+    private(set) var restLevel: NSWindow.Level = NotchPanel.restingLevel
+
+    func setRestLevel(_ newValue: NSWindow.Level) {
+        guard restLevel != newValue else { return }
+        restLevel = newValue
+        if !composing { level = newValue }
+    }
     /// Level while an IME composition is in flight. The macOS input-method
     /// candidate window (the pinyin/kana/Hangul selection popup) is drawn by the
     /// input server at window layer 20 — ABOVE normal app windows but BELOW both the
@@ -78,10 +92,14 @@ final class NotchPanel: NSPanel {
         doubleClickExemptAt = ProcessInfo.processInfo.systemUptime
     }
 
-    /// Whether `event`, the second press of a double-click, follows a press on
-    /// such a control.
+    /// Whether `event`, the second press of a double-click, must not pin.
+    /// True when a control reported its own press (`exemptNextDoubleClick`),
+    /// when the first press of the pair was not in this window, or when either
+    /// press landed on a control (`DoubleClickPress`).
     static func doubleClickIsExempt(_ event: NSEvent) -> Bool {
-        event.timestamp - doubleClickExemptAt <= NSEvent.doubleClickInterval
+        if event.timestamp - doubleClickExemptAt <= NSEvent.doubleClickInterval { return true }
+        guard let window = event.window else { return true }
+        return DoubleClickPress.pairTouchesControl(event, in: window)
     }
 
     init(contentRect: NSRect) {
@@ -211,13 +229,13 @@ final class NotchPanel: NSPanel {
         restAfterComposition = nil
         activeEditors = 0
         composing = false
-        if level != Self.restingLevel { level = Self.restingLevel }
+        if level != restLevel { level = restLevel }
     }
 
     private func applyComposing(_ isComposing: Bool) {
         guard composing != isComposing else { return }
         composing = isComposing
-        let want = isComposing ? Self.editingLevel : Self.restingLevel
+        let want = isComposing ? Self.editingLevel : restLevel
         if level != want { level = want }
     }
 }
@@ -471,3 +489,73 @@ extension NSWindow {
     }
 }
 
+
+
+// MARK: - Double-click on a control
+
+/// Decides whether a double-click landed on a control, for every window that
+/// pins on a double-click. A SwiftUI control has no AppKit view for `hitTest`
+/// to return, so it is found through the accessibility tree instead, which
+/// SwiftUI builds for every button, toggle, picker, slider, field and link.
+/// No control has to opt in.
+enum DoubleClickPress {
+    private struct Press {
+        let window: Int
+        let location: NSPoint
+        let timestamp: TimeInterval
+    }
+
+    /// The press before the current one, and the current one. Recorded by a
+    /// local monitor, so a press in any of the app's windows (a menu card
+    /// included) counts as the first half of a pair.
+    private static var previous: Press?
+    private static var current: Press?
+    private static var monitor: Any?
+
+    /// Installs the press recorder. Called once at launch.
+    static func install() {
+        guard monitor == nil else { return }
+        monitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { event in
+            previous = current
+            current = Press(window: event.windowNumber,
+                            location: event.locationInWindow,
+                            timestamp: event.timestamp)
+            return event
+        }
+    }
+
+    private static let controlRoles: Set<NSAccessibility.Role> = [
+        .button, .popUpButton, .menuButton, .checkBox, .radioButton, .slider,
+        .textField, .textArea, .comboBox, .link, .menuItem, .menuBarItem,
+        .incrementor, .disclosureTriangle, .colorWell, .scrollBar, .tabGroup,
+        .radioGroup, .valueIndicator, .handle,
+    ]
+
+    /// True when the pair should not pin: its first press was in another
+    /// window, or either press is on a control.
+    static func pairTouchesControl(_ event: NSEvent, in window: NSWindow) -> Bool {
+        guard let first = previous,
+              first.window == event.windowNumber,
+              event.timestamp - first.timestamp <= NSEvent.doubleClickInterval
+        else { return true }
+        return isControl(at: event.locationInWindow, in: window)
+            || isControl(at: first.location, in: window)
+    }
+
+    /// Whether the accessibility element under `point` (window coordinates),
+    /// or one of its few nearest ancestors, is a control.
+    static func isControl(at point: NSPoint, in window: NSWindow) -> Bool {
+        guard let content = window.contentView else { return false }
+        let screen = window.convertPoint(toScreen: point)
+        var element = content.accessibilityHitTest(screen)
+        // A button's label can come back as its own static text; the button is
+        // a level or two up. Stop at the hosting view: above it is the window.
+        for _ in 0..<4 {
+            guard let node = element as? NSAccessibilityProtocol else { return false }
+            if let role = node.accessibilityRole(), controlRoles.contains(role) { return true }
+            if node === content { return false }
+            element = node.accessibilityParent()
+        }
+        return false
+    }
+}

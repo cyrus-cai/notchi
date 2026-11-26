@@ -448,6 +448,15 @@ final class NotchModel: ObservableObject {
         /// (`ToolTrail.folder(of:)`), first use first. Drawn beside the
         /// cloud machine line. Persisted.
         var folders: [String] = []
+        /// A line the app wrote into the main thread where a round was moved
+        /// to a sub-thread (`create_thread` / `move_to_thread`): the
+        /// sub-thread's id. `text` holds its title. Drawn as a link that opens
+        /// it; local, so never sent to the model. Persisted.
+        var threadLink: UUID? = nil
+        /// A `threadLink` line that reports a sub-thread's newest loop round,
+        /// not a round moved there. The main thread keeps one per sub-thread,
+        /// the newest. Persisted.
+        var threadReport: Bool = false
 
         struct Capture: Codable, Equatable, Hashable {
             var kind: CaptureRequest.Kind
@@ -491,7 +500,7 @@ final class NotchModel: ObservableObject {
         // its whole thread down with it. `decodeIfPresent` + defaults is what keeps old saved conversations
         // loadable. `role`/`text` are required — every saved turn has them.
         // `toolActivity` is deliberately absent: it's runtime-only UI state.
-        enum CodingKeys: String, CodingKey { case id, role, text, streaming, hidesUserBubble, usedClipboard, sources, isError, regenModel, answerModel, imageFiles, isAgent, agentLog, reasoning, loopRound, loopID, reaction, fromTelegram, fromSignal, sharedLinks, isLocal, captures, sentAt, interrupted, example, licenseCard, toolTrail, folders, proactive, savedOnly }
+        enum CodingKeys: String, CodingKey { case id, role, text, streaming, hidesUserBubble, usedClipboard, sources, isError, regenModel, answerModel, imageFiles, isAgent, agentLog, reasoning, loopRound, loopID, reaction, fromTelegram, fromSignal, sharedLinks, isLocal, captures, sentAt, interrupted, example, licenseCard, toolTrail, folders, proactive, savedOnly, threadLink, threadReport }
 
         init(from decoder: Decoder) throws {
             let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -527,6 +536,8 @@ final class NotchModel: ObservableObject {
             folders      = (try? c.decodeIfPresent([String].self, forKey: .folders)) ?? []
             proactive    = try c.decodeIfPresent(Bool.self, forKey: .proactive) ?? false
             savedOnly    = try c.decodeIfPresent(Bool.self, forKey: .savedOnly) ?? false
+            threadLink   = try? c.decodeIfPresent(UUID.self, forKey: .threadLink)
+            threadReport = (try? c.decodeIfPresent(Bool.self, forKey: .threadReport)) ?? false
         }
     }
 
@@ -553,7 +564,7 @@ final class NotchModel: ObservableObject {
         var title: String? = nil
         /// What the recent list should display: the generated title when available,
         /// otherwise the first user message for backward compatibility.
-        var displayTitle: String { loopBorn ? q : title ?? q }
+        var displayTitle: String { title ?? q }
         /// A thread with loop rounds. Its row carries the Loop tag.
         var isLoop: Bool {
             if let turns { return turns.contains { $0.loopRound != nil } }
@@ -688,6 +699,13 @@ final class NotchModel: ObservableObject {
         /// started any other way, are `false`.
         var mainThread: Bool = false
 
+        /// A sub-thread: a conversation started after unified threads replaced
+        /// Recent, outside the main thread (a thread the model filed a round
+        /// into, a prompt shortcut, a detached window, a loop). Listed on the
+        /// Sub-thread page. Rows from before are left out and stay in the
+        /// archive. Persisted.
+        var subThread: Bool = false
+
         /// The turns to restore on reopen: the saved thread when present (in
         /// memory or lazy-loaded from `HistoryTurnStore`), else a two-turn
         /// thread rebuilt from the legacy `q`/`a` fields. A note/reminder
@@ -749,7 +767,7 @@ final class NotchModel: ObservableObject {
         enum CodingKeys: String, CodingKey {
             case id, q, a, t, turns, storedTurnsOnDisk, storedIsLoop, storedLoopBorn, storedImageFiles,
                  title, source, origin, link, agentOutcome, agentResume,
-                 agentInterrupted, agentSeen, failed, outOfCredit, licenseRequired, mainThread
+                 agentInterrupted, agentSeen, failed, outOfCredit, licenseRequired, mainThread, subThread
         }
 
         init(from decoder: Decoder) throws {
@@ -782,6 +800,7 @@ final class NotchModel: ObservableObject {
             outOfCredit = try c.decodeIfPresent(Bool.self, forKey: .outOfCredit) ?? false
             licenseRequired = try c.decodeIfPresent(Bool.self, forKey: .licenseRequired) ?? false
             mainThread = try c.decodeIfPresent(Bool.self, forKey: .mainThread) ?? false
+            subThread = try c.decodeIfPresent(Bool.self, forKey: .subThread) ?? false
         }
 
         /// Content search for the `search_history` tool — every place the user's own
@@ -1030,9 +1049,14 @@ final class NotchModel: ObservableObject {
     @Published var isResultMoreMenuOpen = false
     /// The page beside the result page, from the header's ⋯. It has two
     /// tabs (`sidePageTab`): Routines, and the thread copies answer in.
-    @Published var showRoutines = false
+    @Published var showRoutines = false {
+        didSet { if !showRoutines { activeSubThreadID = nil } }
+    }
     @Published var sidePageTab: SidePageTab = .copies
-    enum SidePageTab { case routines, copies, websites }
+    /// Which sub-thread is currently open in the right-side drawer (`showRoutines`).
+    /// Nil shows the sub-thread list; non-nil shows that sub-thread's conversation.
+    @Published var activeSubThreadID: UUID? = nil
+    enum SidePageTab { case routines, copies, codeThreads, websites }
 
     /// Whether the message tones play: sending, each reply bubble landing, and
     /// a reaction. One switch for the whole app — the notch and every detached
@@ -1301,6 +1325,25 @@ final class NotchModel: ObservableObject {
     /// when a round's task starts and removed on the same defer that settles
     /// `roundsInFlight`, so the two can never disagree.
     private var inFlightRounds: [InFlightRound] = []
+
+    /// Where a main-thread round asked to be filed (`create_thread` /
+    /// `move_to_thread`), by answer id. Applied when the round settles.
+    struct ThreadRoute {
+        let target: UUID
+        let title: String
+        let isNew: Bool
+    }
+    var threadRoutes: [UUID: ThreadRoute] = [:]
+
+    /// Rounds moved out of the main thread, by question id: the answer that
+    /// went with it and the link line left in its place. Applied to every
+    /// copy of the main thread saved later (a round still streaming holds a
+    /// snapshot from before the move).
+    var threadRelocations: [UUID: (answerID: UUID, link: Turn)] = [:]
+
+    /// The newest report line per sub-thread, for main-thread copies saved
+    /// after it was posted (`applyingSubThreadReports`).
+    var subThreadReports: [UUID: Turn] = [:]
 
     /// A message sent to a thread while its round runs, waiting for the next
     /// tool round. `tag` is the sender's own id for it (a Telegram message id).
@@ -1730,10 +1773,7 @@ final class NotchModel: ObservableObject {
     /// panel over it. See `MouseVelocityTracker.cursorMoved` and `isMenuBarSweep`.
     func hoverEntered(on display: CGDirectDisplayID?, velocity: CGVector) {
         ClickOpenProbe.shared.hover("entered display=\(display.map(String.init) ?? "nil") open=\(open)")
-        if open {
-            // The card stays up while the pointer crosses the resting notch, and
-            // a card in flight does not turn back when it passes under the pointer.
-            if activeDisplay == Self.menuBarCardDisplay, display != activeDisplay { return }
+        if open, !cardOpenElsewhere(than: display) {
             if cardFlyingOut { return }
             if pointerInsideIsland(on: display, slop: 16) == false { return }
             openPanel(on: display, velocity: velocity)
@@ -1835,7 +1875,7 @@ final class NotchModel: ObservableObject {
 
     private func recheckEntryWatch(display: CGDirectDisplayID?) {
         entryWatchTask = nil
-        guard !open else { return }
+        guard !open || cardOpenElsewhere(than: display) else { return }
         // Gone — it really was a pass-through. No enter event is needed to end
         // the watch: leaving the rect is the answer.
         guard pointerInsideRestingNotch(on: display, slop: 0) != false else { return }
@@ -1899,7 +1939,7 @@ final class NotchModel: ObservableObject {
             try? await Task.sleep(nanoseconds: UInt64(NotchModel.hoverPeekTick * 1_000_000_000))
             guard !Task.isCancelled, let self else { return }
             self.hoverPeekTask = nil
-            guard self.hoverPeek != nil, !self.open else { return self.endHoverPeek() }
+            guard self.hoverPeek != nil, !self.isOpen(on: display) else { return self.endHoverPeek() }
             guard self.pointerInsideRestingNotch(on: display,
                                                  slop: NotchModel.hoverPeekOut) == true
             else { return self.endHoverPeek() }
@@ -1934,8 +1974,8 @@ final class NotchModel: ObservableObject {
     func notchClicked(on display: CGDirectDisplayID?) {
         ClickOpenProbe.shared.note("gesture: notchClicked display=\(display.map(String.init) ?? "nil") open=\(open) closing=\(closing)")
         // The press fires this; the rest of that drag's ticks find it already
-        // open and turn back.
-        guard !open else { return }
+        // open and turn back. An open menu bar card moves to this notch.
+        guard !open || cardOpenElsewhere(than: display) else { return }
         // The flex is NOT retired here. Dropping it in this call would put it in
         // the same transaction as `open`, and the island's own peek animation
         // would then govern the unfurl instead of the open spring. The rendered
@@ -4055,6 +4095,14 @@ final class NotchModel: ObservableObject {
     /// Confirm card as a settings change; listing and stopping do not.
     func handleLoopRequest(answerID: UUID, threadID: UUID,
                            request: LoopRequest) async throws -> String {
+        // A loop runs in a sub-thread. A round on the main thread that starts
+        // one without having picked a sub-thread gets a new one, and the
+        // round moves there with it.
+        if request.action == .start, threadRoutes[answerID] == nil,
+           isMainThreadForRouting(threadID) {
+            threadRoutes[answerID] = ThreadRoute(target: UUID(), title: "", isNew: true)
+        }
+        let threadID = threadRoutes[answerID]?.target ?? threadID
         let manager = ChatLoopManager.shared
         switch request.action {
         case .list:
@@ -6403,18 +6451,16 @@ final class NotchModel: ObservableObject {
 
     private var bucketCounts: (chat: Int, agent: Int) {
         if let cached = historyBucketCounts { return cached }
-        // Chat counts what Recent lists: with unified threads on, the main
-        // thread is left out there, so a first run whose only row is the main
-        // thread has nothing to disclose. The From copies thread is left out too.
-        let hideMain = unifiedThreadsEnabled
-        let copies = copyThreadID
+        // Chat counts what the Sub-thread list shows (`isListedSubThread`);
+        // Agent counts the code-threads.
+        let loopThreads = Set(ChatLoopManager.shared.loops.map(\.threadID))
         var agent = 0
-        var main = 0
+        var chat = 0
         for item in history {
             if item.source == .agent { agent += 1 }
-            else if (hideMain && item.mainThread) || item.id == copies { main += 1 }
+            else if isListedSubThread(item, loopThreads: loopThreads) { chat += 1 }
         }
-        let counts = (chat: history.count - agent - main, agent: agent)
+        let counts = (chat: chat, agent: agent)
         historyBucketCounts = counts
         return counts
     }
@@ -6451,15 +6497,37 @@ final class NotchModel: ObservableObject {
         // never bleed into it. The optional source filter can only narrow within
         // Ask / Notes / Reminders.
         if let cached = chatFilteredHistoryCache { return cached }
-        // With unified threads on, the main thread is reached from the resting
-        // notch, not from Recent. The From copies thread opens from the ⋯ menu.
-        let hideMain = unifiedThreadsEnabled
-        let copies = copyThreadID
-        let items = filteredHistory.filter {
-            $0.source != .agent && !(hideMain && $0.mainThread) && $0.id != copies
-        }
+        // Sub-threads only. The main thread is reached from the resting notch;
+        // threads from before sub-threads stay in the archive.
+        let loopThreads = Set(ChatLoopManager.shared.loops.map(\.threadID))
+        let items = filteredHistory.filter { isListedSubThread($0, loopThreads: loopThreads) }
         chatFilteredHistoryCache = items
         return items
+    }
+
+    /// A row the Sub-thread list shows: every running or filed thread outside
+    /// the main thread, including the clipboard copy thread and loop threads.
+    func isListedSubThread(_ item: HistoryItem, loopThreads: Set<UUID>) -> Bool {
+        guard item.source == .ask, !item.mainThread else { return false }
+        return item.subThread || item.id == copyThreadID || loopThreads.contains(item.id)
+    }
+
+    /// Whether `id` belongs to a sub-thread (including copy thread and loop
+    /// sub-threads). Sub-threads open in the right-side drawer, never full-screen
+    /// in place of the main thread.
+    func isSubThreadID(_ id: UUID) -> Bool {
+        let loopThreads = Set(ChatLoopManager.shared.loops.map(\.threadID))
+        if let item = history.first(where: { $0.id == id }) {
+            return isListedSubThread(item, loopThreads: loopThreads)
+        }
+        return id == copyThreadID || loopThreads.contains(id)
+    }
+
+    /// Sub-threads, newest first, for the model's thread index
+    /// (`create_thread` / `move_to_thread`).
+    var subThreads: [HistoryItem] {
+        let loopThreads = Set(ChatLoopManager.shared.loops.map(\.threadID))
+        return history.filter { !$0.pending && isListedSubThread($0, loopThreads: loopThreads) }
     }
 
     /// The global filter pipeline retained for the standalone all-history archive.
@@ -7685,7 +7753,8 @@ final class NotchModel: ObservableObject {
         guard !open else { return true }
         if !RestingResult.shared.show(glance, failed: false, kind: .message) {
             NotificationService.shared.postAnswerReady(
-                threadID: item.id, title: glance, question: glance, answer: text)
+                threadID: item.id, title: glance, question: glance, answer: text,
+                proactive: true)
         }
         return true
     }
@@ -8068,10 +8137,12 @@ final class NotchModel: ObservableObject {
 
     /// Whether an upward swipe closes the panel: a result page, scrolled to its
     /// bottom, that has no fold back into the peek (a pinned answer, another
-    /// thread, a page the collapse won't take), with no menu hung off it.
+    /// thread, a page the collapse won't take), with no menu hung off it and no
+    /// side page open — the side page's lists scroll, and a swipe up there is
+    /// theirs, as it already is for the pull (`threadPullAvailable`).
     private var threadDismissAvailable: Bool {
         guard open, mode == .result, !turns.isEmpty, threadPullProgress == nil else { return false }
-        return !showSettings && !showWhatsNew && !showHistory
+        return !showSettings && !showWhatsNew && !showHistory && !showRoutines
             && agentDetailTaskID == nil && !isFloatingCardOpen
             && !InfoPopoverGate.open && detachDrag == nil
             && threadScrolledToBottom
@@ -8708,8 +8779,8 @@ final class NotchModel: ObservableObject {
               let raw = pb.string(forType: .string) else { return }
         let clip = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard clip.count >= 2, !isCurrentSessionText(clip), !ClipPrivacy.containsSecret(clip) else { return }
-        let app = NSWorkspace.shared.frontmostApplication?.localizedName
-        ClipboardHistory.shared.add(clip, app: app)
+        let front = NSWorkspace.shared.frontmostApplication
+        ClipboardHistory.shared.add(clip, app: front?.localizedName, bundleID: front?.bundleIdentifier)
     }
 
     /// Gate content reads on the system pasteboard-privacy state (macOS 15.4+).
@@ -8818,7 +8889,7 @@ final class NotchModel: ObservableObject {
         // light the notch for nothing. They come out once there is work to do.
         let service = ai
         let memory = UserMemory.shared
-        let remembers = ClipboardHistory.shared.recording
+        let remembers = ClipboardHistory.shared.feedsMemory
         let now = Date()
         let clock = DateFormatter()
         clock.dateFormat = "yyyy-MM-dd HH:mm EEEE"
@@ -9204,6 +9275,7 @@ final class NotchModel: ObservableObject {
         } else {
             item = HistoryItem(q: clip, a: reply, t: Date(), turns: [question, answer])
             item.source = .ask
+            item.subThread = true
             item.title = L("copyThread.title")
             if copyThreadIndex == nil { copyThreadID = item.id }
         }
@@ -9488,6 +9560,14 @@ final class NotchModel: ObservableObject {
         open && (activeDisplay == nil || display == nil || activeDisplay == display)
     }
 
+    /// The menu bar card is open and `display` is a notch. An entry or click on
+    /// that notch opens it with the card's content, through the same gates as
+    /// an entry on a closed notch.
+    func cardOpenElsewhere(than display: CGDirectDisplayID?) -> Bool {
+        open && activeDisplay == Self.menuBarCardDisplay
+            && display != nil && display != Self.menuBarCardDisplay && !cardFlyingOut
+    }
+
     /// Point the panel at `display`, or keep the current screen; a panel that
     /// has none yet takes `summonDisplay`.
     private func claimDisplay(_ display: CGDirectDisplayID?) {
@@ -9591,16 +9671,21 @@ final class NotchModel: ObservableObject {
                 await Announcements.shared.refreshIfDue()
                 self.maybeShowAnnouncement()
             }
-            if mode == .idle, turns.isEmpty, let round = inFlightRounds.last {
+            let attachableRound = inFlightRounds.last(where: { round in
+                !unifiedThreadsEnabled || !isSubThreadID(round.threadID)
+            })
+            if mode == .idle, turns.isEmpty, let round = attachableRound {
                 // A round is still streaming in the background — the busy
                 // extension is out, and hovering the working notch should land
                 // on the answer being written, not on the idle prompt with the
-                // work hidden behind a Recent row. Newest round wins when
-                // several are in flight (older ones stay reachable through
-                // their pending Recent rows). The parked idle draft is
-                // deliberately NOT consumed on this path: it stays parked and
-                // hands back on the next plain idle open. Any parked page IS
-                // dropped: the live round is newer activity than the snapshot.
+                // work hidden behind a Recent row. Sub-thread rounds (such as
+                // background loops) stay out of this path so they never hijack
+                // the full-screen panel. Newest round wins when several are in
+                // flight (older ones stay reachable through their pending Recent
+                // rows). The parked idle draft is deliberately NOT consumed on
+                // this path: it stays parked and hands back on the next plain
+                // idle open. Any parked page IS dropped: the live round is newer
+                // activity than the snapshot.
                 attachInFlightRound(round)
                 parkedSession = nil
             } else {
@@ -12894,6 +12979,17 @@ final class NotchModel: ObservableObject {
         let offWire = Self.offWireExchanges(turns[..<sitting])
         // A loop round's question carries the loop's settings and the done
         // instruction on the wire only; the thread keeps the prompt as written.
+        // A question on the main thread carries the sub-thread list on the
+        // wire, for `move_to_thread`.
+        if loopRound == nil, isMainThread(threadHistoryID),
+           let last = context.last, last.role == "user" {
+            let index = subThreadIndexSuffix()
+            if !index.isEmpty {
+                var message = ChatMessage(role: last.role, content: last.content + index)
+                message.images = last.images
+                context[context.count - 1] = message
+            }
+        }
         if let loopRound, let last = context.last, last.role == "user" {
             let loop = loopID.flatMap { ChatLoopManager.shared.loop(for: $0) }
             let suffix = LoopInterval.wireSuffix(
@@ -13043,6 +13139,7 @@ final class NotchModel: ObservableObject {
             // Set when the harness ended this round because the line was filed as
             // a note and nothing else was said (`endsRound` below).
             var filedNote = false
+            var touchedPageURLs: [String] = []
             // Throttle + pacing state for the streamed-text sink below. Providers
             // deliver deltas far faster than the display refreshes (some near
             // per-character) and in uneven bursts (a stall, then a slab), and
@@ -13331,6 +13428,20 @@ final class NotchModel: ObservableObject {
                 // report its stop condition met with `LoopInterval.doneMarker`,
                 // which pauses the loop.
                 if loopRound == nil {
+                    // Offered on every question so the tool list stays the
+                    // same; off the main thread they answer with an error.
+                    agentTools.append(CreateThreadTool { [weak self] title in
+                        guard let self else { return "Error: unavailable." }
+                        return await MainActor.run {
+                            self.routeToNewThread(answerID: answerID, threadID: threadID, title: title)
+                        }
+                    })
+                    agentTools.append(MoveToThreadTool { [weak self] id in
+                        guard let self else { throw CancellationError() }
+                        return try await MainActor.run {
+                            try self.routeToThread(answerID: answerID, threadID: threadID, idPrefix: id)
+                        }
+                    })
                     agentTools.append(ManageLoopTool { [weak self] request in
                         guard let self else { throw CancellationError() }
                         return try await self.handleLoopRequest(answerID: answerID,
@@ -13347,10 +13458,15 @@ final class NotchModel: ObservableObject {
                         return try await self.confirmPublicPageWrite(
                             answerID: answerID, slug: slug, title: title, preview: preview)
                     },
-                    onTouch: { slug, title, _, _ in
-                        guard let loopID else { return }
+                    onTouch: { slug, title, url, _ in
                         await MainActor.run {
-                            ChatLoopManager.shared.bindPage(loopID: loopID, slug: slug, title: title)
+                            let urlString = url.absoluteString
+                            if !touchedPageURLs.contains(urlString) {
+                                touchedPageURLs.append(urlString)
+                            }
+                            if let loopID {
+                                ChatLoopManager.shared.bindPage(loopID: loopID, slug: slug, title: title)
+                            }
                         }
                     }
                 ))
@@ -13691,6 +13807,28 @@ final class NotchModel: ObservableObject {
                     acc = acc.replacingOccurrences(of: LoopInterval.doneMarker, with: "")
                         .trimmingCharacters(in: .whitespacesAndNewlines)
                 }
+                // Any Notchi page this round created/updated/appended is always
+                // attached as a clickable link card even if the model forgot to
+                // paste its URL in the prose ("已写进报告").
+                if !touchedPageURLs.isEmpty {
+                    let trimmedAcc = acc.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !trimmedAcc.isEmpty {
+                        for pageURL in touchedPageURLs where !acc.localizedCaseInsensitiveContains(pageURL) {
+                            acc += "\n\n" + pageURL
+                        }
+                    }
+                    if let i = thread.firstIndex(where: { $0.id == answerID }) {
+                        for pageURL in touchedPageURLs where !thread[i].sharedLinks.contains(pageURL) {
+                            thread[i].sharedLinks.append(pageURL)
+                        }
+                    }
+                    if self.isOnScreen(answerID: answerID),
+                       let i = self.turns.firstIndex(where: { $0.id == answerID }) {
+                        for pageURL in touchedPageURLs where !self.turns[i].sharedLinks.contains(pageURL) {
+                            self.turns[i].sharedLinks.append(pageURL)
+                        }
+                    }
+                }
                 // Final flush: the terminal writes below must see the complete
                 // text (pieces may still be buffered inside the throttle window,
                 // or left by the drain deadline), and settling the flag keeps a
@@ -13718,11 +13856,18 @@ final class NotchModel: ObservableObject {
                 // hold one history. A Telegram round is already there.
                 // Loop rounds go out without quoting the loop's prompt.
                 let mirroredQuestion = loopRound == nil ? q : ""
+                // A channel round's question already went to the other channel as it arrived.
                 if nonoContext.surface != NoNoRequestContext.telegram {
-                    TelegramBridge.shared.mirror(threadID: threadID, question: mirroredQuestion, answer: acc)
+                    TelegramBridge.shared.mirror(
+                        threadID: threadID,
+                        question: nonoContext.surface == NoNoRequestContext.signal ? "" : mirroredQuestion,
+                        answer: acc)
                 }
                 if nonoContext.surface != NoNoRequestContext.signal {
-                    SignalBridge.shared.mirror(threadID: threadID, question: mirroredQuestion, answer: acc)
+                    SignalBridge.shared.mirror(
+                        threadID: threadID,
+                        question: nonoContext.surface == NoNoRequestContext.telegram ? "" : mirroredQuestion,
+                        answer: acc)
                 }
                 if self.suggestFollowUpEnabled, loopRound == nil,
                    !acc.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -14909,6 +15054,10 @@ final class NotchModel: ObservableObject {
             text = parked.text
             return
         }
+        if unifiedThreadsEnabled, isSubThreadID(parked.threadHistoryID) {
+            text = parked.text
+            return
+        }
         let persisted = history.first(where: { $0.id == parked.threadHistoryID })?.turns
         var restored: [Turn]
         if let persisted, !persisted.isEmpty {
@@ -15022,6 +15171,7 @@ final class NotchModel: ObservableObject {
         var item = HistoryItem(id: threadID, q: question, a: "", t: Date())
         item.pending = true
         item.mainThread = mainThread
+        item.subThread = !mainThread
         history.insert(item, at: 0)
         // Not saved to disk — a pending row carries no answer and must never
         // survive a relaunch. `persistThread` is what writes the settled row.
@@ -15058,6 +15208,12 @@ final class NotchModel: ObservableObject {
                                outOfCredit: Bool = false, licenseRequired: Bool = false,
                                service: AIService? = nil) {
         var thread = thread
+        // Rounds already moved to a sub-thread stay out of this copy.
+        thread = applyingThreadRelocations(thread)
+        // Report lines posted while this round streamed.
+        if history.first(where: { $0.id == threadID })?.mainThread == true {
+            thread = applyingSubThreadReports(thread)
+        }
         // Another round's turn still marked streaming with no round behind it
         // must not be saved as live. This round's own turn is settled below.
         var live = Set(inFlightRounds.map(\.answerID))
@@ -15125,6 +15281,9 @@ final class NotchModel: ObservableObject {
             // already read, so re-filing the row must not relight its bead.
             item.agentSeen = existing.agentSeen
             item.mainThread = existing.mainThread
+            item.subThread = existing.subThread
+        } else {
+            item.subThread = true
         }
         if let i = history.firstIndex(where: { $0.id == threadID }) {
             history.remove(at: i)
@@ -15142,6 +15301,20 @@ final class NotchModel: ObservableObject {
         }
         // No cap: the full archive is retained (see `persistCapture`).
         saveHistory()
+
+        // A loop round in a sub-thread reports directly in the main thread.
+        if !failed, !item.mainThread, item.source == .ask,
+           let answerID, let answer = thread.first(where: { $0.id == answerID }),
+           answer.loopRound != nil {
+            postSubThreadReport(threadID: threadID, answer: answer)
+        }
+
+        // The model filed this round in a sub-thread: move it there.
+        if let answerID, let route = threadRoutes.removeValue(forKey: answerID) {
+            if !failed, item.mainThread {
+                relocateRound(answerID: answerID, mainID: threadID, route: route)
+            }
+        }
 
         // Derive a title from the actual conversation content so the recent list
         // doesn't just display the first user message — prompts like "总结一下"
@@ -15167,7 +15340,11 @@ final class NotchModel: ObservableObject {
             rememberFromRound(thread, threadID: threadID, service: service ?? ai)
         }
         // The copy thread keeps its fixed title.
-        if !failed, !loopTurn, threadID != copyThreadID, existingTitle == nil || atMilestone {
+        // A loop-born thread gets one title from its first round, so its row
+        // does not show the loop's whole prompt.
+        let loopBornUntitled = thread.first?.loopRound != nil && existingTitle == nil
+        if !failed, !loopTurn || loopBornUntitled, threadID != copyThreadID,
+           existingTitle == nil || atMilestone {
             let titleService = backgroundService(service ?? ai)
             // Simple mode skips the title request; the row shows the question.
             if !CustomProvider.isSimple(titleService) { Task { [weak self] in
@@ -15266,9 +15443,11 @@ final class NotchModel: ObservableObject {
     func scanClipboardForMemories() {
         let memory = UserMemory.shared
         let key = "memory.clipboardScanDone"
-        guard ClipboardHistory.shared.recording, !UserDefaults.standard.bool(forKey: key),
+        guard ClipboardHistory.shared.feedsMemory, !UserDefaults.standard.bool(forKey: key),
               !clipboardScanRunning, !(ai is StubAIService) else { return }
-        let entries = ClipboardHistory.shared.entries
+        // The last week only: history can now run to months, and one request
+        // stays within the 20,000 characters below.
+        let entries = ClipboardHistory.shared.recent(days: 7, limit: 200)
         guard !entries.isEmpty else {
             UserDefaults.standard.set(true, forKey: key)
             return
@@ -15277,7 +15456,7 @@ final class NotchModel: ObservableObject {
         var total = 0
         for entry in entries {
             let text = String(entry.text.prefix(1_000))
-            let line = "--- copied \(entry.copiedAt.formatted(date: .abbreviated, time: .omitted))\n\(text)"
+            let line = "--- copied \(entry.lastCopiedAt.formatted(date: .abbreviated, time: .omitted))\n\(text)"
             total += line.count
             if total > 20_000 { break }
             lines.append(line)
@@ -15815,11 +15994,14 @@ final class NotchModel: ObservableObject {
         openHistory(item)
     }
 
-    /// A chat loop's task row, tapped. A round still writing — round one's
-    /// placeholder row, or a later round on the settled thread — is attached to
-    /// the screen, so the tap lands on the answer as it arrives; otherwise the
-    /// thread opens like any Recent row.
+    /// A chat loop's task row, tapped. In unified-threads mode a loop lives in
+    /// its own sub-thread, so it opens in the right-side drawer on top of the
+    /// main thread instead of replacing the notch full-screen. Otherwise a live
+    /// round reattaches to the screen or opens like any Recent row.
     func openLoopThread(id: UUID) {
+        if unifiedThreadsEnabled, isSubThreadID(id), openSubThread(id) {
+            return
+        }
         if let round = inFlightRounds.first(where: { $0.threadID == id }) {
             askComposeImages = []
             showHistory = false
@@ -15851,6 +16033,12 @@ final class NotchModel: ObservableObject {
         // must not hide off-screen and ride the next follow-up by surprise.
         askComposeImages = []
         droppedFiles = []
+        // In unified-threads mode, sub-threads (including loop threads) always
+        // open in the right-side drawer on top of the main thread, never
+        // full-screen in place of it.
+        if unifiedThreadsEnabled, isSubThreadID(item.id), openSubThread(item.id) {
+            return
+        }
         // Still answering: this row is a placeholder whose live stream runs
         // detached — reattach the stream to the screen (the same move as
         // hovering the busy notch) so tapping the row lands on the answer as
@@ -16482,6 +16670,8 @@ final class NotchModel: ObservableObject {
                 saveHistory()
             }
             ChatLoopManager.shared.restore()
+            moveLoopsOutOfMainThread()
+            upgradeSubThreadReports()
             // The archive is now whole, so anything in the image store it doesn't
             // reference is residue (a crash between writing the JPEG and persisting
             // the row, a Clear that landed before the load) — sweep it.
@@ -17012,5 +17202,408 @@ final class ThreadSearchState: ObservableObject {
         if current != index { position.current = index }
         let target = matches.isEmpty ? nil : matches[index]
         if self.target != target { position.target = target }
+    }
+}
+
+// MARK: - Sub-threads
+
+extension NotchModel {
+    /// The ids the model sees: the first 8 hex digits.
+    static func shortThreadID(_ id: UUID) -> String {
+        String(id.uuidString.lowercased().prefix(8))
+    }
+
+    /// The sub-thread list sent with a main-thread question, for
+    /// `move_to_thread`. Empty when there are none.
+    func subThreadIndexSuffix() -> String {
+        let rows = subThreads.filter { $0.id != copyThreadID }.prefix(10)
+        guard !rows.isEmpty else { return "" }
+        let f = DateFormatter()
+        f.locale = Foundation.Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyy-MM-dd"
+        let lines = rows.map { item -> String in
+            let title = item.displayTitle
+                .split(whereSeparator: \.isNewline).joined(separator: " ")
+            return "- \(Self.shortThreadID(item.id)) | \(title.prefix(60)) | \(f.string(from: item.t))"
+        }
+        return "\n\n[Sub-threads (id | title | last active), for move_to_thread:\n"
+            + lines.joined(separator: "\n") + "]"
+    }
+
+    /// `create_thread`: file this round in a new sub-thread.
+    func routeToNewThread(answerID: UUID, threadID: UUID, title: String) -> String {
+        guard isMainThreadForRouting(threadID) else {
+            return "Error: this conversation is already a sub-thread. Answer here."
+        }
+        let target = threadRoutes[answerID]?.isNew == true
+            ? threadRoutes[answerID]!.target : UUID()
+        threadRoutes[answerID] = ThreadRoute(target: target, title: title, isNew: true)
+        return "This exchange will be filed in a new sub-thread named \"\(title)\". Answer normally."
+    }
+
+    /// `move_to_thread`: file this round in an existing sub-thread, and hand
+    /// the model that thread's recent messages.
+    func routeToThread(answerID: UUID, threadID: UUID, idPrefix: String) throws -> String {
+        guard isMainThreadForRouting(threadID) else {
+            return "Error: this conversation is already a sub-thread. Answer here."
+        }
+        let needle = idPrefix.lowercased()
+        guard !needle.isEmpty,
+              let item = subThreads.first(where: { $0.id.uuidString.lowercased().hasPrefix(needle) })
+        else {
+            throw SubThreadToolError(message: "No sub-thread has the id \(idPrefix). Use an id from the list, or create_thread.")
+        }
+        threadRoutes[answerID] = ThreadRoute(target: item.id, title: item.displayTitle, isNew: false)
+        let recent = item.conversation
+            .filter { !$0.isLocal && !$0.isError && $0.isDrawn && $0.threadLink == nil }
+            .suffix(12)
+        var out = "Filed in \"\(item.displayTitle)\". Its recent messages, oldest first:\n"
+        for turn in recent {
+            let who = turn.role == "user" ? "User" : "You"
+            out += "\n\(who): \(turn.text.prefix(1500))\n"
+        }
+        return out
+    }
+
+    private func isMainThreadForRouting(_ threadID: UUID) -> Bool {
+        unifiedThreadsEnabled
+            && (history.first(where: { $0.id == threadID })?.mainThread ?? false)
+    }
+
+    /// Replace each moved round in `thread` with its link line.
+    func applyingThreadRelocations(_ thread: [Turn]) -> [Turn] {
+        guard !threadRelocations.isEmpty else { return thread }
+        var out = thread
+        for (questionID, moved) in threadRelocations {
+            guard let qi = out.firstIndex(where: { $0.id == questionID }) else { continue }
+            out.removeAll { $0.id == moved.answerID }
+            if let qi2 = out.firstIndex(where: { $0.id == questionID }) {
+                out[qi2] = moved.link
+            } else if qi < out.count {
+                out.insert(moved.link, at: qi)
+            }
+        }
+        return out
+    }
+
+    /// File a settled main-thread round into the sub-thread it asked for, while
+    /// keeping the exchange in the main thread so the main thread stays the
+    /// single place the user reads and replies.
+    func relocateRound(answerID: UUID, mainID: UUID, route: ThreadRoute) {
+        guard let mi = history.firstIndex(where: { $0.id == mainID }) else { return }
+        let mainTurns = history[mi].conversation
+        guard let ai = mainTurns.firstIndex(where: { $0.id == answerID }),
+              let qi = mainTurns[..<ai].lastIndex(where: { $0.role == "user" && $0.loopRound == nil })
+        else { return }
+        let question = mainTurns[qi]
+        let answer = mainTurns[ai]
+        let needsTitle = route.title.isEmpty
+
+        // The sub-thread.
+        var item: HistoryItem
+        if !route.isNew, let ti = history.firstIndex(where: { $0.id == route.target }) {
+            item = history.remove(at: ti)
+            item.turns = item.conversation + [question, answer]
+            item.a = answer.text
+            item.t = Date()
+        } else {
+            item = HistoryItem(id: route.target, q: question.text, a: answer.text, t: Date(),
+                               turns: [question, answer])
+            item.title = needsTitle ? nil : route.title
+            item.subThread = true
+        }
+
+        history.insert(item, at: 0)
+        saveHistory()
+        if needsTitle { titleSubThread(route.target, linkQuestionID: nil) }
+    }
+
+    /// Name a sub-thread from its conversation, and the main thread's link
+    /// line with it.
+    func titleSubThread(_ id: UUID, linkQuestionID: UUID?) {
+        guard let thread = history.first(where: { $0.id == id })?.conversation,
+              !thread.isEmpty else { return }
+        let service = backgroundService(ai)
+        Task { [weak self] in
+            guard let self,
+                  let title = await self.generateTitle(for: thread, service: service) else { return }
+            await MainActor.run {
+                guard let i = self.history.firstIndex(where: { $0.id == id }) else { return }
+                self.history[i].title = title
+                if let q = linkQuestionID, var moved = self.threadRelocations[q] {
+                    moved.link.text = title
+                    self.threadRelocations[q] = moved
+                    for m in self.history.indices where self.history[m].mainThread {
+                        var turns = self.history[m].conversation
+                        if let l = turns.firstIndex(where: { $0.threadLink == id && !$0.threadReport }) {
+                            turns[l].text = title
+                            self.history[m].turns = turns
+                        }
+                    }
+                    if let l = self.turns.firstIndex(where: { $0.threadLink == id && !$0.threadReport }) {
+                        self.turns[l].text = title
+                    }
+                }
+                self.saveHistory()
+            }
+        }
+    }
+
+    /// Loops started before sub-threads ran in the main thread. Each moves to
+    /// a sub-thread of its own, with the rounds it already ran. Runs once.
+    func moveLoopsOutOfMainThread() {
+        let key = "loopsMovedToSubThreads"
+        guard !UserDefaults.standard.bool(forKey: key) else { return }
+        UserDefaults.standard.set(true, forKey: key)
+        let manager = ChatLoopManager.shared
+        for loop in manager.loops {
+            guard let mi = history.firstIndex(where: { $0.id == loop.threadID && $0.mainThread })
+            else { continue }
+            var mainTurns = history[mi].conversation
+            let rounds = mainTurns.filter { $0.loopID == loop.id }
+            mainTurns.removeAll { $0.loopID == loop.id }
+            let last = rounds.last(where: { $0.role == "assistant" && !$0.isError })
+            var item = HistoryItem(q: loop.prompt, a: last?.text ?? "",
+                                   t: rounds.last?.sentAt ?? loop.startedAt,
+                                   turns: rounds)
+            item.subThread = true
+            history[mi].turns = mainTurns
+            history.insert(item, at: 0)
+            manager.rehome(loopID: loop.id, to: item.id)
+            if threadHistoryID == loop.threadID, !turns.isEmpty {
+                turns.removeAll { $0.loopID == loop.id }
+            }
+            if !rounds.isEmpty { titleSubThread(item.id, linkQuestionID: nil) }
+        }
+        saveHistory()
+    }
+
+    private static let subThreadSecretaryPrompt = """
+    You are the user's personal secretary on the main thread — your core job is \
+    to act as a strict information filter and gatekeeper. A background \
+    sub-thread just finished a run and handed its raw output to you.
+
+    SCREEN FIRST — default to SKIP unless it genuinely deserves the user's attention:
+    - Reply with the exact word SKIP (nothing else) when there is nothing \
+    genuinely worth interrupting the user about: e.g. a routine check found \
+    nothing new or no actionable change ("没有新增", "没有变化", "无异常", \
+    "nothing new"), minor/irrelevant noise, or it only repeats what you \
+    already told the user.
+    - Otherwise — ONLY when there is a real new finding, a meaningful change \
+    they asked to watch for, an action/decision/login they need to take, or \
+    the task reached its goal — write a short, direct message to the user.
+
+    When you write to the user:
+    - Address the user as "你" / "you" (never refer to them by name).
+    - Speak directly about the substance in 1–3 crisp sentences: only the core \
+    takeaway and any concrete next step (include the report/page URL on its own \
+    line if one was updated).
+    - Never use round numbers or check-in framing (no "第 N 轮", "本轮", \
+    "这一轮", "本次巡检", "Round N") and never copy-paste the sub-thread's raw \
+    log or narrate what it checked.
+    - Output ONLY SKIP or the message itself — no preamble, no labels.
+    """
+
+    /// Hand a sub-thread's newest loop output to the main thread's secretary:
+    /// it screens out noise / "nothing new" runs silently, and only speaks to
+    /// the user in its own concise voice when there is real signal.
+    func postSubThreadReport(threadID: UUID, answer: Turn) {
+        let body = answer.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !body.isEmpty,
+              let mi = history.firstIndex(where: { $0.mainThread && $0.source == .ask }),
+              let sub = history.first(where: { $0.id == threadID })
+        else { return }
+        let service = backgroundService(ai)
+        guard !(service is StubAIService) else { return }
+
+        let subTitle = sub.displayTitle
+        let boundLoop = ChatLoopManager.shared.loops.first(where: { $0.threadID == threadID })
+        let taskPrompt = boundLoop?.prompt ?? sub.q
+        let boundPageURL = boundLoop?.pageSlug.map { "https://\($0).\(PagesService.domain)" }
+        let pageLinks = answer.sharedLinks.filter {
+            URL(string: $0).flatMap(PagesService.slug(from:)) != nil
+        }
+        let reportURLs = Array(Set(pageLinks + (boundPageURL.map { [$0] } ?? [])))
+        let previousReport = history[mi].conversation
+            .last(where: { $0.threadReport && $0.threadLink == threadID })?.text
+        let sentAt = answer.sentAt ?? Date()
+
+        Task { [weak self] in
+            guard let self else { return }
+            guard var distilled = await self.screenSubThreadReport(
+                title: subTitle, task: taskPrompt, rawOutput: body,
+                previousReport: previousReport, pageURL: boundPageURL, service: service)
+            else { return }
+            for pageURL in reportURLs where !distilled.localizedCaseInsensitiveContains(pageURL) {
+                distilled += "\n\n" + pageURL
+            }
+            await MainActor.run {
+                guard let mi = self.history.firstIndex(where: { $0.mainThread && $0.source == .ask })
+                else { return }
+                var line = Turn(role: "assistant", text: distilled)
+                line.proactive = true
+                line.sharedLinks = reportURLs
+                line.threadLink = threadID
+                line.threadReport = true
+                line.sentAt = sentAt
+                self.subThreadReports[threadID] = line
+                let mainID = self.history[mi].id
+                self.history[mi].turns = self.applyingSubThreadReports(self.history[mi].conversation)
+                self.history[mi].a = distilled
+                self.history[mi].t = Date()
+                if self.threadHistoryID == mainID, !self.turns.isEmpty {
+                    self.turns = self.applyingSubThreadReports(self.turns)
+                }
+                self.saveHistory()
+                self.touchMainThreadPeek(mainID)
+            }
+        }
+    }
+
+    /// Ask the secretary model whether a sub-thread's raw output is worth
+    /// telling the user, and if so, distill it into a short direct message.
+    /// Returns `nil` when the secretary decides to stay silent (`SKIP`).
+    private func screenSubThreadReport(
+        title: String, task: String, rawOutput: String,
+        previousReport: String?, pageURL: String?, service: AIService
+    ) async -> String? {
+        var input = "Sub-thread: \(title)\n"
+        let trimmedTask = task.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedTask.isEmpty {
+            input += "Task: \(trimmedTask.prefix(600))\n"
+        }
+        if let pageURL {
+            input += "Report page URL: \(pageURL)\n"
+        }
+        if let prev = previousReport?.trimmingCharacters(in: .whitespacesAndNewlines), !prev.isEmpty {
+            input += "\nWhat you already told the user last time:\n\(prev.prefix(800))\n"
+        }
+        input += "\nSub-thread's new raw output:\n\(rawOutput.prefix(3000))"
+
+        do {
+            var raw = ""
+            let chunks = NoNoRequestContext.$current.withValue(
+                NoNoRequestContext(surface: NoNoRequestContext.suggest)
+            ) {
+                service.stream(
+                    system: Self.subThreadSecretaryPrompt,
+                    messages: [ChatMessage(role: "user", content: input)])
+            }
+            for try await chunk in chunks {
+                raw += chunk
+            }
+            let cleaned = ReasoningTags.visible(raw)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !cleaned.isEmpty else { return nil }
+            let upper = cleaned.uppercased()
+            if upper == "SKIP" || upper.hasPrefix("SKIP\n") || upper.hasPrefix("SKIP ") {
+                return nil
+            }
+            return cleaned
+        } catch {
+            return nil
+        }
+    }
+
+    /// Clean up any earlier unscreened/raw pass-through `threadReport` turns
+    /// in the main thread (old `isLocal` link lines, or verbatim copies that
+    /// carried the sub-thread's raw text/sources) and re-screen them through
+    /// the secretary so noise disappears and only real signal stays.
+    func upgradeSubThreadReports() {
+        guard let mi = history.firstIndex(where: { $0.mainThread && $0.source == .ask })
+        else { return }
+        var mainTurns = history[mi].conversation
+        var toRescreen: [(threadID: UUID, answer: Turn)] = []
+        var removed = false
+        mainTurns.removeAll { turn in
+            guard turn.threadReport, let subID = turn.threadLink else { return false }
+            let subLast = history.first(where: { $0.id == subID })?.conversation.last(where: {
+                $0.role == "assistant" && !$0.isError
+                    && !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            })
+            let isRawPassThrough = turn.isLocal
+                || !turn.sources.isEmpty
+                || (subLast != nil && turn.text == subLast?.text)
+            guard isRawPassThrough else { return false }
+            if let subLast { toRescreen.append((subID, subLast)) }
+            removed = true
+            return true
+        }
+        guard removed else { return }
+        history[mi].turns = mainTurns
+        if let last = mainTurns.last(where: { $0.role == "assistant" && !$0.isError }) {
+            history[mi].a = last.text
+        }
+        if threadHistoryID == history[mi].id, !turns.isEmpty {
+            turns = mainTurns
+        }
+        saveHistory()
+        touchMainThreadPeek(history[mi].id)
+        for item in toRescreen {
+            postSubThreadReport(threadID: item.threadID, answer: item.answer)
+        }
+    }
+
+    /// Put each sub-thread's newest report line at the end of `thread`, once,
+    /// dropping its older ones.
+    func applyingSubThreadReports(_ thread: [Turn]) -> [Turn] {
+        guard !subThreadReports.isEmpty else { return thread }
+        var out = thread
+        for (sub, line) in subThreadReports.sorted(by: { ($0.value.sentAt ?? .distantPast) < ($1.value.sentAt ?? .distantPast) }) {
+            if out.contains(where: { $0.id == line.id }) { continue }
+            out.removeAll { $0.threadReport && $0.threadLink == sub }
+            out.append(line)
+        }
+        return out
+    }
+
+    /// Open a sub-thread in the right-side drawer instead of replacing the
+    /// main thread full-screen. Ensures the main thread is open underneath when
+    /// called from idle (e.g. a notification tap or loop row). Returns `true`
+    /// if the drawer was opened.
+    @discardableResult
+    func openSubThread(_ id: UUID) -> Bool {
+        guard history.contains(where: { $0.id == id })
+            || inFlightRounds.contains(where: { $0.threadID == id })
+        else { return false }
+        if mode == .idle {
+            guard let main = history.first(where: { $0.mainThread && $0.source == .ask })
+            else { return false }
+            showHistory = false
+            highlightedHistoryIndex = nil
+            if let round = inFlightRounds.last(where: { $0.threadID == main.id }) {
+                attachInFlightRound(round)
+            } else if !main.pending {
+                text = ""
+                turns = main.conversation
+                threadHistoryID = main.id
+                threadImages = nil
+                mode = .result
+            } else {
+                return false
+            }
+        }
+        sidePageTab = .copies
+        activeSubThreadID = id
+        showRoutines = true
+        return true
+    }
+
+    /// A sub-thread's conversation (live mirror if a round is streaming in it,
+    /// otherwise its saved turns).
+    func subThreadConversation(for id: UUID) -> [Turn] {
+        if let round = inFlightRounds.last(where: { $0.threadID == id }) {
+            return round.thread
+        }
+        return history.first(where: { $0.id == id })?.conversation ?? []
+    }
+
+    /// Display title for a sub-thread tag shown above a main-thread report.
+    func subThreadTitle(for id: UUID) -> String? {
+        guard let item = history.first(where: { $0.id == id }) else { return nil }
+        let title = item.displayTitle
+            .split(whereSeparator: \.isNewline).joined(separator: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return title.isEmpty ? nil : title
     }
 }

@@ -1094,6 +1094,9 @@ final class SignalBridge: ObservableObject {
                 chosen = message.text
             }
             model?.chooseUserOption(chosen, questionID: q.id)
+            if let thread = currentThread ?? defaultThread() {
+                TelegramBridge.shared.mirrorSignalMessage(threadID: thread, text: message.text, images: [])
+            }
             return
         }
 
@@ -1123,6 +1126,7 @@ final class SignalBridge: ObservableObject {
             let tag = Int(message.timestamp % Int64(Int.max))
             if model.steer(threadID: targetThread, text: message.text, tag: tag) {
                 steered[targetThread, default: [:]][tag, default: []].append(message)
+                TelegramBridge.shared.mirrorSignalMessage(threadID: targetThread, text: message.text, images: [])
                 return
             }
         }
@@ -1194,6 +1198,8 @@ final class SignalBridge: ObservableObject {
             }
         }
 
+        let sentText = textParts.filter { !$0.hasPrefix("[Replying to: ") }
+            .joined(separator: "\n\n").trimmingCharacters(in: .whitespacesAndNewlines)
         var question = textParts.joined(separator: "\n\n").trimmingCharacters(in: .whitespacesAndNewlines)
         guard !question.isEmpty || !images.isEmpty else {
             _ = await sendNoteToSelf(L("signal.unsupported"), quoteTimestamp: last.timestamp)
@@ -1228,6 +1234,7 @@ final class SignalBridge: ObservableObject {
             return
         }
 
+        TelegramBridge.shared.mirrorSignalMessage(threadID: threadID, text: sentText, images: images)
         if repliedThread == nil && action == nil { currentThread = threadID }
         model.openSteering(threadID: threadID)
         for msg in batch { remember(timestamp: msg.timestamp, thread: threadID) }
@@ -1379,6 +1386,38 @@ final class SignalBridge: ObservableObject {
                 if let ts = await self.sendNoteToSelf(text, attachments: atts) {
                     self.remember(timestamp: ts, thread: threadID)
                 }
+            }
+        }
+    }
+
+    /// A message the user sent Notchi in Telegram, shown in the Signal chat
+    /// as it arrives, so the chat holds both sides of the conversation. The
+    /// answer follows later through `mirror` without quoting it again.
+    func mirrorTelegramMessage(threadID: UUID, text: String, images: [NSImage]) {
+        guard case .connected = state else { return }
+        let shown = String(text.trimmingCharacters(in: .whitespacesAndNewlines).prefix(3500))
+        guard !shown.isEmpty || !images.isEmpty else { return }
+        currentThread = threadID
+        let files: [URL] = images.compactMap { image in
+            guard let tiff = image.tiffRepresentation,
+                  let rep = NSBitmapImageRep(data: tiff),
+                  let jpeg = rep.representation(using: .jpeg, properties: [.compressionFactor: 0.85])
+            else { return nil }
+            let url = FileManager.default.temporaryDirectory
+                .appendingPathComponent("notchi-telegram-\(UUID().uuidString).jpg")
+            return (try? jpeg.write(to: url)) != nil ? url : nil
+        }
+        let quoted = shown.isEmpty ? "" : shown.split(separator: "\n", omittingEmptySubsequences: false)
+            .map { "› " + $0 }.joined(separator: "\n")
+        let body = quoted.isEmpty ? L("telegram.forwarded") : quoted + "\n" + L("telegram.forwarded")
+
+        let previous = chains["main"]
+        chains["main"] = Task { [weak self] in
+            await previous?.value
+            guard let self else { return }
+            defer { for file in files { try? FileManager.default.removeItem(at: file) } }
+            if let ts = await self.sendNoteToSelf(body, attachments: files.map(\.path)) {
+                self.remember(timestamp: ts, thread: threadID)
             }
         }
     }

@@ -651,6 +651,7 @@ final class TelegramBridge: ObservableObject {
               let tag = (messages.last?["message_id"] as? NSNumber)?.intValue,
               model.steer(threadID: target, text: text, tag: tag) else { return false }
         steered[target, default: [:]][tag] = messages
+        SignalBridge.shared.mirrorTelegramMessage(threadID: target, text: text, images: [])
         for message in messages {
             guard let id = (message["message_id"] as? NSNumber)?.intValue else { continue }
             Task { [weak self] in
@@ -763,6 +764,7 @@ final class TelegramBridge: ObservableObject {
                                        "reply_to_message_id": messageID])
             return
         }
+        SignalBridge.shared.mirrorTelegramMessage(threadID: landed, text: text, images: images)
         setThread(landed, chat: chatID)
         model.openSteering(threadID: landed)
         let previous = threadID.flatMap { id in model.history.first { $0.id == id }?.conversation }?
@@ -1083,6 +1085,49 @@ final class TelegramBridge: ObservableObject {
         }
     }
 
+    /// A message the user sent Notchi in Signal, shown in the owner's chat as
+    /// it arrives, quoted, so the chat holds both sides of the conversation.
+    /// The answer follows later through `mirror` without quoting it again.
+    func mirrorSignalMessage(threadID: UUID, text: String, images: [NSImage]) {
+        guard case .connected = state, let owner else { return }
+        let shown = String(text.trimmingCharacters(in: .whitespacesAndNewlines).prefix(3500))
+        guard !shown.isEmpty || !images.isEmpty else { return }
+        setThread(threadID, chat: owner)
+        let files: [URL] = images.compactMap { image in
+            guard let tiff = image.tiffRepresentation,
+                  let rep = NSBitmapImageRep(data: tiff),
+                  let jpeg = rep.representation(using: .jpeg, properties: [.compressionFactor: 0.85])
+            else { return nil }
+            let url = FileManager.default.temporaryDirectory
+                .appendingPathComponent("notchi-signal-\(UUID().uuidString).jpg")
+            return (try? jpeg.write(to: url)) != nil ? url : nil
+        }
+        let previous = chains["\(owner)"]
+        chains["\(owner)"] = Task { [weak self] in
+            await previous?.value
+            guard let self else { return }
+            defer { for file in files { try? FileManager.default.removeItem(at: file) } }
+            if !shown.isEmpty {
+                var result = await self.call("sendMessage", [
+                    "chat_id": owner,
+                    "text": "<blockquote>" + TelegramFormat.escape(shown) + "</blockquote>\n<i>"
+                        + TelegramFormat.escape(L("signal.forwarded")) + "</i>",
+                    "parse_mode": "HTML", "disable_web_page_preview": true,
+                    "disable_notification": true,
+                ])
+                if result["ok"] as? Bool != true {
+                    result = await self.call("sendMessage", ["chat_id": owner, "text": "› " + shown + "\n" + L("signal.forwarded"),
+                                                             "disable_notification": true])
+                }
+                if let id = Self.messageID(result) { self.remember(messageID: id, chatID: owner, thread: threadID) }
+            }
+            for file in files {
+                let result = await self.sendPhoto(file, chatID: owner, silent: true)
+                if let id = Self.messageID(result) { self.remember(messageID: id, chatID: owner, thread: threadID) }
+            }
+        }
+    }
+
     private func ask(_ question: NotchModel.PendingUserQuestion, chatID: Int64) async {
         questionOptions[question.id] = question.options
         let buttons = question.options.enumerated().map { index, option in
@@ -1165,6 +1210,9 @@ final class TelegramBridge: ObservableObject {
               let options = questionOptions.removeValue(forKey: questionID),
               options.indices.contains(index) else { return }
         model?.chooseUserOption(options[index], questionID: questionID)
+        if let owner, let thread = thread(for: owner) {
+            SignalBridge.shared.mirrorTelegramMessage(threadID: thread, text: options[index], images: [])
+        }
         if let message = callback["message"] as? [String: Any],
            let chatID = ((message["chat"] as? [String: Any])?["id"] as? NSNumber)?.int64Value,
            let messageID = (message["message_id"] as? NSNumber)?.intValue {

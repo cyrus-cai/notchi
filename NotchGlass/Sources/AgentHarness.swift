@@ -946,6 +946,15 @@ struct AgentHarness {
             }
 
             var assistantText = ""
+            // Characters this turn put on screen through `onText`, paragraph
+            // break included, so a turn that turns out to be a pre-tool preamble
+            // can take back exactly what it showed.
+            var shownThisTurn = 0
+            // Set once this turn starts a tool call. From then on the turn is a
+            // step, not the answer: what it showed is taken back and the rest
+            // of its text stays off screen (the model is told only its last
+            // message reaches the user — see `notchSystemPromptBase`).
+            var isToolTurn = false
             var pendingCalls: [ToolInvocation] = []
             var stopReason: String? = nil
             // First visible token of *this* turn clears whatever gap label was
@@ -1001,7 +1010,7 @@ struct AgentHarness {
                 case .text(let piece):
                     let visible = markupFilter.feed(piece)
                     guard !visible.isEmpty else { continue }
-                    if holding {
+                    if holding || isToolTurn {
                         assistantText += visible
                         continue
                     }
@@ -1010,8 +1019,16 @@ struct AgentHarness {
                         clearedGapLabel = true
                         preserveFetchCue = false
                     }
+                    // A later turn's text starts its own paragraph instead of
+                    // running on from the sentence an earlier turn ended with.
+                    if shownThisTurn == 0, !spokenText.isEmpty, !spokenText.hasSuffix("\n") {
+                        spokenText += "\n\n"
+                        onText("\n\n")
+                        shownThisTurn += 2
+                    }
                     assistantText += visible
                     spokenText += visible
+                    shownThisTurn += visible.count
                     onText(visible)
                 case .model(let ran):
                     // Report the concrete model once for the whole answer — the
@@ -1031,6 +1048,14 @@ struct AgentHarness {
                     // tool actually running. The label is re-derived (and, for
                     // read_page, refined with the page's host) when the assembled
                     // calls execute below — same helpers, so the words agree.
+                    if !holding, onRetract != nil {
+                        if shownThisTurn > 0 {
+                            onRetract?(shownThisTurn)
+                            if spokenText.count >= shownThisTurn { spokenText.removeLast(shownThisTurn) }
+                            shownThisTurn = 0
+                        }
+                        isToolTurn = true
+                    }
                     let canonicalName = service.canonicalToolName(name)
                     let preview = [ToolInvocation(id: "", name: canonicalName, input: [:])]
                     onActivity(activityLabel(for: preview, isRepeatRound: didTool),
@@ -1057,8 +1082,9 @@ struct AgentHarness {
             // stream ended mid-`<` it was just a stray `<`, so let it through.
             if let tail = markupFilter.flush(), !tail.isEmpty {
                 assistantText += tail
-                if !holding {
+                if !holding, !isToolTurn {
                     spokenText += tail
+                    shownThisTurn += tail.count
                     onText(tail)
                 }
             }
@@ -1112,6 +1138,25 @@ struct AgentHarness {
                         onText(assistantText)
                     }
                 }
+            }
+
+            // Only a turn with no tool calls is the answer. A call recovered
+            // from leaked markup raised no `toolCallStarted`, so its turn's text
+            // is taken back here.
+            if !pendingCalls.isEmpty, !holding, shownThisTurn > 0, let onRetract {
+                onRetract(shownThisTurn)
+                if spokenText.count >= shownThisTurn { spokenText.removeLast(shownThisTurn) }
+                shownThisTurn = 0
+            }
+            // A call was started but none arrived (dropped arguments): nothing
+            // ran, so this turn is the answer after all — show what was kept back.
+            if pendingCalls.isEmpty, isToolTurn, !holding, !assistantText.isEmpty {
+                if !spokenText.isEmpty, !spokenText.hasSuffix("\n") {
+                    spokenText += "\n\n"
+                    onText("\n\n")
+                }
+                spokenText += assistantText
+                onText(assistantText)
             }
 
             // No tool calls (or we suppressed them at the cap) → the model is done.
