@@ -23,12 +23,16 @@ async function main() {
 
   info(`Looking up the latest release of ${REPO}…`);
   // curl, not fetch: curl follows the http(s)_proxy environment variables.
-  let rel;
-  try { rel = JSON.parse(execFileSync('curl', ['-fsSL', '-H', 'User-Agent: notchi-npx', `https://api.github.com/repos/${REPO}/releases/latest`], { encoding: 'utf8' })); }
-  catch { die('Could not reach the GitHub API.'); }
-  const asset = (rel.assets || []).find((a) => a.name.endsWith('.zip'));
-  if (!asset) die('No .zip asset found on the latest release.');
-  ok(`Found ${rel.tag_name}: ${asset.name}`);
+  // The tag comes from the /releases/latest redirect, not the REST API, which
+  // allows 60 anonymous requests an hour per IP and answers 403 past that.
+  let latest;
+  try { latest = execFileSync('curl', ['-fsSIL', '-o', '/dev/null', '-w', '%{url_effective}', `https://github.com/${REPO}/releases/latest`], { encoding: 'utf8' }); }
+  catch { die('Could not reach GitHub.'); }
+  const tag = latest.split('/tag/')[1] || '';
+  if (!/^v\d/.test(tag)) die('No published release found.');
+  const name = `Notchi-${tag}.zip`;
+  const asset = { name, browser_download_url: `https://github.com/${REPO}/releases/download/${tag}/${name}` };
+  ok(`Found ${tag}: ${name}`);
 
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'notchi-'));
   try {

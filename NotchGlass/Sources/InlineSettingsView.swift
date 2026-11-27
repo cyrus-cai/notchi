@@ -1199,6 +1199,7 @@ struct InlineSettingsView: View {
         // The whole body at the panel's exact width too, so nothing below
         // (a header item, a pushed page) can widen it and shift the gutters.
         .frame(width: inWindow ? nil : SettingsMetrics.panelBodyWidth, alignment: .topLeading)
+        .environment(\.menuCardLight, inWindow && colorScheme == .light)
         .blur(radius: license.locked ? 14 : (promptTemplatePickerOpen ? 2.5 : 0))
         .allowsHitTesting(!license.locked)
         // Trial ended: Settings is one page over the blurred panes, with Buy
@@ -1217,7 +1218,6 @@ struct InlineSettingsView: View {
                     }
                 }
                 .frame(height: Tokens.Control.header)
-                .padding(.leading, 8)
                 .padding(.top, 12)
                 .transition(.opacity)
             }
@@ -2387,8 +2387,9 @@ struct InlineSettingsView: View {
     @ViewBuilder
     private func settingsSearchField(measuring: Bool) -> some View {
         HStack(spacing: 6) {
-            PhosphorIcon(mark: PhosphorIcons.magnifyingGlass, size: inWindow ? 14 : 12)
+            PhosphorIcon(mark: PhosphorIcons.magnifyingGlass, size: inWindow ? 15 : 13)
                 .foregroundStyle(Tokens.text3)
+                .padding(.trailing, 3)
             HistorySearchField(text: $settingsQuery,
                                placeholder: L("settings.search"),
                                fontSize: SettingsType.label + metrics.typeBump,
@@ -2413,7 +2414,7 @@ struct InlineSettingsView: View {
         }
         .padding(.horizontal, 10)
         .frame(height: 28)
-        .background(Capsule(style: .continuous).fill(Tokens.ink.opacity(0.06)))
+        .glassCapsule(in: Capsule(style: .continuous), brighter: !settingsQuery.isEmpty)
         .contentShape(Capsule(style: .continuous))
         .onTapGesture { settingsSearchFocus = true }
         .onExitCommand { settingsQuery = "" }
@@ -2534,11 +2535,11 @@ struct InlineSettingsView: View {
         }
     }
 
-    /// The pinned license entry: "Buy License" while this account has to buy
-    /// one, "License" once it holds one or is included.
+    /// The pinned license entry: "Activated" once this account holds a license
+    /// or is included, "License" otherwise.
     private func sidebarLicenseItem(measuring: Bool) -> some View {
         SidebarItem(
-            title: license.needsPurchase ? L("license.sidebar.buy") : L("license.label"),
+            title: license.showsHeldLicense ? L("license.state.activated") : L("license.label"),
             icon: Section.license.icon,
             selected: licenseOfferOpen,
             selection: measuring ? nil : sidebarSelection,
@@ -2546,8 +2547,7 @@ struct InlineSettingsView: View {
             isNew: false,
             claim: nil,
             claimAction: {},
-            buy: license.needsPurchase,
-            stamp: license.freeForGood || license.key != nil ? L("license.state.activated") : nil
+            buy: license.needsPurchase
         ) {
             openLicenseOffer()
         }
@@ -2620,7 +2620,7 @@ struct InlineSettingsView: View {
     private struct NotchiSidebarEyes: View {
         let size: CGFloat
         var body: some View {
-            let h = size * 0.68
+            let h = size * 0.56
             let w = h * NotchiEyeShape.aspect
             let gap = h * NotchiEyeShape.gap
             let lineWidth = max(0.95, size * 0.075)
@@ -2656,8 +2656,6 @@ struct InlineSettingsView: View {
         var claimAction: () -> Void = {}
         /// The Buy License row, in `LicenseChipSurface`.
         var buy = false
-        /// The License row once a license is held: a small Activated stamp.
-        var stamp: String? = nil
         var action: () -> Void
 
         @State private var hovering = false
@@ -2724,9 +2722,6 @@ struct InlineSettingsView: View {
                     NewBadge()
                 }
                 Spacer(minLength: 0)
-                if let stamp {
-                    SettingsBadge(text: stamp, variant: .secondary)
-                }
             }
             .padding(.horizontal, 10)
             .frame(height: 28)
@@ -2798,7 +2793,7 @@ struct InlineSettingsView: View {
             }
         }
         .frame(height: Tokens.Control.header)
-        .padding(.leading, inWindow ? Self.windowHeaderLeading - NotchBody.panelPadding : 8)
+        .padding(.leading, inWindow ? Self.windowHeaderLeading - NotchBody.panelPadding : 0)
         .padding(.trailing, 8)
         .padding(.top, inWindow ? Self.windowHeaderTop : 12)
         .padding(.bottom, 4)
@@ -11223,7 +11218,6 @@ private struct GlassMenuCard: View {
         }
         .padding(MenuCard.cardPad)
         .frame(width: width, alignment: .leading)
-        .preferredColorScheme(.dark)
         .menuCardBackground()
     }
 }

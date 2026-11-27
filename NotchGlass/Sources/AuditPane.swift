@@ -76,6 +76,7 @@ private struct AuditFlow: View {
     /// Everything the lanes draw, rebuilt only when the records, the page or
     /// the lanes' width change — never on a hover or a scroll step.
     @State private var chart = Chart.empty
+    @Environment(\.settingsWindowPaneHeight) private var windowPane
 
     init(entries: [RequestAudit.Entry], onInAppCopy: (() -> Void)?, laidOut: Bool = false) {
         self.entries = entries
@@ -218,7 +219,7 @@ private struct AuditFlow: View {
             }
             axis
             if let current {
-                AuditDetail(entry: current, onInAppCopy: onInAppCopy)
+                AuditDetail(entry: current, defaultDetailed: windowPane != nil, onInAppCopy: onInAppCopy)
             }
         }
         .accessibilityElement(children: .contain)
@@ -515,14 +516,20 @@ private struct AuditDetail: View {
     let entry: RequestAudit.Entry
     let onInAppCopy: (() -> Void)?
 
-    /// Whether the secondary half is unfolded. Closed by default: the facts that
-    /// matter for every request are on screen, the rest is one click away instead
-    /// of competing with them.
-    @State private var detailed = false
+    /// Whether the secondary half is unfolded. Expanded by default in the full
+    /// Settings window where there is room; closed by default in the compact
+    /// notch panel.
+    @State private var detailed: Bool
     @State private var hoveringDetails = false
     /// The payload of `entry`, read from disk while Details is open: the
     /// whole of it for Copy, and the capped copy the block shows.
     @State private var payload: AuditPayload?
+
+    init(entry: RequestAudit.Entry, defaultDetailed: Bool = false, onInAppCopy: (() -> Void)?) {
+        self.entry = entry
+        self.onInAppCopy = onInAppCopy
+        self._detailed = State(initialValue: defaultDetailed)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {

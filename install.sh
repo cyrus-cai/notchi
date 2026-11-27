@@ -25,19 +25,13 @@ command -v curl >/dev/null 2>&1 || die "curl is required but not found."
 
 # --- find the latest release asset -----------------------------------------
 info "Looking up the latest release of ${REPO}…"
-api="https://api.github.com/repos/${REPO}/releases/latest"
-release_json="$(curl -fsSL "$api")" || die "Could not reach the GitHub API."
-
-# Pull the first .zip browser_download_url out of the release JSON (no jq dependency).
-asset_url="$(printf '%s' "$release_json" \
-  | grep -o '"browser_download_url": *"[^"]*\.zip"' \
-  | head -n1 \
-  | sed -E 's/.*"(https[^"]+)".*/\1/')"
-
-tag="$(printf '%s' "$release_json" \
-  | grep -o '"tag_name": *"[^"]*"' \
-  | head -n1 \
-  | sed -E 's/.*"([^"]+)".*/\1/')"
+# Read the tag from the /releases/latest redirect instead of the REST API:
+# the API allows 60 anonymous requests an hour per IP and answers 403 past that.
+latest_url="$(curl -fsSIL -o /dev/null -w '%{url_effective}' "https://github.com/${REPO}/releases/latest")" \
+  || die "Could not reach GitHub."
+tag="${latest_url##*/tag/}"
+case "$tag" in v[0-9]*) ;; *) die "No published release found." ;; esac
+asset_url="https://github.com/${REPO}/releases/download/${tag}/Notchi-${tag}.zip"
 
 [ -n "$asset_url" ] || die "No .zip asset found on the latest release. Has one been published yet?"
 ok "Found ${tag:-latest}: $(basename "$asset_url")"

@@ -125,6 +125,19 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.9.49",
+            date: "2026-11-27",
+            improvements: [
+                "Refined the Settings sidebar with a Liquid Glass search box, aligned left edges across the header and navigation, a slightly smaller About icon, and a cleaner Activated label once licensed.",
+                "Audit now opens with Details expanded by default in the full Settings window.",
+            ],
+            fixes: [
+                "Fixed Settings dropdown menus staying dark in Light Mode.",
+                "Fixed inverted eye colors on the License passport cover and inner page in Light Mode.",
+                "Fixed the curl and npx installers hitting GitHub API rate limits (403) when resolving the latest release.",
+            ]
+        ),
+        Entry(
             version: "0.9.48",
             date: "2026-11-27",
             features: [

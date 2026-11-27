@@ -1063,8 +1063,6 @@ struct LicenseOfferCard: View {
             // The website hero's mark: Notchi's eyes running through every form.
             TiltingMark(pointer: markPointer) {
                 NotchiMark(mood: .waiting, eyeHeight: 30, shared: markDirector)
-                    // The eyes are light ink; on the light card they read dark.
-                    .modifier(LightInvert(on: colorScheme == .light))
             }
             .padding(.bottom, 28)
             if license.freeForGood {
@@ -1613,6 +1611,7 @@ private struct PassportCover: View {
                                lineWidth: 0.75)
             VStack(spacing: compact ? 14 : 22) {
                 NotchiMark(mood: .waiting, eyeHeight: compact ? 26 : 40, shared: nil)
+                    .environment(\.colorScheme, .dark)
                 Text(verbatim: "Notchi License")
                     .font(.brand(18))
                     .foregroundStyle(.white)
@@ -1974,7 +1973,6 @@ struct SettingsPassport: View {
     private var leftPage: some View {
         VStack(spacing: 18) {
             NotchiMark(mood: .waiting, eyeHeight: 22, shared: nil)
-                .modifier(LightInvert(on: colorScheme == .light))
             if let keyText {
                 Button(action: onKey) {
                     Text(keyText)
@@ -2063,14 +2061,6 @@ private struct TiltingMark<Content: View>: View {
                     .animation(.spring(response: 0.5, dampingFraction: 0.75), value: pointer)
             }
         }
-    }
-}
-
-/// Inverts the content's colors in light mode.
-private struct LightInvert: ViewModifier {
-    let on: Bool
-    func body(content: Content) -> some View {
-        if on { content.colorInvert() } else { content }
     }
 }
 
