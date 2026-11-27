@@ -567,7 +567,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         model.unfoldCardOnThread = { [weak self] id, live in
             guard let self else { return false }
             self.openWithoutKey = true
-            self.openMenuBarCard { live ? $0.openLoopThread(id: id) : $0.openCardThread(id: id) }
+            self.openMenuBarCard { $0.openThreadFromNotification(id: id, live: live) }
             self.openWithoutKey = false
             return self.model.open
         }
@@ -1302,7 +1302,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     } else if let display {
                         self.model.activeDisplay = display
                     }
-                    self.model.openThread(id: id)
+                    self.model.openThreadFromNotification(id: id)
                 }
             }
         }
@@ -1348,7 +1348,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         self.model.activeDisplay = display
                     }
                     if let id = note.userInfo?[NotificationService.threadIDKey] as? UUID {
-                        self.model.openThread(id: id)
+                        self.model.openThreadFromNotification(id: id)
                     }
                 }
             }
@@ -2396,6 +2396,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             ))
 
         let hosting = FirstMouseHostingView(rootView: root)
+        hosting.appearance = panel.appearance
         hosting.frame = rect
         // Let clicks pass through the transparent canvas to apps underneath;
         // only the glass form itself is interactive.
@@ -2721,14 +2722,9 @@ enum DisplayPlacement: String, CaseIterable, Identifiable {
 /// (The built-in display's hardware notch is physical and always there, so this
 /// only governs the drawn island on external / non-notched screens.)
 enum HideNotchInFullscreen {
-    private static let key = "hideNotchInExternalFullscreen"
-
-    /// Default `true` (auto-hide). An absent key ⇒ the on-by-default; only an
-    /// explicit stored value overrides it.
-    static var isEnabled: Bool {
-        get { UserDefaults.standard.object(forKey: key) as? Bool ?? true }
-        set { UserDefaults.standard.set(newValue, forKey: key) }
-    }
+    /// Always on: the island hides while a full-screen app covers an
+    /// external display. Settings no longer offers the switch.
+    static let isEnabled = true
 }
 
 /// How eagerly the resting notch unfurls under the pointer — persisted in

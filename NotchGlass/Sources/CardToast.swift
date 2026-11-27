@@ -325,7 +325,7 @@ private struct ScreenPermissionGuideView: View {
         ZStack(alignment: .topTrailing) {
             if state.granted {
                 VStack(spacing: 8) {
-                    Image(systemName: "checkmark.circle.fill")
+                    Image(icon: "checkmark.circle.fill")
                         .font(.system(size: 28))
                         .foregroundStyle(.green)
                     Text(L("permissions.status.granted"))
@@ -356,7 +356,7 @@ private struct ScreenPermissionGuideView: View {
             }
 
             Button(action: onClose) {
-                Image(systemName: "xmark")
+                Image(icon: "xmark")
                     .font(.system(size: 10, weight: .medium))
                     .foregroundStyle(.secondary)
                     .frame(width: 22, height: 22)

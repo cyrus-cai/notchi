@@ -173,7 +173,7 @@ private struct ConnectorTableRow: View {
                             auth.disconnect(connector)
                         }
                     } else {
-                        Image(systemName: "checkmark")
+                        Image(icon: "checkmark")
                             .font(.system(size: 13, weight: .regular))
                             .foregroundStyle(Tokens.text2)
                             .padding(.trailing, 10)
@@ -232,6 +232,7 @@ struct InlineSettingsView: View {
     /// Respected wherever this pane animates a size or a position rather than a
     /// colour — the balance block's stepper unfolding, chiefly.
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.colorScheme) private var colorScheme
     /// The pane height when Settings is hosted in its own window
     /// (`SettingsWindowController`); nil inside the panel.
     @Environment(\.settingsWindowPaneHeight) private var windowPaneHeight
@@ -534,7 +535,6 @@ struct InlineSettingsView: View {
         case balances = "Balances" // Blend1 gifts and purchases — reached from the wallet's links
         case privacy = "Privacy" // what happens to a Blend1 request — reached from the wallet's links
         case pages = "Pages"     // Notchi pages (*.notch.website) — reached from Chat
-        case clipboard = "Clipboard" // saved copies (`ClipboardHistory`) — reached from Memory
         case whatsNew = "WhatsNew" // the release notes — reached from About
         var id: String { rawValue }
 
@@ -549,7 +549,7 @@ struct InlineSettingsView: View {
         /// across the whole panel, and left through the header's back pill or Esc.
         var isDetail: Bool {
             self == .licenses || self == .survey || self == .usage || self == .pricing || self == .balances
-                || self == .privacy || self == .pages || self == .whatsNew || self == .clipboard
+                || self == .privacy || self == .pages || self == .whatsNew
         }
 
         /// The section a sub-page sits under — where back (and ⎋) returns to.
@@ -559,7 +559,6 @@ struct InlineSettingsView: View {
             case .licenses, .survey, .whatsNew: return .about
             case .usage, .pricing, .balances, .privacy: return .model
             case .pages:  return .chat
-            case .clipboard: return .memories
             default:               return nil
             }
         }
@@ -582,32 +581,328 @@ struct InlineSettingsView: View {
             (nil, [.stats, .about]),
         ]
 
-        /// The sidebar label, localized. The raw value stays English (a stable
-        /// identity); this is what the user actually reads.
-        var title: String {
+        /// The sidebar row's glyph.
+        var icon: PhosphorIcons.Mark {
             switch self {
-            case .model:      return L("sidebar.model")
-            case .chat:       return L("sidebar.chat")
-            case .connect:    return L("connect.connectors")
-            case .channels:   return L("connect.channels")
-            case .memories:   return L("memory.title")
-            case .general:    return L("sidebar.general")
-            case .shortcuts:  return L("sidebar.shortcuts")
-            case .appearance: return L("sidebar.appearance")
-            case .stats:      return L("sidebar.audit")
-            case .license:    return L("license.label")
-            case .about:      return L("sidebar.about")
-            case .licenses:   return L("about.licenses")
-            case .survey:     return L("survey.title")
-            case .usage:      return L("model.usage")
-            case .pricing:    return L("model.pricing")
-            case .balances:   return L("nono.balances")
-            case .privacy:    return L("nono.privacy.title")
-            case .pages:      return L("pages.title")
-            case .clipboard:  return L("clipboardHistory.title")
-            case .whatsNew:   return L("whatsnew.title")
+            case .model:      return PhosphorIcons.codeXml
+            case .chat:       return PhosphorIcons.messageCircle
+            case .memories:   return PhosphorIcons.brain
+            case .general:    return PhosphorIcons.settings
+            case .appearance: return PhosphorIcons.palette
+            case .shortcuts:  return PhosphorIcons.command
+            case .connect:    return PhosphorIcons.plugs
+            case .channels:   return PhosphorIcons.paperPlane
+            case .stats:      return PhosphorIcons.chartNoAxesColumn
+            case .about:      return PhosphorIcons.userSound
+            case .license:    return PhosphorIcons.key
+            default:          return PhosphorIcons.settings
             }
         }
+
+        /// Localization keys of the rows and headings on this pane, for the
+        /// sidebar search.
+        var searchKeys: [String] {
+            switch self {
+            case .model:
+                return ["nono.credit", "model.byok", "model.provider", "model.label", "model.keys.section",
+                        "decision.title", "sidebar.search", "search.backend"]
+            case .chat:
+                return ["general.customInstructions", "chat.suggestFollowUp", "proactive.title",
+                        "pages.title", "capture.sources", "general.copySense"]
+            case .memories:
+                return ["memory.toggle", "memory.manage", "clipboardHistory.toggle",
+                        "clipboardHistory.retention", "clipboardHistory.title"]
+            case .general:
+                return ["general.appLanguage", "general.launchAtLogin", "general.appPresence",
+                        "appearance.appIcon", "general.dockIcon.toggle", "general.noteDestination",
+                        "permissions.title", "general.advanced", "network.proxy"]
+            case .appearance:
+                return ["general.hoverSensitivity", "general.forceClickPressure",
+                        "appearance.showOn",
+                        "general.menuBarIcon",
+                        "menuBarCard.position", "general.jevAutoPin",
+                        "messageSounds"]
+            case .shortcuts:
+                return ["shortcuts.summon", "shortcuts.card", "shortcuts.screenshotGlobal",
+                        "shortcuts.send", "shortcuts.cycleIntent", "shortcuts.recall",
+                        "screenshot.destination", "shortcuts.slash", "shortcuts.copyAnswer", "shortcuts.pin",
+                        "shortcuts.newChat", "shortcuts.picker"]
+            case .channels:
+                return ["telegram.title", "signal.title", "telegram.lid"]
+            case .about:
+                return ["whatsnew.title", "about.licenses"]
+            default:
+                return []
+            }
+        }
+
+        /// Synonyms and related terms across languages for this category.
+        var searchAliases: [String] {
+            switch self {
+            case .model:
+                return ["ai", "llm", "gpt", "claude", "gemini", "deepseek", "openrouter", "openai", "anthropic",
+                        "byok", "token", "billing", "credit", "balance", "top up", "pay", "wallet", "pricing", "usage",
+                        "web search",
+                        "模型", "供应商", "密钥", "余额", "充值", "账单", "费用", "价格", "用量", "联网",
+                        "供應商", "金鑰", "餘額", "帳單", "聯網",
+                        "モデル", "プロバイダ", "残高", "課金", "料金",
+                        "모델", "잔액", "결제", "요금",
+                        "modèle", "crédit", "solde", "facturation",
+                        "modelo", "crédito", "saldo", "facturación"]
+            case .chat:
+                return ["conversation", "prompt", "system prompt", "instructions", "persona", "tone", "style",
+                        "follow up", "suggest", "proactive", "website", "publish", "capture", "context", "copy",
+                        "对话", "聊天", "提示词", "指令", "风格", "追问", "主动", "网页", "上下文", "复制",
+                        "對話", "提示詞", "風格", "網頁", "複製",
+                        "チャット", "プロンプト", "指示", "フォローアップ",
+                        "채팅", "대화", "프롬프트", "지시",
+                        "discussion", "instructions", "invites",
+                        "conversación", "instrucciones"]
+            case .memories:
+                return ["memory", "remember", "forget", "profile", "about me", "clipboard", "copy history",
+                        "paste", "pasteboard", "retention", "expire", "auto delete",
+                        "记忆", "记住", "遗忘", "剪贴板", "复制历史", "粘贴", "保留", "清理",
+                        "記憶", "記住", "遺忘", "剪貼簿", "複製歷史", "貼上",
+                        "メモリ", "記憶", "クリップボード", "コピー履歴",
+                        "메모리", "기억", "클립보드", "복사 기록",
+                        "mémoire", "presse-papiers", "historique",
+                        "memoria", "portapapeles", "historial"]
+            case .general:
+                return ["language", "locale", "startup", "boot", "autostart", "login", "icon", "dock",
+                        "notes", "obsidian", "markdown", "permission", "privacy", "accessibility", "tcc",
+                        "proxy", "http", "socks", "vpn", "network", "advanced",
+                        "通用", "语言", "开机", "自启", "图标", "程序坞", "笔记", "权限", "隐私", "代理", "网络", "高级",
+                        "一般", "語言", "開機", "圖示", "筆記", "權限", "隱私", "網路", "進階",
+                        "一般", "言語", "起動", "ログイン", "権限", "プロキシ", "ネットワーク",
+                        "일반", "언어", "시작", "로그인", "권한", "프록시", "네트워크",
+                        "général", "langue", "démarrage", "autorisations", "réseau",
+                        "general", "idioma", "inicio", "permisos", "red"]
+            case .appearance:
+                return ["theme", "display", "screen", "monitor", "notch", "island", "hover", "mouse",
+                        "trackpad", "force click", "pressure", "haptic", "menubar", "status bar",
+                        "card", "position", "pin", "sound", "audio", "sfx", "mute", "chime",
+                        "外观", "显示", "屏幕", "显示器", "刘海", "悬停", "灵敏度", "按压", "触控板", "菜单栏", "位置", "置顶", "声音", "音效", "静音",
+                        "外觀", "顯示", "螢幕", "顯示器", "瀏海", "懸停", "靈敏度", "選單列", "聲音", "靜音",
+                        "外観", "ディスプレイ", "画面", "ノッチ", "メニューバー", "サウンド", "音", "消音",
+                        "외관", "화면", "디스플레이", "메뉴 막대", "소리", "사운드", "음소거",
+                        "apparence", "écran", "barre des menus", "son", "muet",
+                        "apariencia", "pantalla", "barra de menús", "sonido", "silencio"]
+            case .shortcuts:
+                return ["hotkey", "keybind", "keyboard", "key", "shortcut", "trigger", "summon",
+                        "screenshot", "capture", "send", "enter", "return", "slash", "command",
+                        "快捷键", "热键", "按键", "键盘", "唤起", "截图", "发送", "命令",
+                        "快捷鍵", "捷徑", "熱鍵", "按鍵", "鍵盤", "截圖",
+                        "ショートカット", "ホットキー", "キーボード", "スクリーンショット",
+                        "단축키", "키보드", "스크린샷",
+                        "raccourci", "raccourcis", "clavier", "capture",
+                        "atajo", "atajos", "teclado", "captura"]
+            case .connect:
+                return ["connector", "mcp", "integration", "plugin", "tool", "google", "gmail",
+                        "calendar", "drive", "slack", "notion", "linear", "github", "figma", "outlook", "oauth",
+                        "连接器", "集成", "插件", "工具", "第三方", "授权",
+                        "連接器", "外掛", "授權",
+                        "コネクタ", "プラグイン", "連携", "ツール",
+                        "커넥터", "플러그인", "연동", "도구",
+                        "connecteur", "connecteurs", "extension", "outils",
+                        "conector", "conectores", "complemento", "herramientas"]
+            case .channels:
+                return ["channel", "bot", "remote", "mobile", "phone", "telegram", "tg", "signal",
+                        "awake", "caffeinate", "sleep", "lid", "clamshell",
+                        "频道", "通道", "机器人", "远程", "手机", "防休眠", "合盖", "唤醒",
+                        "頻道", "機器人", "遠端", "防休眠",
+                        "チャンネル", "ボット", "スリープ",
+                        "채널", "봇", "잠자기",
+                        "canal", "canaux", "veille",
+                        "canal", "canales", "reposo"]
+            case .stats:
+                return ["stats", "statistics", "audit", "log", "history", "token", "cost", "spend",
+                        "chart", "heatmap", "activity", "request", "usage",
+                        "统计", "审计", "日志", "花费", "开销", "记录", "请求", "用量",
+                        "統計", "稽核", "日誌", "花費", "記錄",
+                        "統計", "監査", "ログ", "履歴", "使用量",
+                        "통계", "감사", "로그", "기록", "사용량",
+                        "statistiques", "journal", "historique",
+                        "estadísticas", "registro", "historial"]
+            case .about:
+                return ["about", "version", "update", "upgrade", "changelog", "release notes",
+                        "whats new", "license", "open source", "feedback", "survey",
+                        "关于", "版本", "更新", "升级", "更新日志", "开源", "协议", "反馈",
+                        "關於", "升級", "更新日誌", "開源", "回饋",
+                        "バージョン", "アップデート", "更新", "リリースノート", "ライセンス",
+                        "정보", "버전", "업데이트", "라이선스",
+                        "à propos", "version", "mise à jour", "licence",
+                        "acerca de", "versión", "actualización", "licencia"]
+            default:
+                return []
+            }
+        }
+
+        /// Localized strings for every settings search key across ALL shipped
+        /// locales, built once so a query in any language finds the same item.
+        static let allLocaleStrings: [String: [String]] = {
+            var keys = Set<String>()
+            for s in Section.sidebarCases {
+                keys.insert(s.titleKey)
+                keys.formUnion(s.searchKeys)
+            }
+            let locales: [Localization.Locale] = [.en, .zhHans, .zhHant, .ja, .ko, .fr, .es]
+            var result: [String: [String]] = [:]
+            for locale in locales {
+                let table = Strings.table(for: locale)
+                for key in keys {
+                    guard let value = table[key], !value.isEmpty else { continue }
+                    if result[key]?.contains(value) != true {
+                        result[key, default: []].append(value)
+                    }
+                }
+            }
+            return result
+        }()
+
+        /// Synonyms and related terms for individual setting rows.
+        static func searchAliases(for key: String) -> [String] {
+            switch key {
+            case "nono.credit":
+                return ["pay as you go", "balance", "credit", "wallet", "top up", "billing", "pricing", "usage",
+                        "余额", "充值", "按量付费", "账单", "费用"]
+            case "model.byok":
+                return ["byok", "api key", "own key", "custom key", "自带", "密钥"]
+            case "model.provider":
+                return ["vendor", "openai", "anthropic", "claude", "gemini", "deepseek", "openrouter", "ollama",
+                        "供应商", "提供商", "厂商"]
+            case "model.label":
+                return ["llm", "ai", "gpt", "claude", "gemini", "deepseek", "模型"]
+            case "model.keys.section":
+                return ["key", "secret", "token", "credential", "api", "密钥", "令牌"]
+            case "decision.title":
+                return ["jev", "router", "fast model", "small model", "决策", "路由"]
+            case "sidebar.search", "search.backend":
+                return ["web", "internet", "online", "exa", "keenable", "anysearch", "google", "search engine",
+                        "联网", "网页搜索", "搜索引擎"]
+            case "general.customInstructions":
+                return ["system prompt", "prompt", "persona", "tone", "style", "instructions", "custom",
+                        "提示词", "自定义指令", "回答偏好", "风格"]
+            case "chat.suggestFollowUp":
+                return ["follow up", "next", "suggestions", "追问", "建议"]
+            case "proactive.title":
+                return ["proactive", "nudge", "auto message", "greeting", "notify", "主动消息", "主动提醒"]
+            case "pages.title":
+                return ["website", "publish", "web page", "share", "html", "网页", "发布", "页面"]
+            case "capture.sources":
+                return ["context", "screen", "window", "browser", "app", "来源", "上下文", "捕获"]
+            case "general.copySense":
+                return ["copy", "clipboard", "paste", "selection", "smart copy", "复制建议", "剪贴板"]
+            case "memory.toggle":
+                return ["remember", "memory", "profile", "about me", "learn", "记忆", "记住"]
+            case "memory.manage":
+                return ["edit memory", "delete memory", "forget", "folder", "files", "管理记忆", "遗忘", "删除记忆"]
+            case "clipboardHistory.toggle":
+                return ["clipboard", "copy history", "pasteboard", "剪贴板", "复制历史"]
+            case "clipboardHistory.retention":
+                return ["expire", "days", "auto delete", "clean", "keep", "retention", "保留", "自动删除", "过期"]
+            case "clipboardHistory.title":
+                return ["clipboard", "copies", "paste", "history", "剪贴板历史", "复制记录"]
+            case "general.appLanguage":
+                return ["language", "locale", "english", "chinese", "japanese", "korean", "translation",
+                        "语言", "中文", "英文", "翻译"]
+            case "general.launchAtLogin":
+                return ["startup", "autostart", "boot", "login", "开机", "自启", "启动"]
+            case "general.appPresence":
+                return ["dock", "menubar", "icon", "hide", "visibility", "图标", "显示"]
+            case "appearance.appIcon":
+                return ["logo", "icon", "badge", "应用图标"]
+            case "general.dockIcon.toggle":
+                return ["dock", "hide dock", "程序坞", "底部栏"]
+            case "general.noteDestination":
+                return ["notes", "apple notes", "obsidian", "markdown", "folder", "save", "笔记", "保存位置"]
+            case "permissions.title":
+                return ["privacy", "accessibility", "screen recording", "calendar", "reminders",
+                        "contacts", "mail", "photos", "location", "tcc", "权限", "隐私", "辅助功能", "录屏"]
+            case "general.advanced":
+                return ["network", "proxy", "debug", "高级"]
+            case "network.proxy":
+                return ["http", "https", "socks", "socks5", "vpn", "clash", "surge", "代理", "翻墙", "网络"]
+            case "general.hoverSensitivity":
+                return ["hover", "mouse", "cursor", "notch", "trigger", "delay", "悬停", "灵敏度", "鼠标"]
+            case "general.forceClickPressure":
+                return ["force touch", "trackpad", "pressure", "press", "hold", "haptic", "按压", "触控板", "力度"]
+            case "appearance.showOn":
+                return ["monitor", "display", "screen", "external", "multi monitor", "显示器", "屏幕", "多屏"]
+            case "general.menuBarIcon":
+                return ["menubar", "status bar", "top bar", "notch", "菜单栏", "状态栏"]
+            case "menuBarCard.position":
+                return ["card", "corner", "top right", "placement", "location", "卡片位置", "弹窗位置"]
+            case "general.jevAutoPin":
+                return ["pin", "sticky", "stay open", "keep open", "自动置顶", "固定"]
+            case "messageSounds":
+                return ["sound", "audio", "sfx", "chime", "mute", "volume", "notification", "声音", "音效", "提示音", "静音"]
+            case "shortcuts.summon":
+                return ["open", "toggle", "hotkey", "launch", "唤起", "打开", "快捷键"]
+            case "shortcuts.card":
+                return ["panel", "top right", "card", "面板", "卡片"]
+            case "shortcuts.screenshotGlobal":
+                return ["screenshot", "capture", "snip", "screen", "截图", "截屏"]
+            case "shortcuts.send":
+                return ["enter", "return", "submit", "发送", "回车"]
+            case "shortcuts.cycleIntent":
+                return ["ask", "note", "remind", "mode", "switch", "切换", "模式"]
+            case "shortcuts.recall":
+                return ["history", "previous", "up arrow", "past", "历史", "上一条"]
+            case "screenshot.destination":
+                return ["screenshot", "save", "clipboard", "target", "截图目标"]
+            case "shortcuts.slash":
+                return ["command", "menu", "slash", "命令菜单", "斜杠"]
+            case "shortcuts.copyAnswer":
+                return ["copy", "clipboard", "复制回答"]
+            case "shortcuts.pin":
+                return ["pin", "sticky", "keep open", "置顶", "固定"]
+            case "shortcuts.newChat":
+                return ["new", "clear", "reset", "fresh", "新对话", "新建"]
+            case "shortcuts.picker":
+                return ["model", "agent", "switch", "选择模型", "切换模型"]
+            case "telegram.title":
+                return ["tg", "bot", "telegram", "电报", "机器人"]
+            case "signal.title":
+                return ["signal", "chat", "messenger"]
+            case "telegram.lid":
+                return ["awake", "caffeinate", "sleep", "clamshell", "closed", "防休眠", "合盖", "保持唤醒"]
+            case "whatsnew.title":
+                return ["changelog", "release notes", "updates", "version", "更新日志", "新功能"]
+            case "about.licenses":
+                return ["open source", "attribution", "credits", "开源", "许可"]
+            default:
+                return []
+            }
+        }
+
+        /// Localization key for `title`, used to look up English fallback text during search.
+        var titleKey: String {
+            switch self {
+            case .model:      return "sidebar.model"
+            case .chat:       return "sidebar.chat"
+            case .connect:    return "connect.connectors"
+            case .channels:   return "connect.channels"
+            case .memories:   return "memory.title"
+            case .general:    return "sidebar.general"
+            case .shortcuts:  return "sidebar.shortcuts"
+            case .appearance: return "sidebar.appearance"
+            case .stats:      return "sidebar.audit"
+            case .license:    return "license.label"
+            case .about:      return "sidebar.about"
+            case .licenses:   return "about.licenses"
+            case .survey:     return "survey.title"
+            case .usage:      return "model.usage"
+            case .pricing:    return "model.pricing"
+            case .balances:   return "nono.balances"
+            case .privacy:    return "nono.privacy.title"
+            case .pages:      return "pages.title"
+            case .whatsNew:   return "whatsnew.title"
+            }
+        }
+
+        /// The sidebar label, localized. The raw value stays English (a stable
+        /// identity); this is what the user actually reads.
+        var title: String { L(titleKey) }
     }
     /// The open category, backed by `model.settingsSection` (not plain `@State`)
     /// so an App Language switch — which rebuilds this whole subtree via the
@@ -663,10 +958,6 @@ struct InlineSettingsView: View {
     /// `NotchModel.hoverEntered`, so a change applies to the very next hover.
     @State private var hoverSensitivity: HoverSensitivity = .current
 
-    /// Whether the island auto-hides while a full-screen app covers its screen —
-    /// mirrors the persisted value; writes go through `selectHideInFullscreen`,
-    /// which nudges `AppDelegate` to re-evaluate immediately.
-    @State private var hideInFullscreen: Bool = HideNotchInFullscreen.isEnabled
 
     /// Which classifier Copy Sense asks (on-device / Jev) — mirrors the
     /// persisted value; writes go through `selectCopySenseEngine`. Read per
@@ -754,6 +1045,15 @@ struct InlineSettingsView: View {
     @State private var paneDirection: CGFloat = 1
     /// Shared by the sidebar rows so the selection capsule slides between them.
     @Namespace private var sidebarSelection
+    /// The sidebar's search text.
+    @State private var settingsQuery = ""
+    @State private var settingsSearchFocus = false
+    /// Key of the setting row currently highlighted after picking a search hit.
+    @State private var highlightedSearchKey: String? = nil
+    /// Key waiting for `ScrollViewReader` to scroll into view.
+    @State private var pendingScrollKey: String? = nil
+    /// Cancels an earlier highlight fade-out when another search hit is picked.
+    @State private var searchHighlightToken = UUID()
 
     /// Whether the General pane's folded Advanced block is open.
     @State private var advancedSectionOpen = false
@@ -857,11 +1157,11 @@ struct InlineSettingsView: View {
                             if inWindow {
                                 GeometryReader { g in
                                     let top = g.frame(in: .global).minY
-                                    UnevenRoundedRectangle(topLeadingRadius: 12,
+                                    UnevenRoundedRectangle(topLeadingRadius: 20,
                                                            style: .continuous)
                                         .fill(Tokens.adaptive(dark: .black.withAlphaComponent(0.3), light: .white.withAlphaComponent(0.55)))
                                         .overlay {
-                                            UnevenRoundedRectangle(topLeadingRadius: 12,
+                                            UnevenRoundedRectangle(topLeadingRadius: 20,
                                                                    style: .continuous)
                                                 .strokeBorder(Tokens.ink.opacity(0.07), lineWidth: 1)
                                         }
@@ -885,7 +1185,7 @@ struct InlineSettingsView: View {
                 .fixedSize(horizontal: false, vertical: true)
                 // Columns sit on the panel's own gutter, so the selected
                 // category capsule shares its left edge with the back pill.
-                .padding(.top, 12)
+                .padding(.top, inWindow ? 12 : 0)
                 // Pushing a sub-page drops the columns at once instead of
                 // fading them: while they faded, the panel re-laid out under
                 // them and the category column visibly lurched right for a
@@ -1310,52 +1610,62 @@ struct InlineSettingsView: View {
     /// Connectors pane with category tabs pinned at the top while the connector
     /// rows scroll underneath with edge fade.
     private var stickyConnectorsPane: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            VStack(alignment: .leading, spacing: metrics.rowSpacing) {
-                if inWindow {
-                    StandaloneWindowTitle(text: section.title)
+        GeometryReader { viewport in
+            let innerWidth: CGFloat? = viewport.size.width > 0
+                ? max(0, viewport.size.width - metrics.paneSideInset * 2)
+                : nil
+            let columnWidth: CGFloat? = {
+                guard let innerWidth else { return metrics.contentMaxWidth }
+                if let cap = metrics.contentMaxWidth { return min(innerWidth, cap) }
+                return innerWidth
+            }()
+            VStack(alignment: .leading, spacing: 0) {
+                VStack(alignment: .leading, spacing: metrics.rowSpacing) {
+                    if inWindow {
+                        StandaloneWindowTitle(text: section.title)
+                    }
+                    connectorCategoryTabs
                 }
-                connectorCategoryTabs
-            }
-            .frame(maxWidth: metrics.contentMaxWidth, alignment: .topLeading)
-            .frame(maxWidth: .infinity, alignment: inWindow ? .top : .topLeading)
-            .padding(.top, metrics.paneTopRunway)
-            .padding(.bottom, 8)
-            .padding(.horizontal, metrics.paneSideInset)
+                .frame(width: columnWidth, alignment: .topLeading)
+                .frame(width: innerWidth, alignment: inWindow ? .top : .topLeading)
+                .padding(.top, metrics.paneTopRunway)
+                .padding(.bottom, 8)
+                .padding(.horizontal, metrics.paneSideInset)
 
-            ScrollView {
-                VStack(alignment: .leading, spacing: 4) {
-                    ForEach(MCPConnector.connectors(in: activeConnectorCategory)) { connector in
-                        ConnectorTableRow(connector: connector, auth: connectorAuth, hub: mcp) {
-                            connectorAuth.requestConnect(connector)
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 4) {
+                        ForEach(MCPConnector.connectors(in: activeConnectorCategory)) { connector in
+                            ConnectorTableRow(connector: connector, auth: connectorAuth, hub: mcp) {
+                                connectorAuth.requestConnect(connector)
+                            }
                         }
                     }
-                }
-                .animation(.easeOut(duration: 0.18), value: activeConnectorCategory)
-                .frame(maxWidth: metrics.contentMaxWidth, alignment: .topLeading)
-                .frame(maxWidth: .infinity, alignment: inWindow ? .top : .topLeading)
-                .background(
-                    GeometryReader { g in
-                        Color.clear.preference(key: PaneContentHeightKey.self, value: g.size.height)
+                    .animation(.easeOut(duration: 0.18), value: activeConnectorCategory)
+                    .frame(width: columnWidth, alignment: .topLeading)
+                    .frame(width: innerWidth, alignment: inWindow ? .top : .topLeading)
+                    .background(
+                        GeometryReader { g in
+                            Color.clear.preference(key: PaneContentHeightKey.self, value: g.size.height)
+                        }
+                    )
+                    .padding(.top, 2)
+                    .padding(.bottom, 20)
+                    .padding(.horizontal, metrics.paneSideInset)
+                    .onScrollOffsetChange { offset in
+                        let off = offset > 0.5
+                        if off != paneScrolledOffTop { paneScrolledOffTop = off }
                     }
-                )
-                .padding(.top, 2)
-                .padding(.bottom, 20)
-                .padding(.horizontal, metrics.paneSideInset)
-                .onScrollOffsetChange { offset in
-                    let off = offset > 0.5
-                    if off != paneScrolledOffTop { paneScrolledOffTop = off }
                 }
+                .id(activeConnectorCategory)
+                .scrollIndicators(.never)
+                .onPreferenceChange(PaneContentHeightKey.self) { height in
+                    let headerBudget: CGFloat = metrics.paneTopRunway + 38 + (inWindow ? 40 : 0)
+                    let over = height > settingsPaneHeight - headerBudget + 0.5
+                    if over != paneOverflows { paneOverflows = over }
+                }
+                .scrollEdgeFade(top: paneScrolledOffTop, bottom: paneOverflows,
+                                topFade: 18, bottomFade: 32)
             }
-            .id(activeConnectorCategory)
-            .scrollIndicators(.never)
-            .onPreferenceChange(PaneContentHeightKey.self) { height in
-                let headerBudget: CGFloat = metrics.paneTopRunway + 38 + (inWindow ? 40 : 0)
-                let over = height > settingsPaneHeight - headerBudget + 0.5
-                if over != paneOverflows { paneOverflows = over }
-            }
-            .scrollEdgeFade(top: paneScrolledOffTop, bottom: paneOverflows,
-                            topFade: 18, bottomFade: 32)
         }
         .frame(height: settingsPaneHeight, alignment: .topLeading)
         .onChange(of: activeConnectorCategory) {
@@ -1372,7 +1682,24 @@ struct InlineSettingsView: View {
         // the value it was built with, so its preference callbacks can tell they
         // no longer speak for the open pane.
         let pane = section
-        ScrollViewReader { proxy in
+        GeometryReader { viewport in
+            // Lock the scroll content's width to the viewport so no single wide
+            // row (a long pasted key, a multi-button control row) can ever stretch
+            // the VStack past the pane edge and push sibling rows off-screen.
+            // In the panel, the GeometryReader itself bleeds 8pt left & right
+            // (so `scrollEdgeFade`'s mask never clips search highlights), and
+            // `sideInset` restores the exact column width inside the ScrollView.
+            let sideInset = metrics.paneSideInset + (inWindow ? 0 : 8)
+            let innerWidth: CGFloat? = viewport.size.width > 0
+                ? max(0, viewport.size.width - sideInset * 2)
+                : nil
+            let columnWidth: CGFloat? = {
+                guard let innerWidth else { return section.fillsWindowWidth ? nil : metrics.contentMaxWidth }
+                if section.fillsWindowWidth { return innerWidth }
+                if let cap = metrics.contentMaxWidth { return min(innerWidth, cap) }
+                return innerWidth
+            }()
+            ScrollViewReader { proxy in
             // The outgoing and incoming panes overlap here for the length of the
             // switch. Without this stack they were laid out side by side in the
             // columns' HStack, which widened the columns and pushed both of them
@@ -1391,6 +1718,7 @@ struct InlineSettingsView: View {
                 // it pays for the billed models, which the purchase does not
                 // cover. It is there whichever backend is selected.
                 nonoAccountRow
+                    .searchTarget("nono.credit", active: highlightedSearchKey)
                 // Everything you bring yourself, outside the card and unadorned,
                 // in the order you set it up: which backend answers, which of
                 // its models (only once it can answer), and the key that lets
@@ -1399,20 +1727,26 @@ struct InlineSettingsView: View {
                 // group as the alternative to the wallet above.
                 Text(L("model.byok"))
                     .settingsHeading()
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .searchTarget("model.byok", active: highlightedSearchKey)
                     .padding(.top, metrics.groupHeadingGap)
                 providerRow
+                    .searchTarget("model.provider", active: highlightedSearchKey)
                 // A model list for a provider that cannot answer yet is a choice
                 // with nothing behind it; it appears once the key or sign-in lands.
                 if providerReady(provider) {
                     modelRow
+                        .searchTarget("model.label", active: highlightedSearchKey)
                 }
                 keySection
+                    .searchTarget("model.keys.section", active: highlightedSearchKey)
                 // The model behind the small yes/no calls, beside the other
                 // "which model, whose key" choices.
                 Text(L("decision.title"))
                     .settingsHeading()
                     .padding(.top, metrics.groupHeadingGap)
                 decisionModelRow
+                    .searchTarget("decision.title", active: highlightedSearchKey)
                 switch decisionModel {
                 case .jev:    EmptyView()
                 case .jevKey: decisionField(label: L("decision.key"), placeholder: L("model.pasteKey"),
@@ -1426,8 +1760,11 @@ struct InlineSettingsView: View {
                 // group rather than its own category.
                 Text(L("sidebar.search"))
                     .settingsHeading()
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .searchTarget("sidebar.search", active: highlightedSearchKey)
                     .padding(.top, metrics.groupHeadingGap)
                 searchBackendRow
+                    .searchTarget("search.backend", active: highlightedSearchKey)
                     // No stored pick yet → commit the shown default so the
                     // UI and what actually runs never disagree.
                     .onAppear {
@@ -1450,12 +1787,16 @@ struct InlineSettingsView: View {
                 Text(L("chat.group.answers"))
                     .settingsHeading()
                 customInstructionsRow
+                    .searchTarget("general.customInstructions", active: highlightedSearchKey)
                 suggestFollowUpRow
+                    .searchTarget("chat.suggestFollowUp", active: highlightedSearchKey)
                 proactiveSection
+                    .searchTarget("proactive.title", active: highlightedSearchKey)
                 Text(L("chat.group.tools"))
                     .settingsHeading()
                     .padding(.top, metrics.groupHeadingGap)
                 pagesRow
+                    .searchTarget("pages.title", active: highlightedSearchKey)
                 if DebugFeatureFlags.cloudMachine {
                     cloudMachineSection
                 }
@@ -1466,28 +1807,41 @@ struct InlineSettingsView: View {
                 // mcpSection
                 Text(L("capture.sources"))
                     .settingsHeading()
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .searchTarget("capture.sources", active: highlightedSearchKey)
                     .padding(.top, metrics.groupHeadingGap)
                 copySenseRow
+                    .searchTarget("general.copySense", active: highlightedSearchKey)
             case .memories:
                 // One group: what Notchi writes about you, then the text you
                 // copied, as it was.
                 Text(L("memory.title"))
                     .settingsHeading()
                 memoryEnableRow
+                    .searchTarget("memory.toggle", active: highlightedSearchKey)
                 if memory.enabled {
                     UnderlineLink(title: L("memory.manage"), external: true) {
                         try? FileManager.default.createDirectory(at: UserMemory.folder,
                                                                  withIntermediateDirectories: true)
                         NSWorkspace.shared.open(UserMemory.folder)
                     }
+                    .searchTarget("memory.manage", active: highlightedSearchKey)
                 }
                 if ClipboardHistory.available {
                     clipboardHistoryRow
+                        .searchTarget("clipboardHistory.toggle", active: highlightedSearchKey)
                     if clipboardHistory.enabled {
                         clipboardRetentionRow
-                        UnderlineLink(title: L("clipboardHistory.manage"), external: true) {
-                            NSWorkspace.shared.activateFileViewerSelecting([ClipboardHistory.fileURL])
+                            .searchTarget("clipboardHistory.retention", active: highlightedSearchKey)
+                        UnderlineLink(title: L("clipboardHistory.title"), external: true) {
+                            let url = ClipboardHistory.fileURL
+                            if FileManager.default.fileExists(atPath: url.path) {
+                                NSWorkspace.shared.activateFileViewerSelecting([url])
+                            } else {
+                                NSWorkspace.shared.open(url.deletingLastPathComponent())
+                            }
                         }
+                        .searchTarget("clipboardHistory.title", active: highlightedSearchKey)
                     }
                 }
             case .general:
@@ -1495,20 +1849,29 @@ struct InlineSettingsView: View {
                 // icons (app icon, Dock, menu bar icon), where notes are saved,
                 // what the system lets it touch, and the escape hatch.
                 appLanguageRow
+                    .searchTarget("general.appLanguage", active: highlightedSearchKey)
                 launchAtLoginRow
+                    .searchTarget("general.launchAtLogin", active: highlightedSearchKey)
                 Text(L("general.appPresence"))
                     .settingsHeading()
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .searchTarget("general.appPresence", active: highlightedSearchKey)
                     .padding(.top, metrics.groupHeadingGap)
                 if AppIconStyleFeature.isEnabled {
                     appIconStyleRow
+                        .searchTarget("appearance.appIcon", active: highlightedSearchKey)
                 }
                 dockIconRow
+                    .searchTarget("general.dockIcon.toggle", active: highlightedSearchKey)
                 Text(L("capture.destination"))
                     .settingsHeading()
                     .padding(.top, metrics.groupHeadingGap)
                 noteDestinationRow
+                    .searchTarget("general.noteDestination", active: highlightedSearchKey)
                 permissionsSection
+                    .searchTarget("permissions.title", active: highlightedSearchKey)
                 advancedSection
+                    .searchTarget("general.advanced", active: highlightedSearchKey)
             case .shortcuts:
                 shortcutsSection
             case .appearance:
@@ -1517,38 +1880,45 @@ struct InlineSettingsView: View {
                 Text(L("appearance.behavior"))
                     .settingsHeading()
                 hoverSensitivityRow
+                    .searchTarget("general.hoverSensitivity", active: highlightedSearchKey)
                 if ForceClickFeature.isEnabled {
                     forceClickPressureRow
+                        .searchTarget("general.forceClickPressure", active: highlightedSearchKey)
                     if model.isForceTouchDisabled {
                         forceClickPausedNotice
                     }
                 }
-                liveActivityRow
                 Text(L("appearance.displays"))
                     .settingsHeading()
                     .padding(.top, metrics.groupHeadingGap)
                 placementRow
-                fullscreenAutoHideRow
+                    .searchTarget("appearance.showOn", active: highlightedSearchKey)
                 Text(L("appearance.menuBar"))
                     .settingsHeading()
                     .padding(.top, metrics.groupHeadingGap)
                 menuBarIconRow
+                    .searchTarget("general.menuBarIcon", active: highlightedSearchKey)
                 menuBarCardPlacementRow
-                screenshotDestinationRow
+                    .searchTarget("menuBarCard.position", active: highlightedSearchKey)
                 jevAutoPinRow
+                    .searchTarget("general.jevAutoPin", active: highlightedSearchKey)
                 Text(L("chat.group.effects"))
                     .settingsHeading()
                     .padding(.top, metrics.groupHeadingGap)
                 messageSoundsRow
+                    .searchTarget("messageSounds", active: highlightedSearchKey)
             case .channels:
                 VStack(alignment: .leading, spacing: 14) {
                     telegramSection
+                        .searchTarget("telegram.title", active: highlightedSearchKey)
                     signalSection
+                        .searchTarget("signal.title", active: highlightedSearchKey)
                 }
                 Text(L("channels.group.background"))
                     .settingsHeading()
                     .padding(.top, metrics.groupHeadingGap)
                 lidClosedRow
+                    .searchTarget("telegram.lid", active: highlightedSearchKey)
             case .connect:
                 // Drawn with sticky category tabs in `stickyConnectorsPane` (see `paneContent`).
                 EmptyView()
@@ -1570,22 +1940,19 @@ struct InlineSettingsView: View {
                 NonoPrivacyNote()
             case .pages:
                 NotchiPagesPane()
-            case .clipboard:
-                ClipboardHistoryPane(onClearAll: {
-                    clipboardConfirm = .clearAll(count: clipboardHistory.count())
-                })
             case .whatsNew:
                 // Drawn beside this scroller, not in it (see `paneContent`).
                 EmptyView()
             }
             }
             // The window caps how wide rows grow (see `SettingsMetrics`); tables
-            // and the memory browser keep the full width.
-            .frame(maxWidth: section.fillsWindowWidth ? nil : metrics.contentMaxWidth,
-                   alignment: .topLeading)
+            // and the memory browser keep the full width. Both frames use exact
+            // widths derived from the scroll viewport so no child can widen the
+            // column past the pane boundary.
+            .frame(width: columnWidth, alignment: .topLeading)
             // A window dragged wider than `SettingsMetrics.windowWidth` keeps the
             // column centred instead of leaving the extra width on one side.
-            .frame(maxWidth: .infinity, alignment: inWindow ? .top : .topLeading)
+            .frame(width: innerWidth, alignment: inWindow ? .top : .topLeading)
             // The open pane follows the live measurement; a leaving pane keeps
             // the column it was last measured with (see `LabelColumnFloor`).
             .environment(\.settingsLabelColumn,
@@ -1609,8 +1976,10 @@ struct InlineSettingsView: View {
             .padding(.top, metrics.paneTopRunway)
             .padding(.bottom, 20)
             // The window has the room, so its pane keeps more air on both
-            // sides than the panel's 14pt gutter can afford.
-            .padding(.horizontal, metrics.paneSideInset)
+            // sides than the panel's 14pt gutter can afford. In the panel, add
+            // an 8pt inner bleed (matched by `-8` on the ScrollView) so search
+            // highlights can extend past the row edges without clipping.
+            .padding(.horizontal, metrics.paneSideInset + (inWindow ? 0 : 8))
             // Zero-size probe on the scroll CONTENT: it reads the real clip view's
             // offset. Only the crossing matters, so state changes at most once per
             // scroll gesture rather than on every tick.
@@ -1664,6 +2033,17 @@ struct InlineSettingsView: View {
                 guard required, section == .model else { return }
                 DispatchQueue.main.async { proxy.scrollTo(Self.keySectionAnchor, anchor: .top) }
             }
+            .onChange(of: pendingScrollKey) { _, key in
+                guard let key else { return }
+                // Wait a beat so a freshly swapped pane or unfolded collapsible
+                // finishes laying out before scrolling to the target row.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
+                    withAnimation(.easeInOut(duration: 0.28)) {
+                        proxy.scrollTo("search.\(key)", anchor: .center)
+                    }
+                    if pendingScrollKey == key { pendingScrollKey = nil }
+                }
+            }
             // The top taper exists only once the pane is actually scrolled: it is
             // there to dissolve rows leaving past the back pill, and nothing is
             // leaving while the pane sits at top. It starts above the first row
@@ -1690,7 +2070,10 @@ struct InlineSettingsView: View {
                 labelColumnWidth = Self.labelColumnWidths[section] ?? 0
                 if section == .model { markSurveyGrantSeen() }
             }
+            }
         }
+        .frame(height: settingsPaneHeight)
+        .padding(.horizontal, inWindow ? 0 : -8)
     }
 
     // MARK: - Sidebar
@@ -1711,6 +2094,9 @@ struct InlineSettingsView: View {
             if inWindow {
                 sidebarList(measuring: measuring)
             } else {
+                settingsSearchField(measuring: measuring)
+                    .padding(.bottom, 8)
+                    .zIndex(1)
                 ScrollView(.vertical) {
                     sidebarList(measuring: measuring)
                         // Room for the last category to scroll clear of the
@@ -1747,6 +2133,9 @@ struct InlineSettingsView: View {
                     .padding(.horizontal, 10)
                     .padding(.top, 8 - StandaloneWindowStyle.titleLift)
                     .padding(.bottom, 14)
+                settingsSearchField(measuring: measuring)
+                    .padding(.bottom, 10)
+                    .zIndex(1)
             }
             ForEach(Array(Section.sidebarGroups.enumerated()), id: \.offset) { index, group in
                 // Groups are separated by a rule, not named: a caption above
@@ -1769,9 +2158,362 @@ struct InlineSettingsView: View {
         .frame(width: sidebarWidth, alignment: .topLeading)
     }
 
+    /// One search hit: a category, or a row on it.
+    private struct SettingsSearchHit: Identifiable {
+        let section: Section
+        /// The row's localization key; nil when the category's own name matched.
+        let key: String?
+        /// The row's localized label; nil when the category's own name matched.
+        let label: String?
+        let score: Int
+        var id: String { section.rawValue + "|" + (key ?? "") }
+    }
+
+    /// Normalize text for case/diacritic-insensitive matching.
+    private static func normalizeSearch(_ s: String) -> String {
+        s.folding(options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive], locale: .current)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Damerau-Levenshtein distance bounded by `maxDist`; returns `maxDist + 1` if exceeded.
+    private static func boundedEditDistance(_ a: [Character], _ b: [Character], maxDist: Int) -> Int {
+        let m = a.count, n = b.count
+        if abs(m - n) > maxDist { return maxDist + 1 }
+        if m == 0 { return n }
+        if n == 0 { return m }
+        var d = Array(repeating: Array(repeating: 0, count: n + 1), count: m + 1)
+        for i in 0...m { d[i][0] = i }
+        for j in 0...n { d[0][j] = j }
+        for i in 1...m {
+            var rowMin = maxDist + 1
+            for j in 1...n {
+                let cost = a[i - 1] == b[j - 1] ? 0 : 1
+                var v = min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + cost)
+                if i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1] {
+                    v = min(v, d[i - 2][j - 2] + 1)
+                }
+                d[i][j] = v
+                if v < rowMin { rowMin = v }
+            }
+            if rowMin > maxDist { return maxDist + 1 }
+        }
+        return d[m][n]
+    }
+
+    /// Score a single normalized query token against a candidate phrase.
+    /// Higher is better; 0 means no match.
+    private static func tokenScore(_ token: String, against rawCandidate: String, isPrimary: Bool) -> Int {
+        let cand = normalizeSearch(rawCandidate)
+        guard !cand.isEmpty else { return 0 }
+        let base: Int
+        if cand == token {
+            base = 100
+        } else if cand.hasPrefix(token) {
+            base = 90
+        } else {
+            let words = cand.split { !$0.isLetter && !$0.isNumber }.map(String.init)
+            if words.contains(where: { $0.hasPrefix(token) }) {
+                base = 82
+            } else if cand.contains(token) {
+                base = 72
+            } else {
+                // Fuzzy matching for Latin/ASCII tokens of length >= 2.
+                let isASCII = token.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber) }
+                guard isASCII, token.count >= 2 else { return 0 }
+                let tChars = Array(token)
+                var fuzzy = 0
+                // 1) Ordered subsequence inside any word (e.g. "prxy" -> "proxy", "clpb" -> "clipboard").
+                for w in words where w.count >= tChars.count {
+                    let wChars = Array(w)
+                    var ti = 0
+                    var firstIdx = -1, lastIdx = -1
+                    for (wi, ch) in wChars.enumerated() where ti < tChars.count && ch == tChars[ti] {
+                        if firstIdx < 0 { firstIdx = wi }
+                        lastIdx = wi
+                        ti += 1
+                    }
+                    if ti == tChars.count {
+                        let span = lastIdx - firstIdx + 1
+                        // Require reasonable density so short tokens don't match unrelated long words.
+                        if Double(tChars.count) / Double(span) >= 0.5 && (firstIdx == 0 || tChars.count >= 3) {
+                            fuzzy = max(fuzzy, firstIdx == 0 ? 52 : 44)
+                        }
+                    }
+                }
+                // 2) Typo tolerance (transposition / 1-2 char edit) against words.
+                if fuzzy == 0, tChars.count >= 4 {
+                    let maxDist = tChars.count >= 7 ? 2 : 1
+                    for w in words where w.count >= 3 {
+                        let wChars = Array(w)
+                        if boundedEditDistance(tChars, wChars, maxDist: maxDist) <= maxDist {
+                            fuzzy = max(fuzzy, 40)
+                            break
+                        }
+                        // Also allow typo against a prefix of a longer word (e.g. "shorcut" vs "shortcuts").
+                        if wChars.count > tChars.count {
+                            let prefix = Array(wChars.prefix(tChars.count + 1))
+                            if boundedEditDistance(tChars, prefix, maxDist: maxDist) <= maxDist {
+                                fuzzy = max(fuzzy, 38)
+                                break
+                            }
+                        }
+                    }
+                }
+                guard fuzzy > 0 else { return 0 }
+                base = fuzzy
+            }
+        }
+        return isPrimary ? base : max(1, base - 15)
+    }
+
+    /// Score all query tokens against primary text + secondary aliases (English / synonyms).
+    /// Every token must match at least one candidate.
+    private static func matchScore(tokens: [String], primary: String, aliases: [String]) -> Int {
+        guard !tokens.isEmpty else { return 0 }
+        var total = 0
+        for token in tokens {
+            var best = tokenScore(token, against: primary, isPrimary: true)
+            for alias in aliases {
+                let s = tokenScore(token, against: alias, isPrimary: false)
+                if s > best { best = s }
+            }
+            guard best > 0 else { return 0 }
+            total += best
+        }
+        return total / tokens.count
+    }
+
+    /// Hits for `settingsQuery`, ranked by relevance and grouped by category.
+    private var settingsSearchHits: [(section: Section, hits: [SettingsSearchHit])] {
+        let q = Self.normalizeSearch(settingsQuery)
+        guard !q.isEmpty else { return [] }
+        let tokens = q.split(whereSeparator: { $0.isWhitespace }).map(String.init)
+        guard !tokens.isEmpty else { return [] }
+
+        var scoredGroups: [(order: Int, bestScore: Int, section: Section, hits: [SettingsSearchHit])] = []
+        for (order, s) in Section.sidebarCases.enumerated() {
+            var hits: [SettingsSearchHit] = []
+            var seen = Set<String>()
+            for key in s.searchKeys {
+                let label = L(key)
+                guard label != key, label != s.title, !seen.contains(label) else { continue }
+                var aliases = Section.searchAliases(for: key)
+                if let localizedAll = Section.allLocaleStrings[key] {
+                    for text in localizedAll where text != label { aliases.append(text) }
+                }
+                let score = Self.matchScore(tokens: tokens, primary: label, aliases: aliases)
+                guard score > 0 else { continue }
+                seen.insert(label)
+                hits.append(SettingsSearchHit(section: s, key: key, label: label, score: score))
+            }
+            hits.sort { $0.score > $1.score }
+
+            // Match the section itself across all shipped languages + category synonyms.
+            // Only emit a section-level row when its own title matched directly OR
+            // when no specific row inside the section matched (avoids redundant header/row pairs).
+            let allTitles = (Section.allLocaleStrings[s.titleKey] ?? []).filter { $0 != s.title }
+            var sectionAliases = s.searchAliases
+            sectionAliases.append(contentsOf: allTitles)
+            let titleOnlyScore = Self.matchScore(tokens: tokens, primary: s.title, aliases: allTitles)
+            let sectionScore = Self.matchScore(tokens: tokens, primary: s.title, aliases: sectionAliases)
+            if titleOnlyScore > 0 {
+                hits.insert(SettingsSearchHit(section: s, key: nil, label: nil, score: titleOnlyScore), at: 0)
+            } else if hits.isEmpty, sectionScore > 0 {
+                hits.append(SettingsSearchHit(section: s, key: nil, label: nil, score: sectionScore))
+            }
+
+            if let top = hits.map(\.score).max() {
+                scoredGroups.append((order, top, s, hits))
+            }
+        }
+
+        scoredGroups.sort { lhs, rhs in
+            if lhs.bestScore != rhs.bestScore { return lhs.bestScore > rhs.bestScore }
+            return lhs.order < rhs.order
+        }
+        let out = scoredGroups.map { (section: $0.section, hits: $0.hits) }
+
+        // The panel is short: keep the card inside it.
+        guard !inWindow else { return out }
+        var budget = 7
+        return out.compactMap { group in
+            guard budget > 0 else { return nil }
+            let kept = Array(group.hits.prefix(budget))
+            budget -= kept.count
+            return (group.section, kept)
+        }
+    }
+
+    private func openSearchHit(_ hit: SettingsSearchHit) {
+        settingsQuery = ""
+        settingsSearchFocus = false
+        // Expand any collapsible block that houses the target row.
+        switch hit.key {
+        case "network.proxy":
+            advancedSectionOpen = true
+        case "model.keys.section":
+            keySectionOpen = true
+        case "general.customInstructions":
+            instructionsSectionOpen = true
+        default:
+            break
+        }
+        showSection(hit.section)
+        guard let key = hit.key else {
+            highlightedSearchKey = nil
+            pendingScrollKey = nil
+            return
+        }
+        let token = UUID()
+        searchHighlightToken = token
+        // Toggle nil first if re-selecting the same key so `onChange(of: pendingScrollKey)` fires.
+        if pendingScrollKey == key { pendingScrollKey = nil }
+        DispatchQueue.main.async {
+            withAnimation(.easeOut(duration: 0.22)) {
+                highlightedSearchKey = key
+            }
+            pendingScrollKey = key
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+            guard searchHighlightToken == token else { return }
+            withAnimation(.easeOut(duration: 0.45)) {
+                highlightedSearchKey = nil
+            }
+        }
+    }
+
+    /// The sidebar's search box. Typing opens a card of matching
+    /// categories and rows over the pane; picking one opens its category.
+    @ViewBuilder
+    private func settingsSearchField(measuring: Bool) -> some View {
+        HStack(spacing: 6) {
+            PhosphorIcon(mark: PhosphorIcons.magnifyingGlass, size: inWindow ? 14 : 12)
+                .foregroundStyle(Tokens.text3)
+            HistorySearchField(text: $settingsQuery,
+                               placeholder: L("settings.search"),
+                               fontSize: SettingsType.label + metrics.typeBump,
+                               focusTrigger: settingsSearchFocus,
+                               onSubmit: {
+                                   if let first = settingsSearchHits.first?.hits.first {
+                                       openSearchHit(first)
+                                   }
+                               })
+            if !settingsQuery.isEmpty {
+                Button {
+                    settingsQuery = ""
+                } label: {
+                    Image(icon: "xmark")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(Tokens.text3)
+                        .frame(width: 16, height: 16)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain).exemptsDoubleClickPin()
+            }
+        }
+        .padding(.horizontal, 10)
+        .frame(height: 28)
+        .background(Capsule(style: .continuous).fill(Tokens.ink.opacity(0.06)))
+        .contentShape(Capsule(style: .continuous))
+        .onTapGesture { settingsSearchFocus = true }
+        .onExitCommand { settingsQuery = "" }
+        .overlay(alignment: .topLeading) {
+            if !measuring && !settingsQuery.trimmingCharacters(in: .whitespaces).isEmpty {
+                settingsSearchCard
+                    .offset(y: 34)
+                    .transition(.opacity)
+            }
+        }
+    }
+
+    private var settingsSearchCard: some View {
+        let groups = settingsSearchHits
+        let rowFontSize = SettingsType.label + metrics.typeBump
+        let headerFontSize = SettingsType.description + metrics.typeBump
+        let headerIconSize = headerFontSize + 1
+        let rowPad = MenuCard.pickerRowPad
+        let rowHeight: CGFloat = 26
+
+        // Fit card width to its visible labels, floored at `sidebarWidth` (aligned
+        // with the search pill) and capped so it stays compact over the pane.
+        let rowFont = NSFont.systemFont(ofSize: rowFontSize, weight: .regular)
+        let headerFont = NSFont.systemFont(ofSize: headerFontSize, weight: .medium)
+        var widest: CGFloat = 0
+        if groups.isEmpty {
+            widest = NSAttributedString(string: L("settings.search.empty"),
+                                        attributes: [.font: rowFont]).size().width
+        } else {
+            for group in groups {
+                let hw = headerIconSize + 5 + NSAttributedString(string: group.section.title,
+                                                                 attributes: [.font: headerFont]).size().width
+                widest = max(widest, hw)
+                for hit in group.hits {
+                    let rw = NSAttributedString(string: hit.label ?? hit.section.title,
+                                                attributes: [.font: rowFont]).size().width
+                    widest = max(widest, rw)
+                }
+            }
+        }
+        let maxCardWidth: CGFloat = inWindow ? 220 : 188
+        let cardWidth = min(max(sidebarWidth, ceil(widest) + (rowPad + MenuCard.cardPad) * 2 + 4), maxCardWidth)
+
+        let totalRows = groups.reduce(0) { $0 + 1 + $1.hits.count }
+        let listContent = VStack(alignment: .leading, spacing: MenuCard.rowSpacing) {
+            if groups.isEmpty {
+                Text(L("settings.search.empty"))
+                    .font(.sf(SettingsType.description + metrics.typeBump))
+                    .foregroundStyle(Tokens.text4)
+                    .padding(.horizontal, rowPad)
+                    .frame(height: rowHeight)
+            }
+            ForEach(Array(groups.enumerated()), id: \.offset) { index, group in
+                HStack(spacing: 5) {
+                    if group.section == .about {
+                        NotchiSidebarEyes(size: headerIconSize)
+                    } else {
+                        PhosphorIcon(mark: group.section.icon, size: headerIconSize)
+                    }
+                    Text(group.section.title)
+                        .lineLimit(1)
+                }
+                .font(.sf(headerFontSize, weight: .medium))
+                .foregroundStyle(Tokens.text4)
+                .padding(.horizontal, rowPad)
+                .padding(.top, index == 0 ? 3 : 7)
+                .padding(.bottom, 2)
+                ForEach(group.hits) { hit in
+                    MenuCardRow(title: hit.label ?? hit.section.title,
+                                fontSize: rowFontSize,
+                                height: rowHeight,
+                                horizontalPadding: rowPad,
+                                selected: false,
+                                action: { openSearchHit(hit) })
+                }
+            }
+        }
+
+        return Group {
+            if inWindow && totalRows > 12 {
+                ScrollView(.vertical) {
+                    listContent
+                }
+                .scrollIndicators(.never)
+                .frame(height: 340)
+            } else {
+                listContent
+            }
+        }
+        .padding(MenuCard.cardPad)
+        .frame(width: cardWidth, alignment: .leading)
+        .menuCardBackground()
+        .environment(\.menuCardLight, inWindow && colorScheme == .light)
+    }
+
     private func sidebarItem(_ s: Section, measuring: Bool) -> some View {
         SidebarItem(
             title: s.title,
+            icon: s == .about ? nil : s.icon,
+            notchiEyes: s == .about,
             selected: section == s || section.parent == s,
             selection: measuring ? nil : sidebarSelection,
             // The gear's update dot continues here: it leads to settings,
@@ -1797,6 +2539,7 @@ struct InlineSettingsView: View {
     private func sidebarLicenseItem(measuring: Bool) -> some View {
         SidebarItem(
             title: license.needsPurchase ? L("license.sidebar.buy") : L("license.label"),
+            icon: Section.license.icon,
             selected: licenseOfferOpen,
             selection: measuring ? nil : sidebarSelection,
             badged: false,
@@ -1872,10 +2615,37 @@ struct InlineSettingsView: View {
         return false
     }
 
+    /// Notchi's two eyes drawn as hollow outlines in the current foreground ink,
+    /// matching the stroke weight of `PhosphorIcon(size:)` in the sidebar.
+    private struct NotchiSidebarEyes: View {
+        let size: CGFloat
+        var body: some View {
+            let h = size * 0.68
+            let w = h * NotchiEyeShape.aspect
+            let gap = h * NotchiEyeShape.gap
+            let lineWidth = max(0.95, size * 0.075)
+            HStack(spacing: gap) {
+                NotchiEyeShape()
+                    .stroke(.foreground, lineWidth: lineWidth)
+                    .padding(lineWidth / 2)
+                    .frame(width: w, height: h)
+                NotchiEyeShape()
+                    .stroke(.foreground, lineWidth: lineWidth)
+                    .padding(lineWidth / 2)
+                    .frame(width: w, height: h)
+            }
+            .frame(width: size, height: size)
+        }
+    }
+
     /// One category row: quiet text that brightens on hover, a faint fill when
     /// selected — same translucent-chip language as GlassMenu, minus the border.
     private struct SidebarItem: View {
         var title: String
+        /// Leading glyph.
+        var icon: PhosphorIcons.Mark? = nil
+        /// Draws Notchi's two eyes in place of `icon` (used for About).
+        var notchiEyes: Bool = false
         var selected: Bool
         /// The namespace the selection capsule moves in; nil draws none.
         var selection: Namespace.ID?
@@ -1933,6 +2703,14 @@ struct InlineSettingsView: View {
 
         private var content: some View {
             HStack(spacing: 6) {
+                let iconSize: CGFloat = windowPane != nil ? 15 : 13
+                if notchiEyes {
+                    NotchiSidebarEyes(size: iconSize)
+                        .padding(.trailing, 3)
+                } else if let icon {
+                    PhosphorIcon(mark: icon, size: iconSize)
+                        .padding(.trailing, 3)
+                }
                 Text(title)
                     .modifier(SettingsTypeFont(size: SettingsType.label))
                     .lineLimit(1)
@@ -1946,19 +2724,12 @@ struct InlineSettingsView: View {
                     NewBadge()
                 }
                 Spacer(minLength: 0)
+                if let stamp {
+                    SettingsBadge(text: stamp, variant: .secondary)
+                }
             }
             .padding(.horizontal, 10)
             .frame(height: 28)
-            // The stamp takes no width and sits faintly over the row's trailing
-            // side, so the title shows in full under it.
-            .overlay(alignment: .trailing) {
-                if let stamp {
-                    PassportStamp(text: stamp, compact: true)
-                        .opacity(0.6)
-                        .padding(.trailing, 8)
-                        .allowsHitTesting(false)
-                }
-            }
         }
     }
 
@@ -2039,14 +2810,13 @@ struct InlineSettingsView: View {
     /// somewhere to go back to.
     private var showsWindowBackRow: Bool { inWindow && section.parent != nil }
 
-    /// System Settings' back / forward capsule: back is live, forward is
-    /// dimmed because a pushed page has nothing ahead of it.
+    /// The back button of a pushed page: a single left chevron in a capsule.
     private func windowNavPill(parent: Section) -> some View {
         HStack(spacing: 0) {
             Button {
                 withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) { section = parent }
             } label: {
-                Image(systemName: "chevron.left")
+                Image(icon: "chevron.left")
                     .sfFont(Tokens.TypeSize.form, weight: .semibold)
                     .foregroundStyle(Tokens.text1)
                     .frame(width: 36, height: Self.windowBackCircle)
@@ -2054,13 +2824,6 @@ struct InlineSettingsView: View {
             }
             .buttonStyle(.plain)
             .accessibilityLabel(Text(L("navigation.backTo", parent.title)))
-            Rectangle()
-                .fill(Tokens.hairline)
-                .frame(width: 1, height: 18)
-            Image(systemName: "chevron.right")
-                .sfFont(Tokens.TypeSize.form, weight: .semibold)
-                .foregroundStyle(Tokens.text2.opacity(0.4))
-                .frame(width: 36, height: Self.windowBackCircle)
         }
         .glassCapsule(in: Capsule(style: .continuous), brighter: false)
     }
@@ -2650,7 +3413,6 @@ struct InlineSettingsView: View {
                     .lineLimit(1)
                     .frame(width: SettingsMetrics.searchKeyLabelWidth, alignment: .leading)
 
-                Spacer(minLength: 8)
                 ZStack(alignment: .leading) {
                     if editingKeenableKey {
                         if keenableKey.isEmpty {
@@ -2676,7 +3438,6 @@ struct InlineSettingsView: View {
                     }
                 }
                 .settingsInputBox(focused: searchKeyFocused, height: Tokens.Control.header)
-                .frame(width: 252)
                 .opacity(keenableEnvOverride ? 0.5 : 1)
 
                 if editingKeenableKey {
@@ -2734,7 +3495,6 @@ struct InlineSettingsView: View {
                     .lineLimit(1)
                     .frame(width: SettingsMetrics.searchKeyLabelWidth, alignment: .leading)
 
-                Spacer(minLength: 8)
                 ZStack(alignment: .leading) {
                     if editingExaKey {
                         if exaKey.isEmpty {
@@ -2760,7 +3520,6 @@ struct InlineSettingsView: View {
                     }
                 }
                 .settingsInputBox(focused: searchKeyFocused, height: Tokens.Control.header)
-                .frame(width: 252)
                 .opacity(exaEnvOverride ? 0.5 : 1)
 
                 if editingExaKey {
@@ -2819,7 +3578,6 @@ struct InlineSettingsView: View {
                     .lineLimit(1)
                     .frame(width: SettingsMetrics.searchKeyLabelWidth, alignment: .leading)
 
-                Spacer(minLength: 8)
                 ZStack(alignment: .leading) {
                     if editingAnySearchKey {
                         if anySearchKey.isEmpty {
@@ -2844,7 +3602,6 @@ struct InlineSettingsView: View {
                     }
                 }
                 .settingsInputBox(focused: searchKeyFocused, height: Tokens.Control.header)
-                .frame(width: 252)
                 .opacity(anySearchEnvOverride ? 0.5 : 1)
 
                 if editingAnySearchKey {
@@ -2891,7 +3648,6 @@ struct InlineSettingsView: View {
                     .lineLimit(1)
                     .frame(width: SettingsMetrics.searchKeyLabelWidth, alignment: .leading)
 
-                Spacer(minLength: 8)
                 ZStack(alignment: .leading) {
                     if editingDeepSeekSearchKey {
                         if deepSeekSearchKey.isEmpty {
@@ -2916,7 +3672,6 @@ struct InlineSettingsView: View {
                     }
                 }
                 .settingsInputBox(focused: searchKeyFocused, height: Tokens.Control.header)
-                .frame(width: 252)
                 .opacity(deepSeekSearchEnvOverride ? 0.5 : 1)
 
                 if editingDeepSeekSearchKey {
@@ -3021,7 +3776,7 @@ struct InlineSettingsView: View {
                 } else if let snapshot {
                     HStack(spacing: 8) {
                         nonoFigure(snapshot, prominent: false)
-                        Image(systemName: "chevron.right")
+                        Image(icon: "chevron.right")
                             .font(.sf(Tokens.TypeSize.badge, weight: .regular))
                             .foregroundStyle(Tokens.text4)
                             .opacity(balanceEntryHovering ? 1 : 0.6)
@@ -4649,7 +5404,7 @@ struct InlineSettingsView: View {
                 .foregroundStyle(Tokens.text1)
                 .lineLimit(1)
                 .truncationMode(.tail)
-            Image(systemName: "chevron.up.chevron.down")
+            Image(icon: "chevron.up.chevron.down")
                 .font(.sf(Tokens.TypeSize.caption, weight: .regular))
                 .foregroundStyle(Tokens.text3)
         }
@@ -4709,9 +5464,9 @@ struct InlineSettingsView: View {
         return PickerCard(selected: selected, label: p.label) {
             selectPlacement(p)
         } content: {
-            HStack(alignment: .bottom, spacing: 8) {
-                MiniDisplay(kind: .laptop, hasIsland: true)
-                MiniDisplay(kind: .external, hasIsland: p == .all)
+            HStack(spacing: 10) {
+                PickerGlyph(mark: PhosphorIcons.laptop)
+                PickerGlyph(mark: PhosphorIcons.monitor, dimmed: p != .all)
             }
         }
     }
@@ -4849,6 +5604,7 @@ struct InlineSettingsView: View {
         }
     }
 
+
     /// Where the menu bar card opens: under the icon, or flush with the
     /// screen's right edge. Same cards as the icon row above.
     private var menuBarCardPlacementRow: some View {
@@ -4861,10 +5617,11 @@ struct InlineSettingsView: View {
                         menuBarCardPlacement = p
                         MenuBarCardPlacement.current = p
                     } glyph: {
-                        Image(systemName: p == .right
-                              ? "rectangle.inset.topright.filled"
-                              : "rectangle.topthird.inset.filled")
-                            .font(.system(size: 13, weight: .regular))
+                        // picture-in-picture flipped so its inset sits top-right,
+                        // where the card opens.
+                        PickerGlyph(mark: p == .right ? PhosphorIcons.pictureInPicture
+                                                      : PhosphorIcons.browser)
+                            .scaleEffect(x: 1, y: p == .right ? -1 : 1)
                     }
                 }
             }
@@ -5329,70 +6086,6 @@ struct InlineSettingsView: View {
     private func openSystemSettings(_ pane: String) {
         guard let url = URL(string: "x-apple.systempreferences:\(pane)") else { return }
         NSWorkspace.shared.open(url)
-    }
-
-    /// Whether the island tucks away while a full-screen app covers its screen.
-    /// On by default; scoped to the virtual notch on external / non-notched
-    /// displays (the built-in hardware notch is physical and never hides). The
-    /// choice applies immediately — `AppDelegate` re-evaluates on the toggle.
-    /// Phrased as "Show in full screen", not "Hide in full screen": it sits under
-    /// two other switches that both read "Show in …", and one row flipping the
-    /// polarity mid-column makes you re-read all three to work out which way is
-    /// on.
-    ///
-    /// Only the wording and the binding flip — the stored value is still
-    /// `HideNotchInFullscreen.isEnabled`, still meaning *hide*. That's what
-    /// carries an existing preference across unchanged: someone who had hiding
-    /// switched on now sees "Show in full screen" switched off, which is the
-    /// same instruction read from the other end. No migration, nothing to
-    /// mis-translate. The agent-facing `hide_in_fullscreen` setting and its
-    /// `general.fullscreenAutoHide` label keep the old polarity too, matching
-    /// the key they're named for.
-    private var fullscreenAutoHideRow: some View {
-        settingRow(label: L("general.fullscreenAutoHide.toggle"), aligned: true, verticalAlignment: .top) {
-            HStack(spacing: 8) {
-                ForEach([true, false], id: \.self) { show in
-                    onOffCard(on: show, selected: !hideInFullscreen == show) {
-                        Haptics.levelChange(); selectHideInFullscreen(!show)
-                    } diagram: { FullscreenDiagram(showsNotch: show) }
-                }
-            }
-        }
-        .padding(.vertical, 6)
-    }
-
-    /// One half of an on/off pair drawn as a picture: the diagram over "On"
-    /// or "Off", in the display-placement cards' style.
-    private func onOffCard<Diagram: View>(on: Bool, selected: Bool,
-                                          action: @escaping () -> Void,
-                                          @ViewBuilder diagram: () -> Diagram) -> some View {
-        let picture = diagram()
-        return PickerCard(selected: selected,
-                          label: L(on ? "settings.option.on" : "settings.option.off")) {
-            if !selected { action() }
-        } content: {
-            picture
-        }
-    }
-
-    /// Whether background work flexes the resting notch's busy ears (the verb on
-    /// the left shoulder, the elapsed clock on the right). One global switch:
-    /// off keeps the closed notch flat for agent runs and detached Ask rounds
-    /// alike. The finished badge and the completion notification stay.
-    private var liveActivityRow: some View {
-        settingRow(label: L("appearance.liveActivity"),
-                   info: L("appearance.liveActivity.hint"),
-                   aligned: true,
-                   verticalAlignment: .top) {
-            HStack(spacing: 8) {
-                ForEach([true, false], id: \.self) { on in
-                    onOffCard(on: on, selected: model.liveActivityEnabled == on) {
-                        Haptics.levelChange(); model.liveActivityEnabled = on
-                    } diagram: { LiveActivityDiagram(on: on) }
-                }
-            }
-        }
-        .padding(.vertical, 6)
     }
 
     /// The message tones: sending, each reply bubble landing, and a reaction.
@@ -6232,6 +6925,7 @@ struct InlineSettingsView: View {
         ) {
             VStack(alignment: .leading, spacing: 14) {
                 proxyRow
+                    .searchTarget("network.proxy", active: highlightedSearchKey)
                 weatherCityRow
             }
         }
@@ -6458,13 +7152,6 @@ struct InlineSettingsView: View {
         // Through the model, not straight to `UserDefaults`: the island renders
         // the click level's flex off an observable mirror, which has to move too.
         model.applyHoverSensitivity(newValue)
-    }
-
-    private func selectHideInFullscreen(_ newValue: Bool) {
-        guard newValue != hideInFullscreen else { return }
-        hideInFullscreen = newValue
-        HideNotchInFullscreen.isEnabled = newValue
-        NotificationCenter.default.post(name: .hideNotchInFullscreenChanged, object: nil)
     }
 
     /// Register or unregister the login item, keeping the toggle in sync with the
@@ -6714,7 +7401,7 @@ struct InlineSettingsView: View {
     /// never competes with a check for attention.
     private func comparisonMark(_ yes: Bool, engine: CopySenseEngine) -> some View {
         let active = engine == .jev
-        return Image(systemName: yes ? "checkmark" : "xmark")
+        return Image(icon: yes ? "checkmark" : "xmark")
             .font(.sf(Tokens.TypeSize.label, weight: .regular))
             .foregroundStyle(yes ? (active ? Tokens.text1 : Tokens.text3)
                                  : Tokens.text4.opacity(0.7))
@@ -6761,8 +7448,18 @@ struct InlineSettingsView: View {
                 screenshotHotKey: screenshotHotKey,
                 shortcuts: appShortcuts
             ).enumerated()),
-                    id: \.offset) { _, group in
-                shortcutGroup(group.title, group.entries)
+                    id: \.offset) { index, group in
+                if index == 0 {
+                    // The first group holds the screenshot shortcut; where its
+                    // capture lands sits under it.
+                    VStack(alignment: .leading, spacing: 14) {
+                        shortcutGroup(group.title, group.entries)
+                        screenshotDestinationRow
+                            .searchTarget("screenshot.destination", active: highlightedSearchKey)
+                    }
+                } else {
+                    shortcutGroup(group.title, group.entries)
+                }
             }
         }
         // No top runway: this pane starts flush with the sidebar's first item,
@@ -6829,7 +7526,7 @@ struct InlineSettingsView: View {
                     Button {
                         openPromptTemplatePicker()
                     } label: {
-                        Image(systemName: "plus")
+                        Image(icon: "plus")
                             .font(.sf(Tokens.TypeSize.meta, weight: .regular))
                             .foregroundStyle(Tokens.text2)
                             .frame(width: Self.promptAddChipSize,
@@ -6960,7 +7657,7 @@ struct InlineSettingsView: View {
                     Button {
                         closePromptTemplateDetail()
                     } label: {
-                        Image(systemName: "chevron.left")
+                        Image(icon: "chevron.left")
                             .font(.sf(Tokens.TypeSize.meta, weight: .regular))
                             .foregroundStyle(Tokens.text2)
                             .frame(width: Tokens.Control.inline, height: Tokens.Control.inline)
@@ -6985,7 +7682,7 @@ struct InlineSettingsView: View {
                 Button {
                     closePromptTemplatePicker()
                 } label: {
-                    Image(systemName: "xmark")
+                    Image(icon: "xmark")
                         .font(.sf(Tokens.TypeSize.badge, weight: .regular))
                         .foregroundStyle(Tokens.text2)
                         .frame(width: Tokens.Control.inline, height: Tokens.Control.inline)
@@ -7283,7 +7980,7 @@ struct InlineSettingsView: View {
                 Button {
                     addPromptShortcut(from: template)
                 } label: {
-                    Image(systemName: "plus")
+                    Image(icon: "plus")
                         .font(.sf(Tokens.TypeSize.form, weight: .regular))
                         .foregroundStyle(Tokens.text1)
                         .frame(width: Tokens.Control.rail, height: Tokens.Control.rail)
@@ -7632,7 +8329,7 @@ struct InlineSettingsView: View {
                     .lineLimit(1)
                     .truncationMode(.tail)
 
-                Image(systemName: "plus")
+                Image(icon: "plus")
                     .font(.sf(Tokens.TypeSize.meta, weight: .regular))
                     .foregroundStyle(hovered ? Tokens.text2 : Tokens.text4)
                     .padding(.horizontal, 7)
@@ -7745,7 +8442,7 @@ struct InlineSettingsView: View {
                 Button {
                     closePromptShortcutEditor(binding.id)
                 } label: {
-                    Image(systemName: "xmark")
+                    Image(icon: "xmark")
                         .font(.sf(Tokens.TypeSize.badge, weight: .regular))
                         .foregroundStyle(Tokens.text3)
                         .frame(width: Tokens.Control.inline, height: Tokens.Control.inline)
@@ -7980,6 +8677,7 @@ struct InlineSettingsView: View {
                 .settingsHeading()
                 .padding(.bottom, 3)
             ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+                let anchorKey = Section.shortcuts.searchKeys.first { L($0) == row.label }
                 VStack(alignment: .leading, spacing: 3) {
                     HStack(spacing: 12) {
                         Text(row.label)
@@ -8018,6 +8716,7 @@ struct InlineSettingsView: View {
                     }
                 }
                 .padding(.vertical, 7)
+                .searchTarget(anchorKey, active: highlightedSearchKey)
                 .contentShape(Rectangle())
                 .onHover { hovering in
                     guard let editable = row.editable else { return }
@@ -8086,7 +8785,7 @@ struct InlineSettingsView: View {
                 Button {
                     resetShortcut(target)
                 } label: {
-                    Image(systemName: "arrow.counterclockwise")
+                    Image(icon: "arrow.counterclockwise")
                         .font(.sf(Tokens.TypeSize.meta, weight: .regular))
                         .foregroundStyle(Tokens.text3)
                         .frame(width: Tokens.Control.inline, height: Tokens.Control.inline)
@@ -8543,6 +9242,7 @@ struct InlineSettingsView: View {
                 }
             }
             .padding(.top, 2)
+            .searchTarget("about.licenses", active: highlightedSearchKey)
         }
         .task(id: statsFingerprint) { await refreshStats() }
     }
@@ -8693,6 +9393,7 @@ struct InlineSettingsView: View {
                         }
                     }
                 }
+                .searchTarget("whatsnew.title", active: highlightedSearchKey)
 
                 aboutUtilitySeparator
 
@@ -9270,6 +9971,7 @@ struct InlineSettingsView: View {
         let action: () -> Void
 
         @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.colorScheme) private var colorScheme
         @State private var hovering = false
 
         private var accent: Color {
@@ -9348,17 +10050,17 @@ struct InlineSettingsView: View {
         private var actionMark: some View {
             switch kind {
             case .github:
-                Image(systemName: "star.fill")
+                Image(icon: "star.fill")
                     .font(.sf(Tokens.TypeSize.form, weight: .regular))
                     .foregroundStyle(accent)
             case .x:
                 // heart.fill sits smaller in its box than star.fill at the same
                 // point size, so it takes a notch more to read equal.
-                Image(systemName: "heart.fill")
+                Image(icon: "heart.fill")
                     .font(.sf(Tokens.TypeSize.reading, weight: .regular))
                     .foregroundStyle(accent)
             case .discord:
-                Image(systemName: "bubble.left.and.bubble.right.fill")
+                Image(icon: "bubble.left.and.bubble.right.fill")
                     .font(.sf(Tokens.TypeSize.label, weight: .regular))
                     .foregroundStyle(accent)
             }
@@ -9395,7 +10097,7 @@ struct InlineSettingsView: View {
                         .foregroundStyle(windowPane != nil || hovering ? Tokens.text1 : Tokens.text3)
                         .lineLimit(1)
                     Spacer(minLength: 4)
-                    Image(systemName: leaves ? "arrow.up.right" : "chevron.right")
+                    Image(icon: leaves ? "arrow.up.right" : "chevron.right")
                         .font(.sf(Tokens.TypeSize.badge, weight: .regular))
                         .foregroundStyle(Tokens.text4)
                         .opacity(hovering ? 1 : 0.6)
@@ -9424,7 +10126,7 @@ struct InlineSettingsView: View {
         var body: some View {
             Button { action?() } label: {
                 HStack(spacing: 9) {
-                    Image(systemName: "checklist")
+                    Image(icon: "checklist")
                         .font(.sf(Tokens.TypeSize.meta, weight: .regular))
                         .foregroundStyle(Tokens.text1)
                         .frame(width: 17, height: 17)
@@ -9954,6 +10656,7 @@ struct AmountStepper: View {
     var lit: Bool? = nil
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.colorScheme) private var colorScheme
     @State private var hovering = false
 
     /// The minus/plus hit strip. The model detail card splits its probed frame
@@ -10005,7 +10708,7 @@ struct AmountStepper: View {
 
     private func button(_ symbol: String, enabled: Bool, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            Image(systemName: symbol)
+            Image(icon: symbol)
                 .font(.sf(Tokens.TypeSize.label, weight: .regular))
                 .foregroundStyle(enabled ? Tokens.text2 : Tokens.text4)
                 .frame(width: Self.buttonWidth, height: 30)
@@ -10067,6 +10770,36 @@ private extension View {
             .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity, alignment: .leading)
     }
+
+    /// Anchor a setting row for sidebar search scroll-to and draw a transient
+    /// borderless light sweep when it is the active search destination.
+    @ViewBuilder
+    func searchTarget(_ key: String?, active: String?) -> some View {
+        if let key {
+            let lit = active == key
+            self
+                .background {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(
+                            LinearGradient(
+                                colors: [
+                                    Tokens.ink.opacity(lit ? 0.11 : 0),
+                                    Tokens.ink.opacity(lit ? 0.04 : 0),
+                                ],
+                                startPoint: .leading,
+                                endPoint: .trailing
+                            )
+                        )
+                        .padding(.horizontal, -8)
+                        .padding(.vertical, -5)
+                        .allowsHitTesting(false)
+                }
+                .animation(.easeOut(duration: 0.35), value: lit)
+                .id("search.\(key)")
+        } else {
+            self
+        }
+    }
 }
 
 /// A settings row's explanatory note. It used to be a ⓘ that opened a popover;
@@ -10110,7 +10843,7 @@ struct SettingInfoPopover<Content: View>: View {
 
     var body: some View {
         Button { showing.toggle() } label: {
-            Image(systemName: "info.circle")
+            Image(icon: "info.circle")
                 .font(.sf(glyph, weight: .regular))
                 .foregroundStyle(hovering ? Tokens.text2 : Tokens.text4)
                 .frame(width: hit, height: hit)
@@ -10147,7 +10880,7 @@ struct UnderlineLink: View {
     private var label: Text {
         let words = Text(title).font(.sf(Tokens.TypeSize.meta))
         guard external else { return words }
-        let arrow = Text(Image(systemName: "arrow.up.right"))
+        let arrow = Text(Image(icon: "arrow.up.right"))
             .font(.sf(Tokens.TypeSize.badge, weight: .regular))
         return words + Text("\u{00A0}") + arrow
     }
@@ -10245,7 +10978,7 @@ private struct NonoPrivacyNote: View {
         HStack(spacing: 6) {
             ForEach(Array(Self.flow.enumerated()), id: \.offset) { index, node in
                 if index > 0 {
-                    Image(systemName: "chevron.right")
+                    Image(icon: "chevron.right")
                         .font(.sf(Tokens.TypeSize.caption, weight: .regular))
                         .foregroundStyle(Tokens.text4)
                 }
@@ -10328,7 +11061,7 @@ struct GlassChipFace: View {
                     .lineLimit(1)
                     .truncationMode(.tail)
             }
-            Image(systemName: "chevron.up.chevron.down")
+            Image(icon: "chevron.up.chevron.down")
                 .font(.sf(m.chevron, weight: .regular))
                 .foregroundStyle(Tokens.text3)
         }
@@ -10495,17 +11228,10 @@ private struct GlassMenuCard: View {
     }
 }
 
-/// One choice drawn as a picture: a thumbnail, its name under it, and a ring
-/// around the thumbnail when it is the current choice. Every picture picker
-/// in Settings uses this.
+/// One choice drawn as a picture: a thumbnail, its name under it, and a native
+/// Liquid Glass lens behind the thumbnail when it is the current choice. Every
+/// picture picker in Settings uses this.
 private struct PickerCard<Content: View>: View {
-    /// The chosen card's ring: white on dark; the app's blue at half strength
-    /// on light, where a black ring reads as a heavy outline and the full
-    /// blue read too dark.
-    static var selectionRing: Color {
-        Tokens.adaptive(dark: .white.withAlphaComponent(0.75),
-                        light: NSColor(Tokens.accent).withAlphaComponent(0.5))
-    }
     let selected: Bool
     let label: String
     let action: () -> Void
@@ -10517,21 +11243,26 @@ private struct PickerCard<Content: View>: View {
     @State private var hovering = false
 
     var body: some View {
-        let cardShape = RoundedRectangle(cornerRadius: Tokens.Radius.window, style: .continuous)
+        let cardShape = RoundedRectangle(cornerRadius: Tokens.Radius.menu, style: .continuous)
         Button(action: action) {
             VStack(spacing: 6) {
                 content()
                     .frame(width: Self.thumbWidth, height: Self.thumbHeight)
-                    .background(
-                        cardShape.fill(Tokens.ink.opacity(selected ? 0.10 : (hovering ? 0.08 : 0.045)))
-                    )
-                    .overlay(
-                        cardShape.strokeBorder(
-                            selected ? Tokens.text1.opacity(0.85) : Tokens.ink.opacity(hovering ? 0.22 : 0.11),
-                            lineWidth: selected ? 1.5 : 0.5)
-                    )
+                    .background {
+                        if selected {
+                            cardShape.fill(.clear)
+                                .glassCapsule(in: cardShape, brighter: true, rim: 1.25)
+                        } else {
+                            cardShape.fill(Tokens.ink.opacity(hovering ? 0.075 : 0.04))
+                                .overlay(
+                                    cardShape.strokeBorder(
+                                        Tokens.ink.opacity(hovering ? 0.18 : 0.09),
+                                        lineWidth: 0.5)
+                                )
+                        }
+                    }
                 Text(label)
-                    .font(.sf(Tokens.TypeSize.meta, weight: .regular))
+                    .font(.sf(Tokens.TypeSize.meta, weight: selected ? .medium : .regular))
                     .foregroundStyle(selected ? Tokens.text1 : Tokens.text3)
                     .lineLimit(1)
             }
@@ -10674,116 +11405,15 @@ struct NativeDetentSlider: NSViewRepresentable {
     }
 }
 
-/// A miniature display glyph for the placement picker: a screen with a bright
-/// pill on its top edge when it carries a notch island, over a laptop deck or a
-/// monitor stand so the pair reads as built-in vs. external at a glance.
-private struct MiniDisplay: View {
-    enum Kind { case laptop, external }
-    let kind: Kind
-    /// Whether this screen gets an island under the option being drawn — the
-    /// pill and the brighter screen are the whole point of the diagram.
-    let hasIsland: Bool
+/// A Phosphor glyph on a picker card; a dimmed one is the thing the choice
+/// leaves out.
+private struct PickerGlyph: View {
+    let mark: PhosphorIcons.Mark
+    var dimmed = false
 
     var body: some View {
-        VStack(spacing: kind == .laptop ? 1 : 0) {
-            screen
-            base
-        }
-    }
-
-    private var screen: some View {
-        ZStack(alignment: .top) {
-            RoundedRectangle(cornerRadius: 3)
-                .fill(Tokens.ink.opacity(hasIsland ? 0.16 : 0.05))
-            RoundedRectangle(cornerRadius: 3)
-                .strokeBorder(Tokens.ink.opacity(hasIsland ? 0.55 : 0.20), lineWidth: 1)
-            if hasIsland {
-                Capsule(style: .continuous)
-                    .fill(Tokens.ink.opacity(0.95))
-                    .frame(width: 10, height: 3)
-                    .padding(.top, 2)
-            }
-        }
-        .frame(width: kind == .laptop ? 30 : 34,
-               height: kind == .laptop ? 19 : 21)
-    }
-
-    @ViewBuilder private var base: some View {
-        let tint = Tokens.ink.opacity(hasIsland ? 0.45 : 0.18)
-        switch kind {
-        case .laptop:
-            // The hinge-forward deck, a touch wider than the lid.
-            RoundedRectangle(cornerRadius: 1)
-                .fill(tint)
-                .frame(width: 36, height: 2)
-        case .external:
-            // Monitor neck + foot.
-            VStack(spacing: 0) {
-                Rectangle()
-                    .fill(tint)
-                    .frame(width: 2, height: 3)
-                RoundedRectangle(cornerRadius: 1)
-                    .fill(tint)
-                    .frame(width: 12, height: 2)
-            }
-        }
-    }
-}
-
-/// The top of a screen with the resting notch: flat when off, with the busy
-/// ears (a dot on the left, the clock on the right) when on.
-private struct LiveActivityDiagram: View {
-    let on: Bool
-
-    var body: some View {
-        ZStack(alignment: .top) {
-            UnevenRoundedRectangle(topLeadingRadius: 3, topTrailingRadius: 3)
-                .fill(Tokens.ink.opacity(0.10))
-            UnevenRoundedRectangle(topLeadingRadius: 3, topTrailingRadius: 3)
-                .strokeBorder(Tokens.ink.opacity(0.35), lineWidth: 1)
-            HStack(spacing: 0) {
-                if on {
-                    Circle().fill(Tokens.ink.opacity(0.9)).frame(width: 3, height: 3)
-                    Spacer(minLength: 0)
-                    Capsule(style: .continuous).fill(Tokens.ink.opacity(0.9)).frame(width: 7, height: 2)
-                }
-            }
-            .padding(.horizontal, 4)
-            .frame(width: on ? 40 : 18, height: 7)
-            .background(UnevenRoundedRectangle(bottomLeadingRadius: 3.5, bottomTrailingRadius: 3.5)
-                .fill(.black))
-        }
-        .frame(width: 64, height: 22)
-    }
-}
-
-/// A screen taken over by a full-screen app, with or without the notch's pill.
-private struct FullscreenDiagram: View {
-    let showsNotch: Bool
-
-    var body: some View {
-        ZStack(alignment: .top) {
-            RoundedRectangle(cornerRadius: 3)
-                .fill(Tokens.ink.opacity(0.14))
-            RoundedRectangle(cornerRadius: 3)
-                .strokeBorder(Tokens.ink.opacity(0.4), lineWidth: 1)
-            // The app's own content, edge to edge.
-            VStack(alignment: .leading, spacing: 2.5) {
-                Capsule(style: .continuous).fill(Tokens.ink.opacity(0.3)).frame(width: 26, height: 2)
-                Capsule(style: .continuous).fill(Tokens.ink.opacity(0.3)).frame(width: 34, height: 2)
-                Capsule(style: .continuous).fill(Tokens.ink.opacity(0.3)).frame(width: 20, height: 2)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.leading, 6)
-            .padding(.top, 10)
-            if showsNotch {
-                Capsule(style: .continuous)
-                    .fill(Tokens.ink.opacity(0.95))
-                    .frame(width: 12, height: 3)
-                    .padding(.top, 2.5)
-            }
-        }
-        .frame(width: 50, height: 30)
+        PhosphorIcon(mark: mark, size: 26)
+            .foregroundStyle(Tokens.text1.opacity(dimmed ? 0.28 : 0.85))
     }
 }
 
@@ -11062,7 +11692,7 @@ private struct ListRowRemoveButton: View {
 
     var body: some View {
         Button(action: action) {
-            Image(systemName: "xmark")
+            Image(icon: "xmark")
                 .font(.sf(Tokens.TypeSize.badge, weight: .regular))
                 .foregroundStyle(hovering ? Tokens.text1 : Tokens.text4)
                 .frame(width: Tokens.Control.inline, height: Tokens.Control.inline)
@@ -11120,13 +11750,13 @@ struct SettingsMetrics {
     static let panel = SettingsMetrics(
         contentMaxWidth: nil, rowSpacing: 18, groupHeadingGap: 24,
         labelNoteSpacing: 2, paneTopRunway: 14, paneTopFade: 34,
-        paneSideInset: 0, sidebarWidth: 104, typeBump: 0,
+        paneSideInset: 0, sidebarWidth: 128, typeBump: 0,
         notesUnclamped: false, scrimOpacity: 0.45)
 
     static let window = SettingsMetrics(
         contentMaxWidth: 560, rowSpacing: 22, groupHeadingGap: 32,
         labelNoteSpacing: 4, paneTopRunway: 24, paneTopFade: 20,
-        paneSideInset: 18, sidebarWidth: 124, typeBump: 1,
+        paneSideInset: 18, sidebarWidth: 164, typeBump: 1,
         notesUnclamped: true, scrimOpacity: 0.25)
 
     /// `panel` for a note that the panel clamps to `lines`; nil in the window.

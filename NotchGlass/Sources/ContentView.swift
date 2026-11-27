@@ -1044,7 +1044,13 @@ struct NotchIsland: View {
         if metrics.floating, MenuBarChat.takesOver(model) {
             menuBarChat
         } else {
+            // Pin SwiftUI's colorScheme explicitly alongside `NotchPanel`'s
+            // `.darkAqua` appearance: in system Light Mode, `NSHostingView` can
+            // momentarily or persistently re-seed `\.colorScheme` from
+            // `NSApp.effectiveAppearance` (`.aqua`), flipping `Tokens.adaptive`
+            // ink to dark charcoal and `IslandRim` to `lightRim` over dark glass.
             islandBody
+                .environment(\.colorScheme, .dark)
         }
     }
 
@@ -1082,9 +1088,10 @@ struct NotchIsland: View {
     /// column's empty trailing part goes past the canvas edge, so the bubbles
     /// end `floatingInset` from the screen's right edge.
     private var menuBarChatTrailing: CGFloat {
-        // The routines side page fills the whole column, so it keeps the inset.
+        // The side pages sit in the bubbles' column too, so the card keeps one
+        // right edge whichever page shows.
         guard metrics.displayID == NotchModel.menuBarCardDisplay,
-              MenuBarCardPlacement.current == .right, !model.showRoutines else {
+              MenuBarCardPlacement.current == .right else {
             return NotchMetrics.floatingInset
         }
         return NotchMetrics.floatingInset - MenuBarChat.trailingSlack

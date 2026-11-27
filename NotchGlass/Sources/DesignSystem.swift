@@ -237,7 +237,7 @@ enum Tokens {
     static let openWidthIdle: CGFloat = 540
     static let openWidthLoad: CGFloat = 560
     static let openWidthResult: CGFloat = 600
-    static let openWidthSettings: CGFloat = 580   // inline settings form
+    static let openWidthSettings: CGFloat = 604   // inline settings form (sidebar 128 + pane)
     static let openWidthWhatsNew: CGFloat = 600   // release-notes reading column
 }
 
@@ -329,7 +329,7 @@ struct AddCreditButtonFace: View {
     var body: some View {
         HStack(spacing: 5) {
             if icon {
-                LucideIcon(mark: LucideIcons.circleDollarSign, size: compact ? 12 : 13)
+                PhosphorIcon(mark: PhosphorIcons.circleDollarSign, size: compact ? 12 : 13)
             }
             if !title.isEmpty {
                 Text(title)

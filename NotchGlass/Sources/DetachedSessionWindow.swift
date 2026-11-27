@@ -398,6 +398,9 @@ final class DetachedSessionWindowController: NSObject, NSWindowDelegate {
     private var reclaimedAfterSummon = false
     /// Watches for the app becoming active again — see `closeIfLeftBehind`.
     private var activationObserver: NSObjectProtocol?
+    /// Mouse-down monitors that close an unpinned pointer-side card when the
+    /// user clicks anywhere outside it — see `closeOnOutsideClick`.
+    private var outsideClickMonitors: [Any] = []
     /// Streaming Markdown can briefly report a shorter layout while a token is
     /// being reclassified or SwiftUI catches up with AppKit's text estimate.
     /// Keep the tallest accepted height for this round so those transient
@@ -793,6 +796,7 @@ final class DetachedSessionWindowController: NSObject, NSWindowDelegate {
             ) { [weak self] _ in
                 MainActor.assumeIsolated { self?.closeIfLeftBehind() }
             }
+            installOutsideClickMonitors()
         }
         if let threadID = session.threadID {
             state.threadStore = model.adoptDetachedThread(threadID)
@@ -2269,6 +2273,45 @@ final class DetachedSessionWindowController: NSObject, NSWindowDelegate {
         window.close()
     }
 
+    /// A click outside an unpinned pointer-side card closes it. The global
+    /// monitor sees clicks in other apps; the local one sees clicks in this
+    /// app's other windows (the notch, Settings).
+    private func installOutsideClickMonitors() {
+        let mask: NSEvent.EventTypeMask = [.leftMouseDown, .rightMouseDown, .otherMouseDown]
+        if let global = NSEvent.addGlobalMonitorForEvents(matching: mask, handler: { [weak self] _ in
+            MainActor.assumeIsolated { self?.closeOnOutsideClick(in: nil) }
+        }) {
+            outsideClickMonitors.append(global)
+        }
+        if let local = NSEvent.addLocalMonitorForEvents(matching: mask, handler: { [weak self] event in
+            MainActor.assumeIsolated { self?.closeOnOutsideClick(in: event.window) }
+            return event
+        }) {
+            outsideClickMonitors.append(local)
+        }
+    }
+
+    private func removeOutsideClickMonitors() {
+        outsideClickMonitors.forEach(NSEvent.removeMonitor)
+        outsideClickMonitors.removeAll()
+    }
+
+    private func closeOnOutsideClick(in clicked: NSWindow?) {
+        guard !state.pinned, !isDrawingPressure, !isInSummonGrace,
+              let window, window.isVisible
+        else { return }
+        // A click in this card, or in a window it owns (a menu, a tooltip).
+        if let clicked {
+            var w: NSWindow? = clicked
+            while let current = w {
+                if current === window { return }
+                w = current.parent
+            }
+        }
+        if window.frame.contains(NSEvent.mouseLocation) { return }
+        fadeOutAndClose()
+    }
+
     /// A pointer-side composer with nothing in it and nothing holding it open.
     private var isUntouchedComposer: Bool {
         guard compactShortcut, hasHeldKey, !state.pinned, !isDrawingPressure,
@@ -2316,6 +2359,7 @@ final class DetachedSessionWindowController: NSObject, NSWindowDelegate {
     }
 
     func windowWillClose(_ notification: Notification) {
+        removeOutsideClickMonitors()
         endRide()
         stopCompactGlide()
         // The reveal's commit also rides SwiftUI's animation completion, which
@@ -2653,7 +2697,7 @@ struct DetachedSessionRootView: View {
             segments.append(.init(id: "compact-back",
                                   tooltip: L("recent.collapse"),
                                   action: onToggleForceTouchHistory) {
-                Image(systemName: "chevron.left")
+                Image(icon: "chevron.left")
                     .font(.sf(Tokens.TypeSize.meta, weight: .semibold))
             })
         }
@@ -3024,7 +3068,7 @@ private struct WindowTrailingCluster: View {
                 PinStateGlyph(pinned: pinned, size: 12.5, weight: .semibold)
             },
             .init(tooltip: L("detached.close"), action: close) {
-                Image(systemName: "xmark")
+                Image(icon: "xmark")
                     .font(.sf(Tokens.TypeSize.meta, weight: .semibold))
             },
         ], showsTooltips: false)
@@ -3198,7 +3242,7 @@ private struct CompactHistoryDisclosure: View {
 
     var body: some View {
         Button(action: action) {
-            Image(systemName: "chevron.down")
+            Image(icon: "chevron.down")
                 .font(.sf(Tokens.TypeSize.meta, weight: .semibold))
                 .foregroundStyle(hovering ? Tokens.text1 : Tokens.text2)
                 .rotationEffect(.degrees(expanded ? 180 : 0))
@@ -3237,7 +3281,7 @@ private struct CompactCloseLight: View {
                 .fill(Color.white.opacity(hovering ? Self.hoverFill : Self.fill))
                 .overlay(Circle().strokeBorder(Self.rim, lineWidth: 0.5))
                 .overlay {
-                    Image(systemName: "xmark")
+                    Image(icon: "xmark")
                         .font(.system(size: 7.5, weight: .bold))
                         .foregroundStyle(Tokens.text2)
                         .opacity(hovering ? 1 : 0)
@@ -4318,12 +4362,12 @@ struct DetachedThreadView: View {
     }
     /// The session window's rest under its last turn, above the follow-up line.
     static let sessionBottomGap: CGFloat = 12
-    /// The compact card keeps the panel's 18pt quiet gap above the thread.
+    /// The compact card keeps a 6pt gap between the header row and the thread.
     /// Below it, a torn-out session leaves room for its follow-up line; the
     /// pointer-side card has none, so its last row rests one prose inset (the
     /// sides') off the card's bottom edge, its own top/bottom padding already
     /// counted separately (`compactWindowHeight`).
-    static let restingTopGap: CGFloat = 18
+    static let restingTopGap: CGFloat = 6
     static let restingBottomGap: CGFloat = compactCardInset - compactCardVerticalInset
     /// The first round's typing bubble: one line of answer text. The compact
     /// card's answer is flat (`AnswerCard.flat`) — no bubble padding around it —
@@ -4916,8 +4960,7 @@ struct DetachedThreadView: View {
 
     private func pickFollowUpAttachments(folder: Bool) {
         attachMenuOpen = false
-        model?.pickAttachments(folder: folder,
-                               takesImages: store.followUpSupportsImages) { images, files in
+        model?.pickAttachments(folder: folder) { images, files in
             withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
                 let room = max(0, NotchModel.composeImageLimit - followUpImages.count)
                 followUpImages.append(contentsOf: images.prefix(room))
@@ -5286,7 +5329,7 @@ struct DetachedAgentTaskView: View {
                     if task.loopActive { manager.stopLoop(taskID: task.id) }
                     else { manager.cancel(taskID: task.id) }
                 }) {
-                    Image(systemName: "stop.circle")
+                    Image(icon: "stop.circle")
                         .font(.sf(Tokens.TypeSize.form, weight: .semibold))
                         .foregroundStyle(Tokens.text3)
                         .frame(width: Tokens.Control.inline, height: Tokens.Control.inline)
@@ -5303,7 +5346,7 @@ struct DetachedAgentTaskView: View {
                         .foregroundStyle(Tokens.text4)
                 }
                 Button(action: { manager.stopLoop(taskID: task.id) }) {
-                    Image(systemName: "stop.circle")
+                    Image(icon: "stop.circle")
                         .font(.sf(Tokens.TypeSize.form, weight: .semibold))
                         .foregroundStyle(Tokens.text3)
                         .frame(width: Tokens.Control.inline, height: Tokens.Control.inline)

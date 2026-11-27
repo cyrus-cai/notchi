@@ -515,17 +515,20 @@ struct CloudMachineTool: NotchTool {
     action=show_image takes an image file on the machine (a screenshot you made, a \
     chart) and returns a Markdown image line for your answer; use it to show the user \
     a picture, not publish_port. pip install works without extra flags. \
-    It also has a desktop with Chromium that you drive: action=browse opens a URL \
-    and returns the page as numbered elements (fields, check boxes, buttons, links, \
-    text). action=click presses element `index` (buttons, links, check boxes, radio \
+    It also has a Chromium that you drive, 1 to 3 seconds a call: action=browse opens a URL \
+    and returns the page as numbered elements ([n role "name" value=…]) with its text. \
+    action=fill_form fills a whole form in one call: `fields` (each {index, text}), \
+    `check` (check boxes to tick) and `submit` (the button to press after), and \
+    returns each field's value; use it for every form instead of one fill per call. \
+    action=click presses element `index` (buttons, links, check boxes, radio \
     buttons; for a check box the result says whether it is now checked), action=fill types `text` into field `index` (replacing what is there), \
     action=select chooses option `text` in drop-down `index`, action=type and \
-    action=key send text or a key (Return, Tab, ctrl+a) to what has focus, \
+    action=key send text or a key (Enter, Tab, ctrl+a) to what has focus, \
     action=scroll moves the page, action=back goes back, and action=page_state reads \
     the page again. action=show_element takes a picture of element `index` (a \
     captcha image) and returns a Markdown image line for your answer, so the user \
-    sees it. Every one of them returns the page as it is afterwards, with \
-    fresh numbers: use only numbers from the latest result. On a long page, pass \
+    sees it. Every one of them returns the page as it is afterwards; an \
+    element keeps its number until the page changes. On a long page, pass \
     `find` (action=page_state find=Password) to get just the matching elements \
     instead of reading the saved output in parts. The browser keeps its \
     cookies between calls. The first call can take a minute while the machine starts.
@@ -534,14 +537,23 @@ struct CloudMachineTool: NotchTool {
         "type": "object",
         "properties": [
             "action": ["type": "string", "enum": ["shell", "read", "write", "upload", "download", "publish_port", "show_image",
-                                                  "browse", "page_state", "click", "fill", "select",
+                                                  "browse", "page_state", "click", "fill", "fill_form", "select",
                                                   "type", "key", "scroll", "back", "show_element"]],
             "url": ["type": "string", "description": "action=browse: the page to open."],
             "index": ["type": "integer",
                       "description": "click, fill, select, scroll, show_element: the element's number in the latest page state."],
+            "fields": ["type": "array",
+                       "items": ["type": "object",
+                                 "properties": ["index": ["type": "integer"], "text": ["type": "string"]],
+                                 "required": ["index", "text"]],
+                       "description": "action=fill_form: the fields to fill, each {index, text}."],
+            "check": ["type": "array", "items": ["type": "integer"],
+                      "description": "action=fill_form: check boxes or radio buttons to tick (left alone when already checked)."],
+            "submit": ["type": "integer",
+                       "description": "action=fill_form: the button to press after filling. Leave out to fill only."],
             "text": ["type": "string",
                      "description": "fill: the field's new text. select: the option to choose. type: the text to type."],
-            "key": ["type": "string", "description": "action=key: xdotool key syntax, e.g. Return, Tab, ctrl+a."],
+            "key": ["type": "string", "description": "action=key: a key or combination, e.g. Enter, Tab, Escape, ctrl+a."],
             "direction": ["type": "string", "enum": ["up", "down"], "description": "action=scroll. Default down."],
             "app": ["type": "string",
                     "description": "Browser actions: another app on the cloud machine's desktop. Default Chromium."],
@@ -572,7 +584,18 @@ struct CloudMachineTool: NotchTool {
                                          ".env", ".env.*", "*.pem", "*.key", "id_rsa", "id_ed25519"]
 
     func execute(_ input: [String: Any]) async throws -> String {
-        switch input["action"] as? String {
+        let given = input["action"] as? String
+        if given.map({ Self.allActions.contains($0) }) != true {
+            // On 2026-11-26 two calls came with no usable action and got only the
+            // list of actions back; the arguments said what was meant.
+            let inferred = Self.inferAction(input)
+            var fixed = input
+            fixed["action"] = inferred
+            let note = "(action \(given.map { "\"\($0)\"" } ?? "was missing") is not one of this tool's; "
+                + "ran action=\(inferred) from the other arguments.)\n"
+            return note + (try await execute(fixed))
+        }
+        switch given {
         case "shell": return try await shell(input)
         case "read": return try await read(input)
         case "write": return try await write(input)
@@ -584,18 +607,39 @@ struct CloudMachineTool: NotchTool {
             return try await browser(input)
         default:
             return "Error: action must be shell, read, write, upload, download, publish_port, show_image, "
-                + "browse, page_state, click, fill, select, type, key, scroll, back or show_element."
+                + "browse, page_state, click, fill, fill_form, select, type, key, scroll, back or show_element."
         }
     }
 
-    static let browserActions: Set<String> = ["browse", "page_state", "click", "fill", "select",
+    static let browserActions: Set<String> = ["browse", "page_state", "click", "fill", "fill_form", "select",
                                               "type", "key", "scroll", "back", "show_element"]
+
+    static let allActions: Set<String> = browserActions.union(["shell", "read", "write", "upload", "download",
+                                                               "publish_port", "show_image"])
+
+    /// The action a call without a valid one most likely meant, from its other
+    /// arguments. Reading the page is the default: it changes nothing.
+    static func inferAction(_ input: [String: Any]) -> String {
+        let has = { (key: String) in text(input, key) != nil || input[key] is NSNumber }
+        if has("command") { return "shell" }
+        if has("url") { return "browse" }
+        if input["fields"] is [Any] { return "fill_form" }
+        if has("local_path") { return "upload" }
+        if has("port") { return "publish_port" }
+        if has("content"), has("path") { return "write" }
+        if has("key") { return "key" }
+        if has("index") { return input["text"] is String ? "fill" : "click" }
+        if has("direction") { return "scroll" }
+        if has("text") { return "type" }
+        if has("path") { return "read" }
+        return "page_state"
+    }
 
     /// One step on the machine's desktop, through `CloudDesktopBridge`. The
     /// tool's action names map to the bridge's operations.
     private func browser(_ input: [String: Any]) async throws -> String {
         let action = input["action"] as? String ?? ""
-        let op = ["browse": "open", "page_state": "state", "show_element": "snap"][action] ?? action
+        let op = ["browse": "open", "page_state": "state", "show_element": "snap", "fill_form": "form"][action] ?? action
         var job: [String: Any] = ["op": op]
         if let app = Self.text(input, "app") { job["app"] = app }
         let index = (input["index"] as? NSNumber)?.intValue ?? (input["index"] as? String).flatMap { Int($0) }
@@ -613,6 +657,19 @@ struct CloudMachineTool: NotchTool {
                 guard let text = input["text"] as? String else { return "Error: text is required." }
                 job["text"] = text
             }
+        case "fill_form":
+            let fields = (input["fields"] as? [[String: Any]] ?? []).compactMap { field -> [String: Any]? in
+                guard let index = Self.integer(field["index"]) else { return nil }
+                return ["index": index, "text": field["text"] as? String ?? ""]
+            }
+            let check = (input["check"] as? [Any] ?? []).compactMap { Self.integer($0) }
+            let submit = Self.integer(input["submit"])
+            if fields.isEmpty && check.isEmpty && submit == nil {
+                return "Error: fill_form needs fields, check or submit."
+            }
+            job["fields"] = fields
+            job["check"] = check
+            if let submit { job["submit"] = submit }
         case "type":
             guard let text = input["text"] as? String, !text.isEmpty else { return "Error: text is required." }
             job["text"] = text
@@ -625,8 +682,32 @@ struct CloudMachineTool: NotchTool {
         default:
             break
         }
-        let output = try await CloudDesktopBridge.run(job)
+        let onChromium = (job["app"] as? String).map { $0.lowercased() == "chromium" } ?? true
+        let output: String
+        if onChromium {
+            job.removeValue(forKey: "app")
+            output = try await CloudBrowserCDP.run(job)
+            Self.noteHost(output)
+        } else {
+            if action == "fill_form" { return "Error: fill_form works in Chromium only." }
+            output = try await CloudDesktopBridge.run(job)
+        }
         return action == "show_element" ? try await Self.bringPicture(output) : output
+    }
+
+    /// The site the cloud browser showed last, for the activity line of the
+    /// next click or fill. Read from the result's `URL:` line.
+    nonisolated(unsafe) static var lastBrowsedHost: String?
+
+    private static func noteHost(_ output: String) {
+        guard let line = output.split(separator: "\n").first(where: { $0.hasPrefix("URL: ") }),
+              var host = URL(string: String(line.dropFirst(5)))?.host else { return }
+        if host.hasPrefix("www.") { host.removeFirst(4) }
+        lastBrowsedHost = host
+    }
+
+    private static func integer(_ value: Any?) -> Int? {
+        (value as? NSNumber)?.intValue ?? (value as? String).flatMap { Int($0) }
     }
 
     /// The bridge leaves the picture in the machine's /tmp. It comes to this
@@ -706,7 +787,7 @@ struct CloudMachineTool: NotchTool {
         var bing = URLComponents(string: "https://www.bing.com/search")!
         bing.queryItems = [URLQueryItem(name: "q", value: query), URLQueryItem(name: "mkt", value: "en-US")]
         return """
-        Not opened: a search in the cloud browser takes about 40 seconds. Use \
+        Not opened: a search engine in the cloud browser shows captchas to a data-center address. Use \
         web_search when it is listed; otherwise read_page url=\(bing.string ?? "https://www.bing.com/search?q=…") \
         (about 1 second). Open the result pages with read_page too. Only if \
         read_page returns an error for this search, browse the same URL again \
@@ -752,6 +833,20 @@ struct CloudMachineTool: NotchTool {
     /// displays after action=click left a check box unchanged; none landed.
     /// The browser actions read element frames and click with the mouse
     /// themselves. Reading window geometry or searching windows is left alone.
+    /// A refusal for a shell command that drives the cloud browser over its
+    /// debugging port. On 2026-11-27 a model wrote 25 Python CDP scripts in four
+    /// minutes against a sign-up form the browser actions had already filled;
+    /// the page was held by a Turnstile check none of them could pass.
+    static func browserScripting(_ command: String) -> String? {
+        let pattern = #"\b(9222|9333)\b|webSocketDebuggerUrl|devtools/page|Runtime\.evaluate|Input\.dispatch|Page\.navigate|from cdp2? import|import websocket"#
+        guard command.range(of: pattern, options: [.regularExpression, .caseInsensitive]) != nil else { return nil }
+        return """
+        Not run: the cloud browser is driven only through the browser actions (browse, \
+        fill_form, click, fill, select, key, page_state). If those cannot get past a step, \
+        a script will not either: stop and give the user the page's link to finish it.
+        """
+    }
+
     static func desktopScripting(_ command: String) -> String? {
         let pattern = #"\bxdotool\b[^|;&\n]*\b(click|mousemove|mousedown|mouseup|key|keydown|keyup|type)\b"#
         guard command.range(of: pattern, options: [.regularExpression, .caseInsensitive]) != nil else { return nil }
@@ -826,7 +921,8 @@ struct CloudMachineTool: NotchTool {
     private func shell(_ input: [String: Any]) async throws -> String {
         guard let command = Self.text(input, "command") else { return "Error: command is required." }
         let cwd = Self.text(input, "cwd")
-        if let refusal = Self.pageScraping(command) ?? Self.desktopScripting(command) { return refusal }
+        if let refusal = Self.pageScraping(command) ?? Self.desktopScripting(command)
+            ?? Self.browserScripting(command) { return refusal }
         if (input["background"] as? Bool) == true || (input["background"] as? String) == "true" {
             // The command rides an env var, so it needs no quoting. A job's output
             // must go to a file: its later writes to exec's output fail once exec returns.
@@ -1047,7 +1143,7 @@ enum CloudDesktopBridge {
 
     /// Takes the script's `NOTCHI-TIMING` line off `output` and appends it to
     /// `timingLog`. The model does not see it.
-    private static func logTiming(_ output: String, roundTrip: TimeInterval) -> String {
+    static func logTiming(_ output: String, roundTrip: TimeInterval) -> String {
         let marker = "NOTCHI-TIMING "
         var kept: [Substring] = []
         var timing = ""
@@ -1222,13 +1318,24 @@ enum CloudDesktopBridge {
           frame = ` @${Math.round(x)},${Math.round(y)} ${Math.round(w)}x${Math.round(h)}`;
           return '';
         });
+        let toggled = '';
         rest = rest.replace(/ Secondary Actions: (.*)$/, (_, list) => {
-          const kept = list.split(', ').filter((a) => !['doDefault', 'showContextMenu'].includes(a)
+          const all = list.split(', ');
+          if (all.includes('uncheck')) toggled = 'checked';
+          else if (all.includes('check')) toggled = 'not checked';
+          const kept = all.filter((a) => !['doDefault', 'showContextMenu'].includes(a)
             && !a.startsWith('scroll'));
           return kept.length ? ` [${kept.join(', ')}]` : '';
         });
         rest = rest.replace(/ Value:\s*(?=\[|$)/, '');
         rest = rest.trim();
+        // On 2026-11-26 a terms box read "check box [check]" for 20 calls; the
+        // model took [check] for its state and clicked the disabled sign-in
+        // button 9 times, then unticked the box after its label had ticked it.
+        if (toggled) {
+          const t = TOGGLES.find((r) => rest === r || rest.startsWith(r + ' '));
+          if (t) rest = `${t} (${toggled})${rest.slice(t.length)}`;
+        }
         const role = rest.match(/^(panel|notification|section|filler|static|grouping|form|landmark|redundant object|unknown|image|separator|paragraph)$/);
         if (role) continue;
         const depth = Math.min(indent.length, 12);
@@ -1421,6 +1528,12 @@ enum CloudDesktopBridge {
           + 'clicking or dragging on the picture, and a reply from the user cannot do that. Do not show it '
           + 'or ask for characters; say this step needs the user at the page and give the page\'s link.');
       }
+      const field = textFieldNotPicture(app, el);
+      if (field) {
+        throw new Error(`Element ${index} is ${field}, not a picture, and the page state has no image there. `
+          + 'There is no captcha picture to show the user. A code sent by text message goes into that field: '
+          + 'only the user has it, so ask for it in your answer and end the turn.');
+      }
       const line = await scrollIntoView(app, index, el);
       const frame = frameOf(line);
       const origin = await windowOrigin(app);
@@ -1441,6 +1554,34 @@ enum CloudDesktopBridge {
       const shot = await command('scrot', ['-o', '-a', `${x},${y},${w},${h}`, path]);
       if (shot.code !== 0 || !fs.existsSync(path)) throw new Error(`The screenshot failed (scrot ${x},${y},${w},${h}: ${shot.code} ${shot.err || ''}).`);
       return `Saved a picture of element ${index} to ${path}.`;
+    }
+
+    // A description of the text field when the element is one, or wraps one
+    // with no image or canvas inside; null otherwise. On 2026-11-26
+    // show_element was called on the box around an empty "短信验证码" (SMS
+    // code) field, and the answer showed that picture to the user as a captcha.
+    function textFieldNotPicture(app, el) {
+      const FIELDS = /^(entry|password text|spin button|combo box)\b/;
+      const PICTURES = /^(image|canvas|graphic|svg root|image map)\b/;
+      const body = (l) => l.trim().replace(/^\d+ /, '');
+      if (FIELDS.test(body(el.line))) return `the text field "${nameOf(el)}"`;
+      const box = frameOf(el.line);
+      if (!box) return null;
+      let tree = '';
+      try { tree = fs.readFileSync(stateFile(app), 'utf8'); } catch { return null; }
+      const inside = (f) => f && f.x >= box.x - 2 && f.y >= box.y - 2
+        && f.x + f.w <= box.x + box.w + 2 && f.y + f.h <= box.y + box.h + 2;
+      let field = null;
+      for (const l of tree.split('\n')) {
+        if (!/^\s*\d+ /.test(l) || l === el.line || !inside(frameOf(l))) continue;
+        const b = body(l);
+        if (PICTURES.test(b)) return null;
+        if (!field && FIELDS.test(b)) {
+          const role = b.match(FIELDS)[1];
+          field = `the box around the text field "${b.slice(role.length).replace(/ (Value:|Secondary Actions:|Frame:).*$/, '').trim()}"`;
+        }
+      }
+      return field;
     }
 
     // Roles whose click flips a checked state.
@@ -1581,6 +1722,16 @@ enum CloudDesktopBridge {
         + '(kill PID), or restart the browser with pkill chromium and action=browse.';
     }
 
+    // The address bar's text in a Chromium state, raw or compacted; '' when absent.
+    const addressOf = (s) => (s.match(/Address and search bar Value: (\S+)/) || [])[1] || '';
+
+    // Whether the address bar text is the requested URL: Chromium leaves out
+    // the scheme and `www.`, and may add or drop a trailing slash.
+    function sameAddress(shown, url) {
+      const norm = (u) => String(u).replace(/^[a-z]+:\/\//i, '').replace(/^www\./i, '').replace(/\/+$/, '').toLowerCase();
+      return norm(shown) === norm(url);
+    }
+
     // The page as the model saw it, without element numbers, to tell whether a
     // click changed anything.
     const plainState = (s) => s.replace(/^(\s*)\d+ /gm, '$1');
@@ -1657,6 +1808,9 @@ enum CloudDesktopBridge {
       }
       switch (job.op) {
         case 'open': {
+          if (isChromium(app)) {
+            try { job.address = addressOf(fs.readFileSync(stateFile(app), 'utf8')); } catch {}
+          }
           spawn('chromium', [
             '--no-first-run', '--no-default-browser-check', '--force-renderer-accessibility',
             '--disable-features=Translate', '--password-store=basic', `--user-data-dir=${PROFILE}`, job.url,
@@ -1862,6 +2016,33 @@ enum CloudDesktopBridge {
             lines.push('The page is the same as before this click: the click did not take effect. '
               + 'Do not assume it worked; check the element is on screen (action=scroll), then try its label, '
               + 'a neighbouring element, or action=key.');
+            const unticked = state.split('\n').filter((l) => / \(not checked\)/.test(l)).map((l) => l.trim());
+            if (unticked.length) {
+              lines.push(`Unchecked boxes on this page: ${unticked.slice(0, 4).join('; ')}. A button often does `
+                + 'nothing until a required box (terms, consent) is checked: check that box once, confirm it reads '
+                + '(checked), then click the button again. Do not click a box that already reads (checked).');
+            }
+          }
+          // On 2026-11-26 browse said "Opened https://jina.ai/signup" and
+          // "Opened https://unstructured.io/" while the address bar still showed
+          // jina.ai/api-dashboard/, and the first browse of the morning returned
+          // the day before's StockTitan page. The new tab had not come to the
+          // front; the URL now goes into the front tab's address bar instead.
+          if (job.op === 'open' && isChromium(app) && job.address
+              && addressOf(state) === job.address && !sameAddress(job.address, job.url)) {
+            await focusWindow(app);
+            await xdo(['key', '--clearmodifiers', 'ctrl+l']);
+            await xdo(['type', '--clearmodifiers', '--delay', '8', '--', job.url]);
+            await xdo(['key', 'Return']);
+            await sleep(4000);
+            state = await readState(app);
+            const now = addressOf(state);
+            if (now === job.address) {
+              lines[lines.indexOf(said)] = `${job.url} did not open: the browser still shows ${now}, and the `
+                + 'state below is that old page. Do not read it as the new page.';
+            } else {
+              lines[lines.indexOf(said)] = `Opened ${job.url} in the front tab (a new tab did not come up).`;
+            }
           }
           if (job.find) {
             const want = String(job.find).toLowerCase();
@@ -1890,6 +2071,674 @@ enum CloudDesktopBridge {
     if (mode === 'serve') serve().catch((e) => { log(String(e)); process.exit(1); });
     else run().catch((e) => { process.stdout.write(`Error: ${e.message}\n`); process.exit(1); });
     """#
+}
+
+// MARK: - Browser over CDP
+
+/// Drives the cloud machine's Chromium over the Chrome DevTools Protocol. The
+/// accessibility path (`CloudDesktopBridge`) took 35 to 58 s per call on
+/// 2026-11-27: each page read through AT-SPI took about 17 s, a click read it
+/// twice, and xdotool's `windowactivate --sync` waited out its 15 s limit before
+/// every keystroke. Over CDP a page read takes under 0.1 s and a click about 1 s
+/// with the page settling. Typed text reaches React fields, which the old path
+/// left empty. Other apps on the desktop still go through `CloudDesktopBridge`.
+enum CloudBrowserCDP {
+    static let path = "/data/home/.notchi/cdp-bridge.mjs"
+    /// Words in a result that mean the step needs the user (the bot-check stop
+    /// note in the script); the harness ends the turn's tool work on it.
+    static let handOffMarker = "and that check is the likely reason: stop now"
+    private static let timeout: TimeInterval = 90
+
+    private actor Written {
+        private(set) var done = false
+        func set(_ value: Bool) { done = value }
+    }
+    private static let written = Written()
+
+    static func run(_ job: [String: Any]) async throws -> String {
+        let payload = String(decoding: try JSONSerialization.data(withJSONObject: job), as: UTF8.self)
+        for attempt in 0..<2 {
+            if !(await written.done) {
+                try await InstaBoxMachine.shared.write(Data(script.utf8), to: path)
+                await written.set(true)
+            }
+            let sent = Date()
+            let result = try await InstaBoxMachine.shared.exec(
+                "node \(path) run", env: ["NOTCHI_CU": payload], cwd: nil, timeout: timeout)
+            if attempt == 0, result.output.contains("Cannot find module") {
+                await written.set(false)
+                continue
+            }
+            let output = CloudDesktopBridge.logTiming(result.output, roundTrip: Date().timeIntervalSince(sent))
+            if result.timedOut { return "[stopped after \(Int(timeout)) seconds] " + output }
+            return output.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return "Error: the browser script could not be written to the cloud machine."
+    }
+
+    private static let script = #"""
+// Notchi's browser on the cloud machine, driven over the Chrome DevTools
+// Protocol. Each Notchi call is one exec of this script: it connects to the
+// Chromium it keeps on CDP_PORT (starting it when absent), runs one job and
+// prints the page afterwards. Element numbers are stored on the elements
+// (data-notchi), so they hold across calls until the page changes.
+//
+//   node cdp-bridge.mjs run      reads a job from $NOTCHI_CU, prints the result
+//
+// A job: {"op", "url"?, "index"?, "text"?, "key"?, "direction"?, "find"?,
+//         "fields"?: [{"index", "text"}], "check"?: [index], "submit"?: index}
+// op: open, state, click, fill, form, select, type, key, back, scroll, snap
+import fs from 'node:fs';
+import os from 'node:os';
+import { spawn, execFileSync } from 'node:child_process';
+
+const CDP_PORT = 9333;
+const PROFILE = '/data/home/.notchi/chromium';
+const TARGET_FILE = '/tmp/notchi-cdp-target';
+// The URL of the last browse: the link a user can open themselves. A sign-in
+// page's own URL carries a session `state` that fails in another browser.
+const OPENED_FILE = '/tmp/notchi-cdp-opened';
+const TIMING = 'NOTCHI-TIMING ';
+const uid = process.getuid();
+const desktopEnv = {
+  ...process.env,
+  DISPLAY: ':1',
+  XDG_RUNTIME_DIR: `/run/user/${uid}`,
+  DBUS_SESSION_BUS_ADDRESS: `unix:path=/run/user/${uid}/bus`,
+};
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// MARK: CDP connection
+
+async function json(path) {
+  const r = await fetch(`http://127.0.0.1:${CDP_PORT}${path}`, { signal: AbortSignal.timeout(2000) });
+  return r.json();
+}
+
+async function cdpUp() {
+  try { await json('/json/version'); return true; } catch { return false; }
+}
+
+// Starts Chromium with the debugging port. A Chromium already running on the
+// same profile without the port would take the launch and exit, so it goes
+// first; the profile keeps cookies across the restart.
+async function ensureBrowser() {
+  if (await cdpUp()) return '';
+  try { execFileSync('pkill', ['-f', `user-data-dir=${PROFILE}`]); } catch {}
+  for (let i = 0; i < 20 && fs.existsSync(`${PROFILE}/SingletonLock`); i++) {
+    await sleep(150);
+    if (i === 10) try { fs.unlinkSync(`${PROFILE}/SingletonLock`); } catch {}
+  }
+  spawn('chromium', [
+    `--remote-debugging-port=${CDP_PORT}`, '--remote-debugging-address=127.0.0.1',
+    `--user-data-dir=${PROFILE}`, '--no-first-run', '--no-default-browser-check',
+    '--disable-features=Translate', '--password-store=basic', '--window-size=1280,800',
+    '--window-position=0,0', 'about:blank',
+  ], { detached: true, stdio: 'ignore', env: desktopEnv }).unref();
+  for (let i = 0; i < 100; i++) {
+    await sleep(100);
+    if (await cdpUp()) return 'started';
+  }
+  throw new Error('Chromium did not start with its debugging port.');
+}
+
+class Session {
+  constructor(ws) {
+    this.ws = ws;
+    this.id = 0;
+    this.pending = new Map();
+    this.listeners = [];
+    ws.addEventListener('message', (e) => {
+      const msg = JSON.parse(e.data);
+      if (msg.id && this.pending.has(msg.id)) {
+        const { resolve, reject } = this.pending.get(msg.id);
+        this.pending.delete(msg.id);
+        msg.error ? reject(new Error(msg.error.message)) : resolve(msg.result);
+      } else if (msg.method) {
+        for (const l of this.listeners) l(msg);
+      }
+    });
+  }
+  send(method, params = {}, timeout = 15000) {
+    const id = ++this.id;
+    this.ws.send(JSON.stringify({ id, method, params }));
+    return new Promise((resolve, reject) => {
+      this.pending.set(id, { resolve, reject });
+      setTimeout(() => {
+        if (this.pending.delete(id)) reject(new Error(`${method} timed out after ${timeout / 1000} s`));
+      }, timeout);
+    });
+  }
+  on(fn) { this.listeners.push(fn); return () => { this.listeners = this.listeners.filter((l) => l !== fn); }; }
+  close() { try { this.ws.close(); } catch {} }
+}
+
+function connect(url) {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(url);
+    ws.addEventListener('open', () => resolve(new Session(ws)));
+    ws.addEventListener('error', () => reject(new Error(`Could not connect to ${url}`)));
+  });
+}
+
+const isPage = (t) => t.type === 'page' && !/^(chrome|devtools|chrome-extension):/.test(t.url);
+
+// The tab Notchi works in: the one used last, else the newest page.
+async function pickTarget() {
+  const targets = (await json('/json/list')).filter(isPage);
+  let saved = '';
+  try { saved = fs.readFileSync(TARGET_FILE, 'utf8').trim(); } catch {}
+  let target = targets.find((t) => t.id === saved) || targets[0];
+  if (!target) target = await json('/json/new?about:blank').catch(() => null)
+    || await fetch(`http://127.0.0.1:${CDP_PORT}/json/new?about:blank`, { method: 'PUT' }).then((r) => r.json());
+  fs.writeFileSync(TARGET_FILE, target.id);
+  return { target, all: targets };
+}
+
+// MARK: Page snapshot (runs in the page)
+
+// Numbers interactive elements (data-notchi, kept across calls) and lists them
+// in document order with the visible text around them. Walks open shadow roots
+// and same-origin frames.
+const SNAPSHOT = String.raw`(() => {
+  const W = window;
+  if (!W.__notchiNext) {
+    let max = 0;
+    document.querySelectorAll('[data-notchi]').forEach((e) => { max = Math.max(max, +e.dataset.notchi || 0); });
+    W.__notchiNext = max + 1;
+  }
+  const out = [];
+  const vh = innerHeight, vw = innerWidth;
+  const INTERACTIVE = 'a[href],button,input,select,textarea,summary,[role=button],[role=link],[role=checkbox],[role=radio],[role=switch],[role=tab],[role=menuitem],[role=option],[role=combobox],[role=textbox],[role=searchbox],[contenteditable=""],[contenteditable=true],[onclick],[tabindex]:not([tabindex="-1"]),iframe,label[for]';
+  const visible = (el, r) => {
+    if (r.width < 1 && r.height < 1) return false;
+    const s = getComputedStyle(el);
+    return s.visibility !== 'hidden' && s.display !== 'none' && +s.opacity !== 0;
+  };
+  const clean = (s, n = 120) => (s || '').replace(/\s+/g, ' ').trim().slice(0, n);
+  const labelOf = (el) => {
+    const aria = el.getAttribute('aria-label');
+    if (aria) return aria;
+    const by = el.getAttribute('aria-labelledby');
+    if (by) { const t = by.split(/\s+/).map((id) => el.ownerDocument.getElementById(id)?.innerText || '').join(' '); if (t.trim()) return t; }
+    if (el.id) { const l = el.ownerDocument.querySelector('label[for="' + CSS.escape(el.id) + '"]'); if (l) return l.innerText; }
+    const wrap = el.closest('label'); if (wrap && wrap !== el) return wrap.innerText;
+    return el.getAttribute('placeholder') || el.getAttribute('title') || el.getAttribute('name') || el.getAttribute('alt') || '';
+  };
+  const roleOf = (el) => {
+    const r = el.getAttribute('role'); if (r) return r;
+    const t = el.tagName.toLowerCase();
+    if (t === 'a') return 'link';
+    if (t === 'input') {
+      const type = (el.type || 'text').toLowerCase();
+      if (type === 'checkbox') return 'checkbox';
+      if (type === 'radio') return 'radio';
+      if (['submit', 'button', 'reset', 'image'].includes(type)) return 'button';
+      if (type === 'password') return 'password';
+      if (type === 'hidden') return null;
+      return 'textbox' + (type !== 'text' ? ':' + type : '');
+    }
+    if (t === 'textarea') return 'textbox';
+    if (t === 'select') return 'select';
+    if (t === 'iframe') return 'frame';
+    if (t === 'label') return 'label';
+    if (el.isContentEditable) return 'textbox';
+    return t === 'button' || t === 'summary' ? 'button' : 'clickable';
+  };
+  let lastText = '';
+  const walk = (root, dx, dy, depth) => {
+    const tw = (root.ownerDocument || root).createTreeWalker(root, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT);
+    let node = tw.currentNode;
+    const seenInteractive = new Set();
+    while ((node = tw.nextNode())) {
+      if (node.nodeType === 3) {
+        const p = node.parentElement;
+        if (!p || p.closest('[data-notchi-seen]') || /^(SCRIPT|STYLE|NOSCRIPT|TEMPLATE)$/.test(p.tagName)) continue;
+        const text = clean(node.textContent, 200);
+        if (!text || text === lastText) continue;
+        const r = p.getBoundingClientRect();
+        if (!visible(p, r)) continue;
+        if (r.bottom + dy < -vh || r.top + dy > 2 * vh) continue;
+        const inter = p.closest(INTERACTIVE);
+        if (inter && seenInteractive.has(inter)) continue;
+        lastText = text;
+        const alert = p.closest('[role=alert],[aria-live=assertive],[aria-invalid=true]');
+        out.push({ y: r.top + dy, line: (alert ? '! ' : '') + text });
+        continue;
+      }
+      const el = node;
+      if (el.shadowRoot) walk(el.shadowRoot, dx, dy, depth);
+      if (!el.matches(INTERACTIVE)) continue;
+      const role = roleOf(el);
+      if (!role) continue;
+      const r = el.getBoundingClientRect();
+      let shown = visible(el, r);
+      // A styled check box hides the input and draws its own box.
+      if (!shown && (role === 'checkbox' || role === 'radio')) {
+        const box = el.closest('label') || el.parentElement;
+        shown = !!box && visible(box, box.getBoundingClientRect());
+      }
+      if (!shown) continue;
+      if (r.bottom + dy < -vh || r.top + dy > 2 * vh) continue;
+      if (role === 'label' && el.control) continue;
+      if (!el.dataset.notchi) el.dataset.notchi = String(W.__notchiNext++);
+      seenInteractive.add(el);
+      const field = /^(textbox|password|select|combobox|checkbox|radio|switch)/.test(role);
+      const own = el.getAttribute('aria-label') || el.innerText || (el.tagName === 'INPUT' ? el.value : '') || el.getAttribute('title') || el.getAttribute('alt') || el.querySelector?.('img[alt]')?.alt || '';
+      let name = clean(field ? (labelOf(el) || own) : (own || labelOf(el)), 80);
+      const bits = [el.dataset.notchi, role, JSON.stringify(name)];
+      if (role.startsWith('textbox') || role === 'password' || role === 'combobox') {
+        const v = role === 'password' ? (el.value ? '•'.repeat(Math.min(el.value.length, 12)) : '') : (el.value ?? el.innerText ?? '');
+        bits.push('value=' + JSON.stringify(clean(v, 80)));
+        if (el.required || el.getAttribute('aria-required') === 'true') bits.push('required');
+        if (el.getAttribute('aria-invalid') === 'true') bits.push('invalid');
+      }
+      if (role === 'checkbox' || role === 'radio' || role === 'switch') {
+        const c = el.checked ?? (el.getAttribute('aria-checked') === 'true');
+        bits.push(c ? 'checked' : 'not checked');
+      }
+      if (role === 'select') bits.push('value=' + JSON.stringify(clean(el.selectedOptions?.[0]?.text || '', 60)));
+      if (role === 'link') { try { bits.push('→ ' + new URL(el.href).pathname.slice(0, 60)); } catch {} }
+      if (el.disabled || el.getAttribute('aria-disabled') === 'true') bits.push('disabled');
+      if (role === 'frame') {
+        let src = ''; try { src = new URL(el.src).host; } catch {}
+        bits[2] = JSON.stringify(src || el.title || '');
+        let doc = null; try { doc = el.contentDocument; } catch {}
+        out.push({ y: r.top + dy, line: '[' + bits.join(' ') + ']' + (doc ? '' : ' (other site: click it to press its centre)') });
+        if (doc && depth < 3) walk(doc.documentElement, dx + r.left, dy + r.top, depth + 1);
+        continue;
+      }
+      out.push({ y: r.top + dy, line: '[' + bits.join(' ') + ']' });
+    }
+  };
+  walk(document.documentElement, 0, 0, 0);
+  // A label's text next to the element it names repeats the element's name.
+  const names = out.map((o) => (o.line.startsWith('[') ? (o.line.match(/^\[\d+ \S+ "((?:[^"\\]|\\.)*)"/) || [])[1] || '' : null));
+  const lines = out.filter((o, i) => {
+    if (names[i] !== null) return true;
+    const t = o.line.replace(/^! /, '');
+    if (t.length > 40 || o.line.startsWith('! ')) return true;
+    for (let j = Math.max(0, i - 3); j <= Math.min(out.length - 1, i + 3); j++) {
+      if (names[j] && (names[j] === t || (t.length > 1 && names[j].includes(t)))) return false;
+    }
+    return true;
+  }).map((o) => o.line);
+  const sy = Math.round(scrollY), total = Math.round(document.documentElement.scrollHeight);
+  const head = 'Page: ' + document.title + '\nURL: ' + location.href
+    + (total > vh + 10 ? '\nScrolled ' + sy + ' of ' + Math.max(0, total - vh) + ' px' : '');
+  const focus = document.activeElement && document.activeElement !== document.body
+    ? '\nFocused: ' + (document.activeElement.dataset.notchi ? '[' + document.activeElement.dataset.notchi + ']' : document.activeElement.tagName.toLowerCase())
+    : '';
+  return head + focus + '\n' + lines.join('\n');
+})()`;
+
+// An element by its number, searched through open shadow roots and
+// same-origin frames. Returns its box in the top page's coordinates, after
+// scrolling it into view.
+const LOCATE = String.raw`((n, scroll) => {
+  const find = (root) => {
+    const hit = root.querySelector('[data-notchi="' + n + '"]');
+    if (hit) return hit;
+    for (const el of root.querySelectorAll('*')) {
+      if (el.shadowRoot) { const h = find(el.shadowRoot); if (h) return h; }
+      if (el.tagName === 'IFRAME') { try { const d = el.contentDocument; if (d) { const h = find(d); if (h) return h; } } catch {} }
+    }
+    return null;
+  };
+  const el = find(document);
+  if (!el) return null;
+  if (scroll) el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+  let target = el;
+  let r = el.getBoundingClientRect();
+  // A hidden check box: press the box drawn for it.
+  if ((r.width < 2 || r.height < 2) && (el.type === 'checkbox' || el.type === 'radio')) {
+    target = el.closest('label') || el.parentElement;
+    r = target.getBoundingClientRect();
+  }
+  let x = r.left + r.width / 2, y = r.top + r.height / 2;
+  let w = el.ownerDocument.defaultView;
+  while (w && w !== window && w.frameElement) {
+    const fr = w.frameElement.getBoundingClientRect();
+    x += fr.left; y += fr.top; w = w.parent;
+  }
+  const tag = el.tagName.toLowerCase();
+  const type = (el.type || '').toLowerCase();
+  const checked = (type === 'checkbox' || type === 'radio') ? el.checked
+    : el.getAttribute('aria-checked') === null ? null : el.getAttribute('aria-checked') === 'true';
+  return { x, y, w: r.width, h: r.height, tag, type, role: el.getAttribute('role') || '',
+           checked, value: 'value' in el ? String(el.value) : (el.isContentEditable ? el.innerText : null),
+           name: (el.getAttribute('aria-label') || el.innerText || el.value || '').trim().slice(0, 60) };
+})`;
+
+// MARK: Operations
+
+const ACCEPT_ALL = /^(accept|allow) (all|cookies)\b|^(接受|同意)(全部|所有)|^全部(接受|同意)/i;
+
+class Browser {
+  constructor(page) { this.page = page; }
+
+  async eval(expr, timeout = 10000) {
+    const r = await this.page.send('Runtime.evaluate', { expression: expr, returnByValue: true, awaitPromise: true }, timeout);
+    if (r.exceptionDetails) throw new Error(r.exceptionDetails.exception?.description || r.exceptionDetails.text);
+    return r.result.value;
+  }
+
+  async locate(index, scroll = true) {
+    const box = await this.eval(`${LOCATE}(${JSON.stringify(String(index))}, ${scroll})`);
+    if (!box) throw new Error(`No element ${index} on the page now. Use a number from the latest page below.`);
+    return box;
+  }
+
+  async mouse(x, y, count = 1) {
+    await this.page.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y });
+    await this.page.send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: count });
+    await this.page.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: count });
+  }
+
+  async key(name, modifiers = 0) {
+    const KEYS = {
+      Enter: ['Enter', 13, '\r'], Return: ['Enter', 13, '\r'], Tab: ['Tab', 9], Escape: ['Escape', 27], Esc: ['Escape', 27],
+      Backspace: ['Backspace', 8], BackSpace: ['Backspace', 8], Delete: ['Delete', 46], Space: [' ', 32, ' '], space: [' ', 32, ' '],
+      ArrowDown: ['ArrowDown', 40], Down: ['ArrowDown', 40], ArrowUp: ['ArrowUp', 38], Up: ['ArrowUp', 38],
+      ArrowLeft: ['ArrowLeft', 37], Left: ['ArrowLeft', 37], ArrowRight: ['ArrowRight', 39], Right: ['ArrowRight', 39],
+      PageDown: ['PageDown', 34], Page_Down: ['PageDown', 34], PageUp: ['PageUp', 33], Page_Up: ['PageUp', 33],
+      Home: ['Home', 36], End: ['End', 35],
+    };
+    let k = KEYS[name];
+    if (!k && name.length === 1) k = [name, name.toUpperCase().charCodeAt(0), modifiers ? undefined : name];
+    if (!k) throw new Error(`Unknown key ${name}. Use Enter, Tab, Escape, Backspace, ArrowDown, PageDown or ctrl+a.`);
+    const [key, code, text] = k;
+    const base = { key, code: key.length === 1 ? `Key${key.toUpperCase()}` : key, windowsVirtualKeyCode: code, modifiers };
+    await this.page.send('Input.dispatchKeyEvent', { type: text ? 'keyDown' : 'rawKeyDown', ...base, ...(text ? { text } : {}) });
+    await this.page.send('Input.dispatchKeyEvent', { type: 'keyUp', ...base });
+  }
+
+  // "ctrl+a", "shift+Tab", "Return"
+  async combo(spec) {
+    for (const part of spec.trim().split(/\s+/)) {
+      const keys = part.split('+');
+      const name = keys.pop();
+      let mods = 0;
+      for (const m of keys.map((s) => s.toLowerCase())) {
+        if (m === 'alt') mods |= 1; else if (m === 'ctrl' || m === 'control') mods |= 2;
+        else if (m === 'meta' || m === 'cmd' || m === 'super') mods |= 4; else if (m === 'shift') mods |= 8;
+      }
+      await this.key(name, mods);
+    }
+  }
+
+  async snapshot() { return this.eval(SNAPSHOT); }
+
+  // Waits for what an action set off: a navigation to finish loading, or the
+  // page to stop changing. Returns early once the page is quiet.
+  async settle(maxMs = 8000) {
+    const start = Date.now();
+    let navigating = false;
+    let loaded = false;
+    const off = this.page.on((m) => {
+      if (m.method === 'Page.frameStartedLoading' && !m.params.frameId?.includes('.')) navigating = true;
+      if (m.method === 'Page.loadEventFired' || m.method === 'Page.domContentEventFired') loaded = true;
+    });
+    let last = '';
+    let still = 0;
+    while (Date.now() - start < maxMs) {
+      await sleep(150);
+      if (navigating && !loaded) continue;
+      let sig = '';
+      try { sig = await this.eval('document.readyState + ":" + document.body?.innerHTML.length', 3000); } catch { continue; }
+      if (!sig.startsWith('complete') && !sig.startsWith('interactive')) continue;
+      if (sig === last) { if (++still >= 2) break; } else { still = 0; last = sig; }
+    }
+    off();
+  }
+
+  async click(index, lines) {
+    const box = await this.locate(index);
+    const toggle = box.type === 'checkbox' || box.type === 'radio' || ['checkbox', 'radio', 'switch'].includes(box.role);
+    if (/^(button|a)$/.test(box.tag) && ACCEPT_ALL.test(box.name)) {
+      throw new Error(`${index} accepts all optional cookies. Click the button that rejects them; accept all only when the user asked for it.`);
+    }
+    if (box.type === 'radio' && box.checked) return `${index} is already selected; nothing was clicked.`;
+    await this.mouse(box.x, box.y);
+    if (!toggle) return `Clicked ${index}${box.name ? ` (${box.name})` : ''}.`;
+    await sleep(120);
+    let now = (await this.locate(index, false)).checked;
+    if (now === box.checked && box.checked !== null) {
+      // The mouse landed on something that does not toggle it: use the element's own click.
+      await this.eval(`(() => { const e = document.querySelector('[data-notchi="${index}"]'); e && e.click(); })()`);
+      await sleep(120);
+      now = (await this.locate(index, false)).checked;
+    }
+    if (now === null) return `Clicked ${index}.`;
+    return `Clicked ${index}: it is now ${now ? 'checked' : 'not checked'}.` + (now === box.checked ? ' It did not change.' : '');
+  }
+
+  async fill(index, text) {
+    const box = await this.locate(index);
+    if (box.tag === 'select') return this.select(index, text);
+    await this.mouse(box.x, box.y);
+    await this.eval(`(() => { const e = document.querySelector('[data-notchi="${index}"]'); if (e && document.activeElement !== e) e.focus(); })()`);
+    await this.combo('ctrl+a');
+    await this.key('Backspace');
+    if (text) await this.page.send('Input.insertText', { text });
+    const after = await this.locate(index, false);
+    if (after.value !== null && box.type !== 'password' && after.value !== text) {
+      // A field that ignores typed input (a masked or custom field): set it the way React reads it.
+      await this.eval(`((n, v) => {
+        const e = document.querySelector('[data-notchi="' + n + '"]');
+        const proto = e instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+        Object.getOwnPropertyDescriptor(proto, 'value').set.call(e, v);
+        e.dispatchEvent(new Event('input', { bubbles: true }));
+        e.dispatchEvent(new Event('change', { bubbles: true }));
+      })(${JSON.stringify(String(index))}, ${JSON.stringify(text)})`);
+      const again = await this.locate(index, false);
+      if (again.value !== text) return `${index} now holds ${JSON.stringify(again.value)}, not the text given: the field changed it.`;
+    }
+    return box.type === 'password'
+      ? `Filled ${index} (password). The account does not exist yet: keep this password out of your answer until the site confirms it.`
+      : `Filled ${index}.`;
+  }
+
+  async select(index, text) {
+    const r = await this.eval(`((n, want) => {
+      const e = document.querySelector('[data-notchi="' + n + '"]');
+      if (!e || e.tagName !== 'SELECT') return null;
+      const w = want.toLowerCase();
+      const opt = [...e.options].find((o) => o.text.trim().toLowerCase() === w || o.value.toLowerCase() === w)
+        || [...e.options].find((o) => o.text.toLowerCase().includes(w));
+      if (!opt) return { options: [...e.options].map((o) => o.text.trim()).slice(0, 30) };
+      e.value = opt.value;
+      e.dispatchEvent(new Event('input', { bubbles: true }));
+      e.dispatchEvent(new Event('change', { bubbles: true }));
+      return { chose: opt.text.trim() };
+    })(${JSON.stringify(String(index))}, ${JSON.stringify(text)})`);
+    if (!r) {
+      // A drawn drop-down: open it, type to move to the option, Enter.
+      await this.click(index);
+      await sleep(200);
+      await this.page.send('Input.insertText', { text });
+      await sleep(200);
+      await this.key('Enter');
+      return `Opened ${index}, typed "${text}" and pressed Enter; check the value below.`;
+    }
+    if (r.options) return `${index} has no option "${text}". Its options: ${r.options.join(' | ')}`;
+    return `Chose "${r.chose}" in ${index}.`;
+  }
+}
+
+// MARK: Run
+
+// The kind of bot check on the page, or ''. Turnstile and reCAPTCHA load in
+// cross-site frames, which CDP lists as targets.
+async function captchaOn(b) {
+  let frames = [];
+  try { frames = (await json('/json/list')).filter((t) => t.type === 'iframe').map((t) => t.url); } catch {}
+  let scripts = [];
+  try {
+    scripts = await b.eval(`[...document.querySelectorAll('script[src],iframe[src]')].map((e) => e.src)`) || [];
+  } catch {}
+  const all = [...frames, ...scripts].join(' ');
+  if (/challenges\.cloudflare\.com/.test(all)) return 'Cloudflare Turnstile';
+  if (/hcaptcha\.com/.test(all)) return 'hCaptcha';
+  if (/google\.com\/recaptcha|recaptcha\.net/.test(all)) return 'reCAPTCHA';
+  if (/geetest|arkoselabs|funcaptcha/i.test(all)) return 'captcha';
+  return '';
+}
+
+async function run() {
+  const job = JSON.parse(process.env.NOTCHI_CU || '{}');
+  const started = Date.now();
+  const timing = { op: job.op, engine: 'cdp' };
+  let t = Date.now();
+  const mark = (name) => { timing[name] = Date.now() - t; t = Date.now(); };
+  const lines = [];
+
+  const launched = await ensureBrowser();
+  if (launched) timing.launched = true;
+  let { target, all } = await pickTarget();
+  let page = await connect(target.webSocketDebuggerUrl);
+  await page.send('Page.enable');
+  mark('connect');
+  let b = new Browser(page);
+
+  let settleMs = 2500;
+  let urlBefore = '';
+  try { urlBefore = await b.eval('location.href', 3000); } catch {}
+  try {
+    switch (job.op) {
+      case 'open': {
+        // One tab: other pages are closed, the URL loads in this one.
+        for (const other of all) if (other.id !== target.id) fetch(`http://127.0.0.1:${CDP_PORT}/json/close/${other.id}`).catch(() => {});
+        const nav = await page.send('Page.navigate', { url: job.url }, 20000);
+        if (nav.errorText) throw new Error(`${job.url} did not open: ${nav.errorText}.`);
+        settleMs = 12000;
+        try { fs.writeFileSync(OPENED_FILE, job.url); } catch {}
+        lines.push(`Opened ${job.url}.`);
+        break;
+      }
+      case 'state': settleMs = 0; break;
+      case 'click': lines.push(await b.click(job.index)); break;
+      case 'fill': lines.push(await b.fill(job.index, job.text ?? '')); settleMs = 400; break;
+      case 'select': lines.push(await b.select(job.index, job.text ?? '')); settleMs = 600; break;
+      case 'form': {
+        // Fields, then boxes, then the submit button, in one call.
+        for (const f of job.fields || []) lines.push(await b.fill(f.index, f.text ?? ''));
+        for (const c of job.check || []) {
+          const box = await b.locate(c, false);
+          if (box.checked === true) { lines.push(`${c} was already checked.`); continue; }
+          lines.push(await b.click(c));
+        }
+        if (job.submit !== undefined) {
+          const bad = await b.eval(`[...document.querySelectorAll('[data-notchi]')].filter((e) => e.willValidate && !e.checkValidity()).map((e) => e.dataset.notchi + ': ' + e.validationMessage).slice(0, 5)`);
+          if (bad.length) lines.push(`Not submitted: ${bad.join('; ')}.`);
+          else lines.push(await b.click(job.submit));
+        }
+        if (job.submit === undefined) settleMs = 400;
+        break;
+      }
+      case 'type':
+        await page.send('Input.insertText', { text: job.text || '' });
+        lines.push('Typed.');
+        settleMs = 400;
+        break;
+      case 'key': await b.combo(job.key || 'Enter'); lines.push(`Pressed ${job.key}.`); break;
+      case 'back': await b.eval('history.back()'); lines.push('Went back.'); settleMs = 8000; break;
+      case 'scroll': {
+        const dir = job.direction === 'up' ? -1 : 1;
+        if (job.index !== undefined) {
+          await b.eval(`(() => { const e = document.querySelector('[data-notchi="${job.index}"]'); e && e.scrollBy(0, ${dir} * e.clientHeight * 0.9); })()`);
+        } else {
+          await b.eval(`scrollBy(0, ${dir} * innerHeight * 0.9)`);
+        }
+        lines.push(`Scrolled ${job.direction || 'down'}.`);
+        settleMs = 300;
+        break;
+      }
+      case 'snap': {
+        const box = await b.locate(job.index);
+        // On 2026-11-26 the box around an empty SMS-code field was shown to the user as a captcha.
+        if ((box.tag === 'input' && !['image', 'checkbox', 'radio'].includes(box.type)) || box.tag === 'textarea') {
+          throw new Error(`Element ${job.index} is a text field, not a picture. There is no captcha picture to show `
+            + 'the user. A code sent by text message goes into that field: only the user has it, so ask for it in your answer and end the turn.');
+        }
+        await sleep(150);
+        const pad = 8;
+        const shot = await page.send('Page.captureScreenshot', {
+          format: 'png',
+          clip: { x: Math.max(0, box.x - box.w / 2 - pad), y: Math.max(0, box.y - box.h / 2 - pad), width: box.w + 2 * pad, height: box.h + 2 * pad, scale: 1 },
+        });
+        const path = `/tmp/notchi-snap-${Date.now()}.png`;
+        fs.writeFileSync(path, Buffer.from(shot.data, 'base64'));
+        lines.push(`Saved a picture of element ${job.index} to ${path}.`);
+        settleMs = 0;
+        break;
+      }
+      default: throw new Error(`Unknown operation ${job.op}.`);
+    }
+  } catch (e) {
+    lines.push(`Error: ${e.message}`);
+    settleMs = Math.min(settleMs, 300);
+  }
+  mark('perform');
+
+  // A link that opened a new tab: work in that tab from now on.
+  if (['click', 'form', 'key'].includes(job.op)) {
+    await sleep(100);
+    const now = (await json('/json/list')).filter(isPage);
+    const fresh = now.find((p) => !all.some((a) => a.id === p.id));
+    if (fresh) {
+      page.close();
+      fs.writeFileSync(TARGET_FILE, fresh.id);
+      page = await connect(fresh.webSocketDebuggerUrl);
+      await page.send('Page.enable');
+      b = new Browser(page);
+      lines.push(`It opened a new tab: ${fresh.url}`);
+      settleMs = Math.max(settleMs, 8000);
+    }
+  }
+  if (settleMs) await b.settle(settleMs);
+  mark('settle');
+
+  let state = await b.snapshot();
+  mark('snapshot');
+
+  // A bot check on the page. The cloud browser does not pass these, and on
+  // 2026-11-27 a sign-up spent four minutes writing CDP scripts around a
+  // Turnstile check whose token stayed empty while the form returned 400.
+  const check = await captchaOn(b);
+  if (check) {
+    let urlAfter = '';
+    try { urlAfter = await b.eval('location.href', 3000); } catch {}
+    const tried = ['click', 'form', 'key'].includes(job.op) && urlAfter === urlBefore;
+    let opened = '';
+    try { opened = fs.readFileSync(OPENED_FILE, 'utf8').trim(); } catch {}
+    lines.push(`This page has a ${check} check, which the cloud browser cannot pass. `
+      + (tried
+        ? 'This step stayed on the same page, and that check is the likely reason: stop now. Do not retry, reload or '
+          + `script around it. Give the user ${opened || 'the site\'s address'} to open in their own browser and say `
+          + 'what to fill in; not this page\'s URL, whose session state fails in another browser.'
+        : 'Fill the form once and submit once; if it does not move on, stop and give the user the link.'));
+  }
+  if (job.find) {
+    const want = String(job.find).toLowerCase();
+    const body = state.split('\n');
+    const head = body.slice(0, 2);
+    const hits = body.slice(2).filter((l) => l.toLowerCase().includes(want));
+    state = head.join('\n') + '\n' + (hits.length ? `Matching "${job.find}" (${hits.length}):\n${hits.join('\n')}` : `Nothing matches "${job.find}".`);
+  }
+  lines.push(state);
+  page.close();
+
+  let out = lines.join('\n');
+  if (out.length > 30000) out = out.slice(0, 30000) + '\n[Cut at 30000 characters. Pass find=<words> to get the part you need.]';
+  timing.total = Date.now() - started;
+  timing.load = os.loadavg()[0].toFixed(1);
+  process.stdout.write(out + '\n' + TIMING + JSON.stringify(timing) + '\n');
+  process.exit(0);
+}
+
+run().catch((e) => { process.stdout.write(`Error: ${e.message}\n`); process.exit(1); });
+"""#
 }
 
 // MARK: - Status chip
@@ -1924,7 +2773,7 @@ struct CloudMachineStatusChip: View {
             if let look {
                 GlassSegmentCluster(segments: [
                     .init(id: "cloud", tooltip: tooltip(look), action: openSettings) {
-                        Image(systemName: look == .failed ? "icloud.slash" : "icloud")
+                        Image(icon: look == .failed ? "icloud.slash" : "icloud")
                             .sfFont(12, weight: .light)
                             .opacity(look == .connecting ? 0.45 : 1)
                             .id(look)

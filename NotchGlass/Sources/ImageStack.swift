@@ -260,7 +260,7 @@ private struct ImageStackCard: View {
                         .resizable()
                         .aspectRatio(contentMode: .fill)
                 case .pdf, .failed:
-                    Image(systemName: "photo")
+                    Image(icon: "photo")
                         .font(.sf(Tokens.TypeSize.reading, weight: .medium))
                         .foregroundStyle(Tokens.text4)
                 case nil:

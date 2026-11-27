@@ -9,13 +9,34 @@
 // It only ever touches the region between the RELEASES:START / RELEASES:END
 // markers in docs/releases.html; everything else on the page is left alone.
 
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, statSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const SWIFT = join(ROOT, 'NotchGlass/Sources/WhatsNewService.swift');
 const PAGE = join(ROOT, 'docs/releases.html');
+const ASSETS = join(ROOT, 'NotchGlass/Resources/Assets.xcassets');
+// Hero images are copied here as JPEG (browsers can't show the HEIC sources).
+const SHOT_DIR = join(ROOT, 'docs/shots/releases');
+const SHOT_URL = 'shots/releases';
+
+// Export an entry's hero image set to docs/shots/releases/<name>.jpg with sips.
+// Returns the page-relative URL, or null when the asset is missing.
+function exportHero(name) {
+  const set = join(ASSETS, `${name}.imageset`);
+  if (!existsSync(set)) return null;
+  const src = readdirSync(set).find((f) => /\.(heic|jpe?g|png)$/i.test(f));
+  if (!src) return null;
+  const from = join(set, src);
+  const out = join(SHOT_DIR, `${name}.jpg`);
+  if (!existsSync(out) || statSync(out).mtimeMs < statSync(from).mtimeMs) {
+    mkdirSync(SHOT_DIR, { recursive: true });
+    execFileSync('sips', ['-s', 'format', 'jpeg', '-s', 'formatOptions', '82', '-Z', '1600', from, '--out', out], { stdio: 'ignore' });
+  }
+  return `${SHOT_URL}/${name}.jpg`;
+}
 
 const START = '<!-- RELEASES:START';
 const END = '<!-- RELEASES:END -->';
@@ -104,6 +125,7 @@ export function parseEntries(src) {
     improvements: listField(body, 'improvements'),
     fixes: listField(body, 'fixes'),
     others: listField(body, 'others'),
+    hero: scalar(body, 'heroAssetName'),
   })).filter((e) => e.version);
 }
 
@@ -153,6 +175,8 @@ function renderEntries(entries) {
     // The release's headline, when it has one — the same line the in-app panel
     // sets above its hero image. Without it the site's newest release opens on
     // a bullet that assumes a story the page never told.
+    const hero = e.hero && exportHero(e.hero);
+    if (hero) html += `      <img class="rel-hero" src="${hero}" alt="${esc(e.headline || 'Notchi ' + e.version)}" loading="lazy" decoding="async">\n`;
     if (e.headline) html += `      <p class="rel-headline">${esc(e.headline)}</p>\n`;
     if (e.blurb) html += `      <p class="rel-blurb">${esc(e.blurb)}</p>\n`;
     html += renderGroup('New', 'rel.new', e.features);

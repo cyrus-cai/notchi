@@ -894,7 +894,7 @@ enum StatsSnapshot {
         // The pane's real width in the panel: the category column and the divider
         // taken off `openWidthSettings`. The settings body adds no side inset of
         // its own — it sits on the panel's gutter.
-        let width = Tokens.openWidthSettings - 104 - 12 - 0.5 - 14
+        let width = Tokens.openWidthSettings - SettingsMetrics.panel.sidebarWidth - 12 - 0.5 - 14
         // NOTCH_STATS_SNAPSHOT_FIT=1 clips to the settings pane's real viewport
         // (`NotchBody.immersiveListHeight` less the back-pill chrome, plus the
         // pane's top runway) — the way to see what is above the fold on open,

@@ -628,7 +628,7 @@ private struct EntityCardView: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .firstTextBaseline, spacing: 7) {
                 if let symbol {
-                    Image(systemName: symbol)
+                    Image(icon: symbol)
                         .font(.system(size: 12, weight: .medium))
                         .foregroundStyle(Tokens.text3)
                 }
@@ -671,7 +671,7 @@ private struct EntityCardView: View {
                     HStack(spacing: 5) {
                         Text(label)
                             .font(.sf(11, weight: .medium))
-                        Image(systemName: "arrow.up.right")
+                        Image(icon: "arrow.up.right")
                             .font(.system(size: 9, weight: .semibold))
                     }
                     .foregroundStyle(Tokens.accent)
@@ -902,7 +902,7 @@ struct ConnectorInviteCard: View {
     ) -> some View {
         if isConnected {
             HStack(spacing: 4) {
-                Image(systemName: "checkmark")
+                Image(icon: "checkmark")
                     .font(.system(size: 10.5, weight: .bold))
                 Text("Connected")
                     .font(.sf(Tokens.TypeSize.meta, weight: .semibold))

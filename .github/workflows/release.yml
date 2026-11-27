@@ -43,6 +43,20 @@ jobs:
           fi
           echo "Version check OK: publishing v$new (newest published is v$latest)."
 
+      - name: Check committed versions match the tag
+        run: |
+          # The tag, MARKETING_VERSION and npm/package.json must agree. They are
+          # set together by scripts/bump-version.sh. Nothing below rewrites a
+          # version to cover a missed bump.
+          v="${GITHUB_REF_NAME#v}"
+          mv="$(grep -oE 'MARKETING_VERSION = [0-9]+\.[0-9]+\.[0-9]+' NotchGlass.xcodeproj/project.pbxproj | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | sort -u | xargs)"
+          npmv="$(node -p 'require("./npm/package.json").version')"
+          bad=0
+          [ "$mv" = "$v" ] || { echo "::error::MARKETING_VERSION is '$mv', tag is $v."; bad=1; }
+          [ "$npmv" = "$v" ] || { echo "::error::npm/package.json version is '$npmv', tag is $v."; bad=1; }
+          [ "$bad" = 0 ] || { echo "::error::Run ./scripts/bump-version.sh $v, commit, and re-tag."; exit 1; }
+          echo "Tag, MARKETING_VERSION and npm/package.json all read $v."
+
       - name: Select Xcode 26
         run: |
           sudo xcode-select -s /Applications/Xcode_26.5.app
@@ -187,5 +201,5 @@ jobs:
             echo "notchi@$v is already on npm. Nothing to publish."
             exit 0
           fi
-          npm version "$v" --no-git-tag-version --allow-same-version
+          # npm/package.json already reads $v: the build job checked it.
           npm publish --access public

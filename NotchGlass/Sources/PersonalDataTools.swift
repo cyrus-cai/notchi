@@ -1120,21 +1120,29 @@ struct ReadMailTool: NotchTool {
         if action == "codes" {
             let minutes = min(max(PersonalDataFormat.int(input["minutes"]) ?? 30, 1), 180)
             let limit = min(max(PersonalDataFormat.int(input["limit"]) ?? 10, 1), 30)
-            switch await MailService.recent(minutes: minutes, limit: limit) {
-            case .failure(let error): return "Error: \(error.errorDescription ?? "")"
+            // Every source that is set up right now: each connected mail
+            // connector and Apple Mail. The site may have mailed any of them.
+            async let connectors = ConnectorMail.codes(minutes: minutes, limit: limit)
+            async let apple = MailService.recent(minutes: minutes, limit: limit)
+            var blocks = await connectors.map(\.text)
+            switch await apple {
+            case .failure(let error):
+                if blocks.isEmpty { return "Error: \(error.errorDescription ?? "")" }
             case .success(let rows):
-                guard !rows.isEmpty else {
-                    return "No message in the inbox from the last \(minutes) minutes. If a code was just sent, it may not have arrived yet; ask the user or call again in a minute, not at once."
-                }
-                return rows.map { row in
-                    let h = row.header
-                    let found = MailService.codes(in: h.subject + "\n" + row.body)
-                    let tail = found.isEmpty
-                        ? "\n  text: " + String(row.body.replacingOccurrences(of: "\n", with: " ").prefix(300))
-                        : "\n  code: " + found.joined(separator: " or ")
-                    return "- \(h.date) · \(h.sender) · \(h.subject) · id \(h.id)\(tail)"
-                }.joined(separator: "\n")
+                blocks.append(rows.isEmpty
+                    ? "No Apple Mail message from the last \(minutes) minutes."
+                    : "From Apple Mail, newest first:\n" + rows.map { row in
+                        let h = row.header
+                        let found = MailService.codes(in: h.subject + "\n" + row.body)
+                        let tail = found.isEmpty
+                            ? "\n  text: " + String(row.body.replacingOccurrences(of: "\n", with: " ").prefix(300))
+                            : "\n  code: " + found.joined(separator: " or ")
+                        return "- \(h.date) · \(h.sender) · \(h.subject) · id \(h.id)\(tail)"
+                    }.joined(separator: "\n"))
             }
+            let text = blocks.joined(separator: "\n\n")
+            return text.contains("- ") ? text
+                : text + "\n\nIf a code was just sent, it may not have arrived yet; call again in a minute, not at once."
         }
         if action == "read" {
             guard let id = PersonalDataFormat.string(input["id"]) else { return "Error: give the message id." }
@@ -1159,6 +1167,91 @@ struct ReadMailTool: NotchTool {
                 return "- \(row.date) · \(row.sender) · \(row.subject) · id \(row.id)\(found)"
             }.joined(separator: "\n")
         }
+    }
+}
+
+/// Recent messages through the mail connectors that are connected right now,
+/// for `read_mail action=codes`. Apple Mail answers through AppleScript and
+/// only sees accounts added to it; on 2026-11-27 a sign-up read its
+/// verification mail by AppleScript while the Gmail connector was connected.
+/// One GMAIL_FETCH_EMAILS call returns the messages with their text in about 2 s.
+enum ConnectorMail {
+    struct Source { let title: String; let text: String }
+
+    /// The connected mail connectors this can fetch from, by display name.
+    static func liveSources() async -> [(title: String, connection: MCPConnection, slug: String)] {
+        await MainActor.run {
+            MCPHub.shared.liveMailConnections().compactMap { entry in
+                guard let slug = fetchSlug[entry.name] else { return nil }
+                return (MCPConnector.find(entry.name)?.title ?? entry.name, entry.connection, slug)
+            }
+        }
+    }
+
+    /// Composio tools that list recent messages with their text. Only Gmail's
+    /// arguments and response have been checked against the live connector.
+    private static let fetchSlug = ["gmail": "GMAIL_FETCH_EMAILS"]
+
+    /// One block per connected mail connector that answered.
+    static func codes(minutes: Int, limit: Int) async -> [Source] {
+        var out: [Source] = []
+        for source in await liveSources() {
+            if let text = await fetch(source.connection, slug: source.slug, title: source.title,
+                                      minutes: minutes, limit: limit) {
+                out.append(Source(title: source.title, text: text))
+            }
+        }
+        return out
+    }
+
+    private static func fetch(_ connection: MCPConnection, slug: String, title: String,
+                              minutes: Int, limit: Int) async -> String? {
+        let after = Int(Date().timeIntervalSince1970) - minutes * 60
+        let args: [String: Any] = [
+            "tools": [["tool_slug": slug,
+                       "arguments": ["query": "after:\(after)", "max_results": limit,
+                                     "include_payload": true, "verbose": true] as [String: Any]]],
+            "thought": "Read the messages that just arrived for a verification code or link.",
+            "current_step": "FETCHING_EMAILS",
+        ]
+        guard let text = try? await connection.call("COMPOSIO_MULTI_EXECUTE_TOOL", arguments: args),
+              let data = text.data(using: .utf8),
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let results = (root["data"] as? [String: Any])?["results"] as? [[String: Any]],
+              let response = results.first?["response"] as? [String: Any],
+              response["successful"] as? Bool != false,
+              let messages = (response["data"] as? [String: Any])?["messages"] as? [[String: Any]] else { return nil }
+        guard !messages.isEmpty else { return "No \(title) message from the last \(minutes) minutes." }
+        return "From \(title), newest first:\n" + messages.map { m in
+            let sender = m["sender"] as? String ?? ""
+            let subject = (m["subject"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let when = m["messageTimestamp"] as? String ?? ""
+            let body = m["messageText"] as? String ?? ""
+            let found = MailService.codes(in: subject + "\n" + body)
+            let links = Self.links(in: body)
+            var line = "- \(when) · \(sender) · \(subject) · id \(m["messageId"] as? String ?? "")"
+            if !found.isEmpty { line += "\n  code: " + found.joined(separator: " or ") }
+            if !links.isEmpty { line += "\n  links: " + links.joined(separator: " ") }
+            if found.isEmpty && links.isEmpty {
+                line += "\n  text: " + String(body.replacingOccurrences(of: "\n", with: " ").prefix(300))
+            }
+            return line
+        }.joined(separator: "\n")
+    }
+
+    /// Links that confirm an address or sign in, at most three.
+    static func links(in text: String) -> [String] {
+        guard let regex = try? NSRegularExpression(pattern: #"https?://[^\s<>"')\]]+"#) else { return [] }
+        let words = ["verif", "confirm", "activat", "magic", "token", "login", "signin", "sign-in", "callback", "validate", "auth"]
+        var out: [String] = []
+        for m in regex.matches(in: text, range: NSRange(text.startIndex..., in: text)) {
+            guard let r = Range(m.range, in: text) else { continue }
+            let url = String(text[r])
+            let lowered = url.lowercased()
+            if words.contains(where: lowered.contains), !out.contains(url) { out.append(url) }
+            if out.count == 3 { break }
+        }
+        return out
     }
 }
 

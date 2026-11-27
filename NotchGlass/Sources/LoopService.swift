@@ -1076,7 +1076,7 @@ struct LoopScheduleChip: View {
     var body: some View {
         Button { open.toggle() } label: {
             HStack(spacing: 5) {
-                LucideIcon(mark: LucideIcons.loop, size: 11)
+                PhosphorIcon(mark: PhosphorIcons.loop, size: 11)
                 Text(L("loop.every", LoopInterval.short(minutes)))
                     .monospacedDigit()
             }

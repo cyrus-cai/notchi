@@ -1215,12 +1215,6 @@ struct AgentHarness {
                     iteration += 1
                     continue
                 }
-                // Checked once and still claimed: say under the reply what the
-                // tool results show, so the user does not take it on trust.
-                if claimCheckDone, Self.unbackedClaimNote(answer: assistantText, calls: ranCalls) != nil {
-                    onText(L(ranCalls.isEmpty ? "agent.unbacked.noTool" : "agent.unbacked.failed"))
-                }
-
                 // Images that do not load: the answer hides them, and the model
                 // gets one more round to replace them — a model asked for
                 // pictures writes plausible Wikimedia paths that 404.
@@ -1387,10 +1381,18 @@ struct AgentHarness {
             let fetchedMaterial = pendingCalls.contains {
                 Self.isSearchTool($0.name) || $0.name == "read_page"
             }
-            preserveFetchCue = fetchedMaterial
+            // After a browser step the model reads the page it got back and picks
+            // the next step; that gap is named instead of filled with mood words.
+            let browsed = pendingCalls.contains {
+                $0.capability == CloudMachineTool.toolName
+                    && CloudMachineTool.browserActions.contains($0.input["action"] as? String ?? "")
+            }
+            preserveFetchCue = fetchedMaterial || browsed
             if fetchedMaterial {
                 // The read-the-results gap is still the search flow — keep the globe.
                 onActivity(L("agent.activity.composing"), .searching)
+            } else if browsed {
+                onActivity(L("agent.activity.browser.gap"), .composing)
             } else {
                 onActivity(nil, .composing)
             }
@@ -1419,6 +1421,16 @@ struct AgentHarness {
             }
             if !exhausted.isEmpty, !resultsToSend.isEmpty {
                 resultsToSend[resultsToSend.count - 1].result += Self.withdrawnNote(exhausted)
+            }
+            // A web step only the user can finish (a bot check the cloud browser
+            // cannot pass) ends the tool work: the next turn has no tools and
+            // answers. On 2026-11-27 a model told to stop by that result went on
+            // for 13 minutes and 39 calls (other sites, installing an SDK, the
+            // clipboard) before answering with the same hand-off.
+            if resultsToSend.contains(where: { $0.result.contains(CloudBrowserCDP.handOffMarker) }) {
+                forceNoTools = true
+                resultsToSend[resultsToSend.count - 1].result += "\n\nNo more tools this turn: answer now with what is done, "
+                    + "what is left for the user, and the links for it."
             }
 
             if let pendingInput, !resultsToSend.isEmpty {
@@ -1750,11 +1762,44 @@ struct AgentHarness {
     /// "Searching the web…". `isRepeatRound` is true on a second-or-later tool
     /// round, where a search reads as "digging deeper" rather than a fresh start.
     /// Falls back to a generic line for unmapped tools.
+    /// What one cloud_machine call is doing, named from its arguments: the site
+    /// a browse opens, the site a click lands on, the command a shell runs. On
+    /// 2026-11-27 a sign-up showed "Using the cloud browser…" for 22 minutes
+    /// across 40 calls, and the rotating mood words in the gaps between them.
+    static func cloudActivityLabel(_ input: [String: Any]) -> String? {
+        let site = CloudMachineTool.lastBrowsedHost
+        switch input["action"] as? String {
+        case "browse":
+            guard let raw = input["url"] as? String else { return nil }
+            let url = URL(string: raw.contains("://") ? raw : "https://" + raw)
+            guard var host = url?.host else { return nil }
+            if host.hasPrefix("www.") { host.removeFirst(4) }
+            return L("agent.activity.browser.open", host)
+        case "fill_form":
+            return L(input["submit"] == nil ? "agent.activity.browser.form" : "agent.activity.browser.submit")
+        case "click", "select", "back", "key":
+            return site.map { L("agent.activity.browser.click", $0) } ?? L("agent.activity.cloudBrowser")
+        case "fill", "type":
+            return site.map { L("agent.activity.browser.type", $0) } ?? L("agent.activity.cloudBrowser")
+        case "page_state", "scroll", "show_element":
+            return site.map { L("agent.activity.browser.read", $0) } ?? L("agent.activity.cloudBrowser")
+        case "shell":
+            guard let raw = input["command"] as? String else { return nil }
+            let line = raw.split(separator: "\n").first.map(String.init) ?? raw
+            return L("agent.activity.browser.shell", line.count > 40 ? line.prefix(40) + "…" : line)
+        case "read", "write", "upload", "download", "publish_port", "show_image":
+            return L("agent.activity.cloudMachine")
+        default:
+            return nil
+        }
+    }
+
     private func activityLabel(for calls: [ToolInvocation], isRepeatRound: Bool) -> String {
         // Work leaving this Mac is named whatever runs beside it, so it never
         // reads like a local command.
         let cloud = calls.filter { $0.capability == CloudMachineTool.toolName }
         if !cloud.isEmpty {
+            if cloud.count == 1, let label = Self.cloudActivityLabel(cloud[0].input) { return label }
             let browsing = cloud.allSatisfy {
                 CloudMachineTool.browserActions.contains($0.input["action"] as? String ?? "")
             }

@@ -572,7 +572,7 @@ private struct AuditDetail: View {
                 withAnimation(.easeOut(duration: 0.12)) { detailed.toggle() }
             } label: {
                 HStack(spacing: 5) {
-                    Image(systemName: "chevron.right")
+                    Image(icon: "chevron.right")
                         .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
                         .rotationEffect(.degrees(detailed ? 90 : 0))
                     Text(L("audit.details"))

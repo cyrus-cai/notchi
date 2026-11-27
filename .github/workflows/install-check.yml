@@ -1,0 +1,104 @@
+name: Install check
+
+# After a release, install the published version on a clean macOS runner
+# through each channel (install.sh, Homebrew cask, npx) and check that it
+# installs, has the right version, and launches.
+#
+# Runs when the Release workflow succeeds, or by hand for any version.
+on:
+  workflow_run:
+    workflows: [Release]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to check, e.g. 0.9.47"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  version:
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    outputs:
+      v: ${{ steps.v.outputs.v }}
+    steps:
+      - id: v
+        env:
+          INPUT: ${{ github.event.inputs.version }}
+          TAG: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          v="${INPUT:-$TAG}"
+          v="${v#v}"
+          echo "$v" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || { echo "::error::Not a version: '$v'"; exit 1; }
+          echo "v=$v" >> "$GITHUB_OUTPUT"
+          echo "Checking $v"
+
+  install-sh:
+    needs: version
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install with install.sh from master
+        run: curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/master/install.sh | bash
+      - name: Verify
+        run: ./scripts/verify-install.sh "${{ needs.version.outputs.v }}"
+
+  npx:
+    needs: version
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+      - name: Wait for notchi@${{ needs.version.outputs.v }} on npm
+        env:
+          V: ${{ needs.version.outputs.v }}
+        run: |
+          for _ in $(seq 1 30); do
+            npm view "notchi@$V" version >/dev/null 2>&1 && exit 0
+            sleep 20
+          done
+          echo "::error::notchi@$V is not on npm after 10 minutes."
+          exit 1
+      - name: Install with npx
+        run: npx --yes "notchi@${{ needs.version.outputs.v }}"
+      - name: Verify
+        run: ./scripts/verify-install.sh "${{ needs.version.outputs.v }}"
+
+  # The cask in cyrus-cai/homebrew-lofi-lab is bumped by hand after the
+  # release is live. Wait for it on a cheap Linux runner first.
+  wait-for-cask:
+    needs: version
+    runs-on: ubuntu-latest
+    timeout-minutes: 125
+    steps:
+      - name: Wait for the cask to read version ${{ needs.version.outputs.v }}
+        env:
+          V: ${{ needs.version.outputs.v }}
+        run: |
+          url="https://raw.githubusercontent.com/cyrus-cai/homebrew-lofi-lab/HEAD/Casks/notchi.rb"
+          for _ in $(seq 1 120); do
+            if curl -fsSL "$url?$(date +%s)" | grep -q "version \"$V\""; then
+              echo "Cask is at $V."
+              exit 0
+            fi
+            sleep 60
+          done
+          echo "::error::Casks/notchi.rb still does not read version \"$V\" after 2 hours."
+          exit 1
+
+  brew:
+    needs: [version, wait-for-cask]
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install with Homebrew
+        env:
+          HOMEBREW_NO_INSTALL_CLEANUP: "1"
+        run: brew install --cask cyrus-cai/lofi-lab/notchi
+      - name: Verify
+        run: ./scripts/verify-install.sh "${{ needs.version.outputs.v }}"

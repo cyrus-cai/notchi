@@ -125,6 +125,24 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.9.48",
+            date: "2026-11-27",
+            features: [
+                "Search across all Settings in any language and jump straight to the matching option with a highlight.",
+            ],
+            improvements: [
+                "Cloud browser actions now finish in 1–3 seconds, fill and submit whole forms in one step, show the specific site and action while working, and hand off immediately when a site requires a human check.",
+                "Verification code lookups now check connected Gmail accounts alongside Apple Mail in a single call.",
+                "Refreshed app-wide icons with Phosphor, aligned menu bar card side pages with the bubble column, and switched wide-bubble hover timestamps to a corner glass pill so they never clip.",
+                "Clicking outside an unpinned pointer-side card now closes it, and Copy History opens its saved file directly from streamlined Settings.",
+            ],
+            fixes: [
+                "Fixed the notch panel occasionally inheriting Light Mode text and border colors over dark glass.",
+                "Fixed Telegram and Signal occasionally returning the wrong reply when a sub-thread update or another message landed in the same thread mid-round.",
+                "Fixed tapping a sub-thread or loop notification opening the side drawer instead of the main thread, and eliminated a first-frame height jump when pulling to reveal a thread.",
+            ]
+        ),
+        Entry(
             version: "0.9.47",
             date: "2026-11-26",
             headline: "Notchi can make websites.",

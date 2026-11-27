@@ -997,11 +997,36 @@ struct NotchBody: View {
     /// Long thread: the 407pt scroller pinned to its bottom — the last turn
     /// rests 64pt (runway + anchor) above the frame's bottom, where the
     /// follow-up floats — with the top fade and frost under the header.
-    private var revealTargets: ThreadRevealTargets {
-        let height = revealThreadHeight
-        guard height > answerMaxHeight || revealThreadPartial else {
+    ///
+    /// Before `onGeometryChange` reports the live height of a pull's turn
+    /// stack, falls back to the cached measurement for this exact thread or a
+    /// synchronous estimate so frame 0 never targets a 0pt viewport.
+    private func revealTargets(for thread: [NotchModel.Turn], itemID: UUID) -> ThreadRevealTargets {
+        let drawn = thread.filter(\.isDrawn)
+        let drawnCount = drawn.count
+        let shownPartial = Self.revealTurns(of: thread).count < drawnCount
+        let effectiveHeight: CGFloat
+        let effectivePartial: Bool
+        if revealThreadHeight > 0 {
+            effectiveHeight = revealThreadHeight
+            effectivePartial = revealThreadPartial || shownPartial
+        } else if let cache = model.mainThreadRevealCache,
+                  cache.itemID == itemID,
+                  cache.drawnCount == drawnCount,
+                  cache.lastTurnID == drawn.last?.id,
+                  cache.lastTurnLength == (drawn.last?.text.count ?? 0),
+                  abs(cache.width - resultStackWidth) < 0.5 {
+            effectiveHeight = cache.height
+            effectivePartial = cache.partial || shownPartial
+        } else {
+            let estimated = Self.estimatedThreadHeight(thread, ceiling: answerMaxHeight,
+                                                       width: metrics.resultWidth)
+            effectiveHeight = max(estimated, peekHeight)
+            effectivePartial = shownPartial
+        }
+        guard effectiveHeight > answerMaxHeight || effectivePartial else {
             return ThreadRevealTargets(headerSlot: revealHeaderHeight + 18,
-                                       viewport: height, gap: 12, fade: 0)
+                                       viewport: effectiveHeight, gap: 12, fade: 0)
         }
         let tail = clippedBottomRunway + 2
         return ThreadRevealTargets(headerSlot: 0,
@@ -1029,13 +1054,14 @@ struct NotchBody: View {
             Array(turns.filter { $0.isDrawn || $0.id == answer.id }.suffix(2))
         } ?? [answer]
         let shown = pulling ? Self.revealTurns(of: thread) : resting
+        let targets = revealTargets(for: thread, itemID: item.id)
         // The three drawn parts are frozen on their data (`RevealStill`): the
         // reveal re-runs its layout every animation frame, and without the
         // freeze every turn's body — markdown, link cards — re-ran with it.
         return ThreadRevealTop(
             live: model.threadPullLive,
             active: pulling,
-            targets: revealTargets,
+            targets: targets,
             peekHeight: peekHeight,
             peekGap: peekGap,
             floating: metrics.floating,
@@ -1049,7 +1075,7 @@ struct NotchBody: View {
             }
             .equatable(),
             thread: RevealStill(key: RevealThreadKey(turns: shown, measures: pulling)) {
-                revealThread(shown, in: thread, measures: pulling)
+                revealThread(shown, in: thread, itemID: item.id, measures: pulling)
                     .frame(width: resultStackWidth, alignment: .leading)
             }
             .equatable(),
@@ -1064,7 +1090,7 @@ struct NotchBody: View {
                 Color.clear
                     .frame(width: resultStackWidth, height: peekHeight)
                     .overlay(alignment: .bottomLeading) {
-                        revealThread(resting, in: live ?? item.conversation, measures: false)
+                        revealThread(resting, in: live ?? item.conversation, itemID: item.id, measures: false)
                             .frame(width: resultStackWidth, alignment: .leading)
                     }
                     .clipped()
@@ -1087,10 +1113,10 @@ struct NotchBody: View {
         .exemptsDoubleClickPin()
         .onAppear {
             model.installThreadPullMonitor()
-            syncThreadPullSpan()
+            syncThreadPullSpan(for: targets)
         }
-        .onChange(of: revealTargets) { _, _ in syncThreadPullSpan() }
-        .onChange(of: idleBottomHeight) { _, _ in syncThreadPullSpan() }
+        .onChange(of: targets) { _, next in syncThreadPullSpan(for: next) }
+        .onChange(of: idleBottomHeight) { _, _ in syncThreadPullSpan(for: targets) }
         .onChange(of: pulling) { _, isPulling in
             // A pull that settled back leaves nothing measured behind: the next
             // result page (a new question) must size itself from scratch.
@@ -1108,14 +1134,27 @@ struct NotchBody: View {
     /// the reveal's target and seeds `measuredAnswerHeight`, so the result page
     /// the pull hands over to mounts in the same layout.
     private func revealThread(_ turns: [NotchModel.Turn], in thread: [NotchModel.Turn],
-                              measures: Bool) -> some View {
+                              itemID: UUID, measures: Bool) -> some View {
         let drawnThread = thread.filter(\.isDrawn)
         let drawnCount = drawnThread.count
+        let lastTurn = drawnThread.last
+        let partial = turns.count < drawnCount
+        let stackWidth = resultStackWidth
         let record = { (height: CGFloat) in
-            revealThreadPartial = turns.count < drawnCount
+            guard height > 0 else { return }
+            revealThreadPartial = partial
             revealThreadHeight = height
             measuredAnswerHeight = height
             model.lastMeasuredAnswerHeight = height
+            model.mainThreadRevealCache = NotchModel.MainThreadRevealCache(
+                itemID: itemID,
+                drawnCount: drawnCount,
+                lastTurnID: lastTurn?.id,
+                lastTurnLength: lastTurn?.text.count ?? 0,
+                width: stackWidth,
+                height: height,
+                partial: partial
+            )
             model.threadPullMeasured()
         }
         return VStack(alignment: .leading, spacing: 0) {
@@ -1127,9 +1166,11 @@ struct NotchBody: View {
                 }
             }
             .fixedSize(horizontal: false, vertical: true)
-            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height in
-                guard measures else { return }
-                record(height)
+            .onGeometryChange(for: RevealMeasure.self) {
+                RevealMeasure(height: $0.size.height, measures: measures)
+            } action: { m in
+                guard m.measures else { return }
+                record(m.height)
             }
         }
         .padding(.trailing, 8)
@@ -1165,11 +1206,10 @@ struct NotchBody: View {
     /// The pull follows the fingers point for point: the distance that reaches
     /// progress 1 is how much the panel grows, held to a range a trackpad
     /// stroke covers comfortably.
-    private func syncThreadPullSpan() {
-        let targets = revealTargets
+    private func syncThreadPullSpan(for targets: ThreadRevealTargets) {
         let opened = targets.headerSlot + targets.viewport + targets.gap + Self.composerRowHeight
         let rest = peekHeight + peekGap + idleBottomHeight
-        model.threadPullSpan = min(max(opened - rest, 160), 420)
+        model.updateThreadPullSpan(min(max(opened - rest, 160), 420))
     }
 
     /// Lightweight visual twin of the follow-up `ComposerBox` for the second half
@@ -1491,7 +1531,7 @@ struct NotchBody: View {
     /// how far back the current recalled question sits.
     private func recallCounterLine(_ recall: (pos: Int, total: Int)) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 5) {
-            Image(systemName: "clock.arrow.circlepath")
+            Image(icon: "clock.arrow.circlepath")
                 .sfFont(Tokens.TypeSize.caption, weight: .semibold)
                 .foregroundStyle(Tokens.text4)
                 .baselineOffset(-1)
@@ -1722,7 +1762,7 @@ struct NotchBody: View {
                                 flat: model.unifiedThreadsEnabled,
                                 action: { model.showLoopIntervalPicker.toggle() },
                                 icon: {
-            LucideIcon(mark: LucideIcons.loop, size: 11)
+            PhosphorIcon(mark: PhosphorIcons.loop, size: 11)
         })
             .notchTooltip(L("loop.chip.help"))
             .accessibilityLabel(L("loop.chip.help"))
@@ -2328,7 +2368,7 @@ struct NotchBody: View {
             let seconds = max(0, Int(((next ?? context.date)
                 .timeIntervalSince(context.date)).rounded(.up)))
             HStack(spacing: 4) {
-                LucideIcon(mark: LucideIcons.clock, size: 11)
+                PhosphorIcon(mark: PhosphorIcons.clock, size: 11)
                 // Rolls like the elapsed clock (`agentElapsedLabel`); the
                 // animation has to ride the Text for `numericText` to fire.
                 Text(LoopInterval.countdown(TimeInterval(seconds)))
@@ -2966,7 +3006,7 @@ struct NotchBody: View {
                 GlassSegmentCluster(segments: [
                     .init(tooltip: shortcutHelp("detached.open", action: .detach),
                           action: { model.openDetachedWindow() }) {
-                        Image(systemName: "macwindow.on.rectangle")
+                        Image(icon: "macwindow.on.rectangle")
                             .sfFont(Tokens.TypeSize.label, weight: .semibold)
                     },
                 ])
@@ -2985,7 +3025,7 @@ struct NotchBody: View {
     private func agentCardButton(_ systemName: String, help: String,
                                     action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            Image(systemName: systemName)
+            Image(icon: systemName)
                 .sfFont(Tokens.TypeSize.badge, weight: .semibold)
                 .foregroundStyle(Tokens.text4)
                 .frame(width: 18, height: 18)
@@ -3180,7 +3220,7 @@ struct NotchBody: View {
             // behaviour as the About version row.
             updateMenuRow
             // Release notes: the What's New panel, without a detour through Settings.
-            manageMenuRow(icon: LucideIcons.scrollText, title: L("recent.menu.releaseNotes")) {
+            manageMenuRow(icon: PhosphorIcons.calendarStar, title: L("recent.menu.releaseNotes")) {
                 withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
                     manageExpanded = false
                     model.openWhatsNew(on: nil)
@@ -3191,7 +3231,7 @@ struct NotchBody: View {
             // settings pane's room, and the summon chord it leads with is
             // *editable* in the section right above it (General), so the two
             // belong under one roof. Same jump the update row makes to About.
-            manageMenuRow(icon: LucideIcons.command, title: L("recent.menu.shortcuts")) {
+            manageMenuRow(icon: PhosphorIcons.command, title: L("recent.menu.shortcuts")) {
                 withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
                     manageExpanded = false
                     model.settingsSection = "Shortcuts"
@@ -3202,14 +3242,14 @@ struct NotchBody: View {
             // its settings pane rather than popping a card here — the digest is a
             // grid of tiles, far more than this menu's width, and it sits next to
             // Shortcuts in the sidebar too.
-            manageMenuRow(icon: LucideIcons.chartNoAxesColumn, title: L("recent.menu.stats")) {
+            manageMenuRow(icon: PhosphorIcons.chartNoAxesColumn, title: L("recent.menu.stats")) {
                 withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
                     manageExpanded = false
                     model.settingsSection = "Stats"
                     model.toggleSettings()
                 }
             }
-            manageMenuRow(icon: LucideIcons.settings, title: L("recent.menu.settings"), shortcut: "⌘,") {
+            manageMenuRow(icon: PhosphorIcons.settings, title: L("recent.menu.settings"), shortcut: "⌘,") {
                 withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
                     manageExpanded = false
                     model.toggleSettings()
@@ -3239,7 +3279,7 @@ struct NotchBody: View {
         if updateChipFace != nil, updateChipFace != .failed {
             EmptyView()
         } else {
-            manageMenuRow(icon: LucideIcons.circleFadingArrowUp,
+            manageMenuRow(icon: PhosphorIcons.circleFadingArrowUp,
                           title: L("recent.menu.checkForUpdates")) {
                 withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
                     manageExpanded = false
@@ -3255,14 +3295,14 @@ struct NotchBody: View {
     /// trailing shortcut hint — with the plain white hover wash the other glass
     /// popover menus use (see `ManageMenuRowStyle`).
     private func manageMenuRow(
-        icon: LucideIcons.Mark, title: String, shortcut: String? = nil,
+        icon: PhosphorIcons.Mark, title: String, shortcut: String? = nil,
         action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
             HStack(spacing: ManageMenuMetrics.rowContentSpacing) {
                 // A step quieter than the label it leads — the word is the thing being
                 // read, the glyph only marks the row.
-                LucideIcon(mark: icon)
+                PhosphorIcon(mark: icon)
                     .foregroundStyle(Tokens.text3)
                 Text(title)
                     .sfFont(ManageMenuMetrics.fontSize, weight: .medium)
@@ -4023,7 +4063,7 @@ struct NotchBody: View {
                     model.resumeAgentThread()
                 } label: {
                     HStack(spacing: 8) {
-                        Image(systemName: "arrow.clockwise")
+                        Image(icon: "arrow.clockwise")
                             .sfFont(Tokens.TypeSize.label, weight: .medium)
                         Text(L("agent.resume", engine.displayName))
                             .sfFont(Tokens.TypeSize.form, weight: .medium)
@@ -4377,7 +4417,7 @@ struct NotchBody: View {
                                         .filter({ $0.threadID == item.id && $0.active })
                                         .compactMap(\.nextRoundAt).min() {
                                         HStack(spacing: 4) {
-                                            Image(systemName: "repeat")
+                                            Image(icon: "repeat")
                                                 .sfFont(Tokens.TypeSize.badge, weight: .semibold)
                                             Text(SubThreadList.nextRun(next))
                                         }
@@ -4719,6 +4759,12 @@ struct NotchBody: View {
     private static func estimatedThreadExceeds(_ turns: [NotchModel.Turn],
                                                _ ceiling: CGFloat,
                                                width: CGFloat) -> Bool {
+        estimatedThreadHeight(turns, ceiling: ceiling, width: width) > ceiling
+    }
+
+    private static func estimatedThreadHeight(_ turns: [NotchModel.Turn],
+                                              ceiling: CGFloat,
+                                              width: CGFloat) -> CGFloat {
         // The thread's text column: the result panel less its padding and the
         // turn stack's own trailing inset.
         let column = width - (panelPadding + resultSideInset) * 2 - 8
@@ -4763,16 +4809,16 @@ struct NotchBody: View {
                             inToolRun = false
                             total += height(entry.title, card) + 7
                         }
-                        if total > ceiling { return true }
+                        if total > ceiling { return total }
                     }
                 }
                 total += height(turn.text, card) + 16
                 if let r = turn.reasoning, !r.isEmpty { total += 22 }
             }
             total += 16                                      // the stack's turn spacing
-            if total > ceiling { return true }
+            if total > ceiling { return total }
         }
-        return total > ceiling
+        return total
     }
 
     /// True while the follow-up input is folded into a glyph on the header's glass
@@ -4952,12 +4998,12 @@ struct NotchBody: View {
             }
         } label: {
             HStack(spacing: 8) {
-                Image(systemName: "slider.horizontal.3")
+                Image(icon: "slider.horizontal.3")
                     .sfFont(Tokens.TypeSize.form, weight: .medium)
                 Text(L("result.setUpModel"))
                     .sfFont(Tokens.TypeSize.form, weight: .medium)
                 Spacer(minLength: 0)
-                Image(systemName: "arrow.up.right")
+                Image(icon: "arrow.up.right")
                     .sfFont(Tokens.TypeSize.meta, weight: .semibold)
                     .foregroundStyle(Tokens.text3)
             }
@@ -4989,12 +5035,12 @@ struct NotchBody: View {
                 }
             } label: {
                 HStack(spacing: 8) {
-                    Image(systemName: "arrow.clockwise")
+                    Image(icon: "arrow.clockwise")
                         .sfFont(Tokens.TypeSize.form, weight: .medium)
                     Text(L("agent.resume", engine.displayName))
                         .sfFont(Tokens.TypeSize.form, weight: .medium)
                     Spacer(minLength: 0)
-                    Image(systemName: "chevron.right")
+                    Image(icon: "chevron.right")
                         .sfFont(Tokens.TypeSize.meta, weight: .semibold)
                         .foregroundStyle(Tokens.text3)
                 }
@@ -5111,6 +5157,21 @@ struct NotchBody: View {
             // can park the measurement with the session; the next mount seeds its
             // layout decision from it (see `init`).
             model.lastMeasuredAnswerHeight = $0
+            // Also seed the main-thread reveal cache so the next pull starts
+            // with this thread's exact measured height on frame 0.
+            if model.mainThreadPeek?.item.id == model.threadHistoryID {
+                let drawn = model.turns.filter(\.isDrawn)
+                let shownCount = Self.revealTurns(of: model.turns).count
+                model.mainThreadRevealCache = NotchModel.MainThreadRevealCache(
+                    itemID: model.threadHistoryID,
+                    drawnCount: drawn.count,
+                    lastTurnID: drawn.last?.id,
+                    lastTurnLength: drawn.last?.text.count ?? 0,
+                    width: resultStackWidth,
+                    height: $0,
+                    partial: shownCount < drawn.count
+                )
+            }
         }
         // The ONE place a height change is animated: the cross-over between the two
         // layouts (a short answer growing past the 300pt ceiling into the clipped
@@ -6466,7 +6527,7 @@ struct NotchBody: View {
                 // uses).
                 refocusInput()
             }) {
-                Image(systemName: "bubble.left")
+                Image(icon: "bubble.left")
                     .sfFont(Tokens.TypeSize.meta, weight: .medium)
             }
         ], glass: false)
@@ -6765,7 +6826,7 @@ struct NotchBody: View {
                             HStack(spacing: 3) {
                                 Text(L("license.sidebar.buy"))
                                     .underline()
-                                Image(systemName: "arrow.up.right")
+                                Image(icon: "arrow.up.right")
                                     .font(.system(size: fontSize * 0.72, weight: .semibold))
                             }
                             .foregroundStyle(licenseCueHovered ? Tokens.text1 : Tokens.text2)
@@ -6997,7 +7058,7 @@ struct NotchBody: View {
                 // The same arrow throughout, failure included — the red is
                 // already the signal, and a second mark beside it only adds
                 // something to decode.
-                LucideIcon(mark: LucideIcons.circleFadingArrowUp, size: flat ? 11 : 12)
+                PhosphorIcon(mark: PhosphorIcons.circleFadingArrowUp, size: flat ? 11 : 12)
                 Text(updateCueLabel(face))
                     .sfFont(Tokens.TypeSize.meta, weight: flat ? .regular : .medium)
                     .lineLimit(1)
@@ -7366,16 +7427,16 @@ struct AgentRunMetadataMenu: View {
     var body: some View {
         VStack(alignment: .leading, spacing: ManageMenuMetrics.rowSpacing) {
             if let engine, !engine.isEmpty {
-                ResultMetadataRow(icon: LucideIcons.terminal, title: engine)
+                ResultMetadataRow(icon: PhosphorIcons.terminal, title: engine)
             }
             if let folderName {
-                ResultMetadataRow(icon: LucideIcons.folder, title: folderName,
+                ResultMetadataRow(icon: PhosphorIcons.folder, title: folderName,
                                   hoverSymbol: "arrow.up.right",
                                   hint: L("agent.openFolder"),
                                   action: onOpenFolder)
             }
             if let completed {
-                ResultMetadataRow(icon: LucideIcons.clock, title: completed)
+                ResultMetadataRow(icon: PhosphorIcons.clock, title: completed)
             }
             ForEach(loops) { loop in
                 loopRows(loop)
@@ -7391,10 +7452,10 @@ struct AgentRunMetadataMenu: View {
     @ViewBuilder
     private func loopRows(_ loop: LoopMenuInfo) -> some View {
         if loops.count > 1 {
-            ResultMetadataRow(icon: LucideIcons.scrollText, title: loop.prompt)
+            ResultMetadataRow(icon: PhosphorIcons.scrollText, title: loop.prompt)
                 .padding(.top, loop.id == loops.first?.id ? 0 : 6)
         }
-        ResultMetadataRow(icon: LucideIcons.loop,
+        ResultMetadataRow(icon: PhosphorIcons.loop,
                           title: L("loop.every", LoopInterval.short(loop.intervalMinutes))
                               + " · " + L("loop.round", loop.rounds),
                           hoverSymbol: (loop.active && onChangeInterval != nil)
@@ -7404,21 +7465,21 @@ struct AgentRunMetadataMenu: View {
         if loop.active, let next = loop.nextRoundAt {
             TimelineView(.periodic(from: .now, by: 1)) { context in
                 ResultMetadataRow(
-                    icon: LucideIcons.clock,
+                    icon: PhosphorIcons.clock,
                     title: L("loop.waiting",
                              LoopInterval.countdown(next.timeIntervalSince(context.date))))
             }
         }
         if loop.active, let onStopLoop {
-            ResultMetadataRow(icon: LucideIcons.circleStop, title: L("loop.stop"),
+            ResultMetadataRow(icon: PhosphorIcons.circleStop, title: L("loop.stop"),
                               hint: L("loop.stop"),
                               action: { onStopLoop(loop.id) })
         }
         if !loop.active, let reason = loop.endReason {
-            ResultMetadataRow(icon: LucideIcons.circleStop, title: reason.cardText)
+            ResultMetadataRow(icon: PhosphorIcons.circleStop, title: reason.cardText)
         }
         if !loop.active, let onContinueLoop {
-            ResultMetadataRow(icon: LucideIcons.play, title: L("loop.continue"),
+            ResultMetadataRow(icon: PhosphorIcons.play, title: L("loop.continue"),
                               hint: L("loop.continue"),
                               action: { onContinueLoop(loop.id) })
         }
@@ -7428,7 +7489,7 @@ struct AgentRunMetadataMenu: View {
 /// One informational row in the agent metadata menu. Only the folder is a
 /// button; engine and completion remain calm labels rather than fake actions.
 struct ResultMetadataRow: View {
-    let icon: LucideIcons.Mark
+    let icon: PhosphorIcons.Mark
     let title: String
     var hoverSymbol: String? = nil
     var hint: String? = nil
@@ -7438,7 +7499,7 @@ struct ResultMetadataRow: View {
 
     private var face: some View {
         HStack(spacing: ManageMenuMetrics.rowContentSpacing) {
-            LucideIcon(mark: icon)
+            PhosphorIcon(mark: icon)
                 .foregroundStyle(Tokens.text3)
                 .frame(width: 13)
             HoverMarqueeText(
@@ -7449,7 +7510,7 @@ struct ResultMetadataRow: View {
                 Spacer(minLength: 4)
                 // Same glyph, size and ink as `MenuCardRow`'s hover arrow; held in
                 // the layout at rest so hovering does not shift the title.
-                Image(systemName: hoverSymbol)
+                Image(icon: hoverSymbol)
                     .sfFont(ManageMenuMetrics.accessoryFontSize + 1, weight: .medium)
                     .foregroundStyle(Tokens.text2)
                     .opacity(hovering ? 1 : 0)
@@ -7750,7 +7811,7 @@ private struct HistoryFooterButton: View {
     var body: some View {
         Button(action: action) {
             HStack(spacing: 5) {
-                Image(systemName: icon)
+                Image(icon: icon)
                     .sfFont(compact ? 11 : 10, weight: .medium)
                 if !compact {
                     Text(title)
@@ -7809,7 +7870,7 @@ private struct ActiveFilterChip: View {
                 Text(source.filterTitle)
                     .sfFont(Tokens.TypeSize.meta, weight: .medium)
                     .foregroundStyle(hovering ? Tokens.text1 : Tokens.text2)
-                Image(systemName: "xmark")
+                Image(icon: "xmark")
                     .sfFont(Tokens.TypeSize.badge, weight: .semibold)
                     .foregroundStyle(hovering ? Tokens.text2 : Tokens.text4)
             }
@@ -7861,7 +7922,7 @@ struct SelectionContextChip: View {
                     .frame(width: 2, height: 12)
                     .padding(.trailing, 1)
             } else {
-                Image(systemName: icon ?? "text.quote")
+                Image(icon: icon ?? "text.quote")
                     .sfFont(Tokens.TypeSize.badge, weight: .semibold)
                     .foregroundStyle(Tokens.text4)
             }
@@ -7871,7 +7932,7 @@ struct SelectionContextChip: View {
                 .foregroundStyle(hovering && !isReply ? Tokens.text2 : Tokens.text3)
                 .lineLimit(1)
             Button(action: drop) {
-                Image(systemName: "xmark")
+                Image(icon: "xmark")
                     .sfFont(Tokens.TypeSize.badge, weight: .semibold)
                     .foregroundStyle(hoveringDrop ? Tokens.text1 : Tokens.text4)
                     .frame(width: 14, height: 14)
@@ -7935,7 +7996,7 @@ private struct CopyMarkLine: View {
                 Text(mark.summary)
                     .sfFont(Tokens.TypeSize.meta)
                     .lineLimit(1)
-                Image(systemName: "chevron.right")
+                Image(icon: "chevron.right")
                     .sfFont(Tokens.TypeSize.badge, weight: .semibold)
                     .offset(x: hovering ? 2 : 0)
             }
@@ -7963,7 +8024,7 @@ struct SubThreadLinkLine: View {
         let parts = title.split(separator: "\n", maxSplits: 1).map(String.init)
         Button(action: open) {
             HStack(spacing: 6) {
-                Image(systemName: "arrow.turn.down.right")
+                Image(icon: "arrow.turn.down.right")
                     .sfFont(Tokens.TypeSize.badge, weight: .semibold)
                 Text(parts.first ?? title)
                     .sfFont(Tokens.TypeSize.meta, weight: parts.count > 1 ? .medium : .regular)
@@ -7975,7 +8036,7 @@ struct SubThreadLinkLine: View {
                         .lineLimit(1)
                         .truncationMode(.tail)
                 }
-                Image(systemName: "chevron.right")
+                Image(icon: "chevron.right")
                     .sfFont(Tokens.TypeSize.badge, weight: .semibold)
                     .offset(x: hovering ? 2 : 0)
             }
@@ -8052,7 +8113,7 @@ struct ThreadSearchBar: View {
     var body: some View {
         let matches = search.matches
         HStack(spacing: 6) {
-            Image(systemName: "magnifyingglass")
+            Image(icon: "magnifyingglass")
                 .sfFont(Tokens.TypeSize.badge, weight: .semibold)
                 .foregroundStyle(Tokens.text4)
             HistorySearchField(text: $text,
@@ -8070,7 +8131,7 @@ struct ThreadSearchBar: View {
             }
             ForEach([("chevron.up", -1), ("chevron.down", 1)], id: \.0) { icon, step in
                 Button { search.step(step) } label: {
-                    Image(systemName: icon)
+                    Image(icon: icon)
                         .sfFont(Tokens.TypeSize.badge, weight: .semibold)
                         .foregroundStyle(matches.isEmpty ? Tokens.text4 : Tokens.text2)
                         .frame(width: 14, height: 14)
@@ -8082,7 +8143,7 @@ struct ThreadSearchBar: View {
             Button {
                 withAnimation(.easeOut(duration: Tokens.hoverFade)) { close() }
             } label: {
-                Image(systemName: "xmark")
+                Image(icon: "xmark")
                     .sfFont(Tokens.TypeSize.badge, weight: .semibold)
                     .foregroundStyle(Tokens.text4)
                     .frame(width: 14, height: 14)
@@ -8212,7 +8273,7 @@ struct ErrorActionRow: View {
                         .lineLimit(1)
                     // Actions that lead to Settings point out of the thread; a
                     // retry stays in it.
-                    Image(systemName: action == .retry || action == .retryNotchi ? "chevron.right" : "arrow.up.right")
+                    Image(icon: action == .retry || action == .retryNotchi ? "chevron.right" : "arrow.up.right")
                         .sfFont(Tokens.TypeSize.badge, weight: .semibold)
                         .foregroundStyle(Tokens.text3)
                 }
@@ -8358,9 +8419,9 @@ struct IdleTrailingCluster: View {
                     // "close" on the way back.
                     Group {
                         if flat {
-                            LucideIcon(mark: LucideIcons.chevronDown, size: glyphSize + 2)
+                            PhosphorIcon(mark: PhosphorIcons.chevronDown, size: glyphSize + 2)
                         } else {
-                            Image(systemName: "chevron.down")
+                            Image(icon: "chevron.down")
                         }
                     }
                     .rotationEffect(.degrees(recentOpen ? 180 : 0))
@@ -8399,26 +8460,26 @@ struct IdleTrailingCluster: View {
                 if showsRecent || openHistory != nil {
                     segment(.recent, action: openHistory ?? toggleRecent,
                             tooltip: L("history.window.title")) {
-                        LucideIcon(mark: LucideIcons.clock, size: glyphSize + 2)
+                        PhosphorIcon(mark: PhosphorIcons.clock, size: glyphSize + 2)
                     }
                     .transition(chipTransition)
                 }
                 if let openReleaseNotes {
                     segment(.releaseNotes, action: openReleaseNotes,
                             tooltip: L("recent.menu.releaseNotes")) {
-                        LucideIcon(mark: LucideIcons.scrollText, size: glyphSize + 2)
+                        PhosphorIcon(mark: PhosphorIcons.calendarStar, size: glyphSize + 2)
                     }
                     .transition(chipTransition)
                 }
                 segment(.settings, action: openSettings,
                         tooltip: L("recent.menu.settings")) {
-                    LucideIcon(mark: LucideIcons.settings, size: glyphSize + 2)
+                    PhosphorIcon(mark: PhosphorIcons.settings, size: glyphSize + 2)
                 }
                 .transition(chipTransition)
             } else {
                 segment(.more, action: { moreExpanded = true },
                         tooltip: L("recent.manage"), showsTooltip: false) {
-                    Image(systemName: "ellipsis")
+                    Image(icon: "ellipsis")
                 }
                 .transition(.opacity)
             }
@@ -8453,7 +8514,7 @@ struct IdleTrailingCluster: View {
                     // animation has to ride the Text itself for `numericText` to
                     // fire — on the outer Button it only drives the layout.
                     .animation(reduceMotion ? nil : .snappy(duration: 0.3), value: runningCount)
-                Image(systemName: "chevron.down")
+                Image(icon: "chevron.down")
                     .sfFont(glyphSize - 1.5, weight: .semibold)
                     .rotationEffect(.degrees(recentOpen ? 180 : 0))
                     .animation(.spring(response: 0.32, dampingFraction: 0.8), value: recentOpen)
@@ -8547,7 +8608,7 @@ struct AttachPlusChip: View {
 
     var body: some View {
         Button(action: action) {
-            LucideIcon(mark: LucideIcons.plus, size: glyphSize + 2)
+            PhosphorIcon(mark: PhosphorIcons.plus, size: glyphSize + 2)
                 .foregroundStyle(hovering ? Tokens.text1 : Tokens.text3)
                 .frame(width: size, height: size)
                 .modifier(ClusterChipSurface(flat: flat, hovering: hovering, shape: Circle()))
@@ -8697,7 +8758,7 @@ struct ResultTrailingCluster: View {
                                   engaged: moreOpen,
                                   tooltip: L("recent.manage"),
                                   action: { moreOpen.toggle() }) {
-                    Image(systemName: "ellipsis")
+                    Image(icon: "ellipsis")
                         .sfFont(15, weight: .bold)
                 }
                 more.showsTooltip = false
@@ -8708,7 +8769,7 @@ struct ResultTrailingCluster: View {
                                   engaged: moreOpen,
                                   tooltip: L("nono.more"),
                                   action: { moreOpen.toggle() }) {
-                    Image(systemName: "ellipsis")
+                    Image(icon: "ellipsis")
                         .sfFont(15, weight: .bold)
                 }
                 cloudMore.showsTooltip = false
@@ -8843,7 +8904,7 @@ struct GlassBackButton: View {
 
     var body: some View {
         Button(action: action) {
-            Image(systemName: "chevron.left")
+            Image(icon: "chevron.left")
                 .sfFont(Tokens.TypeSize.form, weight: .semibold)
                 .foregroundStyle(hovering ? Tokens.text1 : Tokens.text2)
                 .frame(width: size, height: size)
@@ -9146,7 +9207,7 @@ struct UserQuestionBubble: View {
                             .sfFont(max(Tokens.TypeSize.meta, bubbleFont - 2))
                             .lineLimit(1)
                         if hoveringForwarded {
-                            Image(systemName: "arrow.up.right")
+                            Image(icon: "arrow.up.right")
                                 .sfFont(Tokens.TypeSize.badge, weight: .semibold)
                                 .frame(width: 9, height: 9)
                                 .centeredOnTextGlyphs(fontSize: max(Tokens.TypeSize.meta, bubbleFont - 2))
@@ -9171,7 +9232,7 @@ struct UserQuestionBubble: View {
                             .lineLimit(1)
                         // Only under the cursor: at rest every tag looks the same.
                         if hoveringForwarded {
-                            Image(systemName: "arrow.up.right")
+                            Image(icon: "arrow.up.right")
                                 .sfFont(Tokens.TypeSize.badge, weight: .semibold)
                                 .frame(width: 9, height: 9)
                                 .centeredOnTextGlyphs(fontSize: max(Tokens.TypeSize.meta, bubbleFont - 2))
@@ -10078,10 +10139,10 @@ private struct BucketTogglePill: View {
     /// …and its mark: bubble for Ask, one pencil for both faces of Capture. A
     /// second mark would make the two look like separate modes — whether it rings
     /// is the suffix's job to say, not a different icon's.
-    private var askMark: LucideIcons.Mark {
+    private var askMark: PhosphorIcons.Mark {
         switch destination {
-        case .chat:              return LucideIcons.messageCircle
-        case .note, .reminder:   return LucideIcons.pencilLine
+        case .chat:              return PhosphorIcons.messageCircle
+        case .note, .reminder:   return PhosphorIcons.pencilLine
         }
     }
 
@@ -10109,7 +10170,7 @@ private struct BucketTogglePill: View {
             if model.agentAvailable {
                 // No key: the Agent half's face never changes, so it has nothing
                 // to roll — it only ever wipes.
-                BucketWord(title: agent, icon: LucideIcons.codeXml, active: agentOn,
+                BucketWord(title: agent, icon: PhosphorIcons.codeXml, active: agentOn,
                            swapKey: nil) {
                     model.setAgentBucket(true)
                 }
@@ -10184,7 +10245,7 @@ private struct BucketTogglePill: View {
 /// single glyph, which is the whole point of spending the second axis on it.
 private struct BucketWord: View {
     var title: String
-    var icon: LucideIcons.Mark
+    var icon: PhosphorIcons.Mark
     var active: Bool
     /// What a *roll* is keyed on — the live destination for the Ask half, `nil`
     /// for the Agent half, whose face is fixed. Keyed on the category rather than
@@ -10293,7 +10354,7 @@ private struct BucketWord: View {
             // by side in the HStack the outgoing mark would push the word along
             // in front of it.
             ZStack {
-                LucideIcon(mark: icon, size: 15, weight: 2.0)
+                PhosphorIcon(mark: icon, size: 15)
                     .id(swapKey)
                     .transition(Self.roll)
             }
@@ -10512,6 +10573,14 @@ fileprivate struct ThreadRevealTargets: Equatable {
 /// drawing is the one that reports the thread's height.
 fileprivate struct RevealThreadKey: Equatable {
     var turns: [NotchModel.Turn]
+    var measures: Bool
+}
+
+/// Geometry key for `revealThread`'s `onGeometryChange`: carrying `measures`
+/// ensures flipping `false -> true` always reports the height even when a
+/// single-turn thread has the same height as its resting peek.
+fileprivate struct RevealMeasure: Equatable {
+    var height: CGFloat
     var measures: Bool
 }
 
@@ -10806,7 +10875,7 @@ struct WelcomeLicenseCard: View {
                         }
                     }
                     Spacer(minLength: 0)
-                    Image(systemName: "chevron.right")
+                    Image(icon: "chevron.right")
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(Tokens.text3)
                 }
@@ -11289,6 +11358,8 @@ struct RoutinesPanel: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             switch tab {
+            case .routines where onCard:
+                cardListPage(L("routines.title")) { cardRoutinesList }
             case .routines:
                 sectionHead(L("routines.title"), closes: true)
                 let rows = items
@@ -11306,19 +11377,34 @@ struct RoutinesPanel: View {
                     subThreadHead(model.subThreadTitle(for: subID) ?? L("copyThread.tab"))
                     subThread(subID)
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                } else if onCard {
+                    cardListPage(L("copyThread.tab")) {
+                        SubThreadList(model: model, code: false, onCard: true, onOpen: onClose)
+                    }
                 } else {
                     sectionHead(L("copyThread.tab"), closes: true)
-                    SubThreadList(model: model, code: false, onOpen: onClose)
+                    SubThreadList(model: model, code: false, onCard: onCard, onOpen: onClose)
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                 }
             case .codeThreads:
-                sectionHead(L("codeThread.tab"), closes: true)
-                SubThreadList(model: model, code: true, onOpen: onClose)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                if onCard {
+                    cardListPage(L("codeThread.tab")) {
+                        SubThreadList(model: model, code: true, onCard: true, onOpen: onClose)
+                    }
+                } else {
+                    sectionHead(L("codeThread.tab"), closes: true)
+                    SubThreadList(model: model, code: true, onCard: onCard, onOpen: onClose)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                }
             case .websites:
-                sectionHead("Websites", closes: true)
-                websitesBody
-                    .task { await pages.refreshList() }
+                if onCard {
+                    cardListPage("Websites") { cardWebsitesList }
+                        .task { await pages.refreshList() }
+                } else {
+                    sectionHead("Websites", closes: true)
+                    websitesBody
+                        .task { await pages.refreshList() }
+                }
             }
         }
         .modifier(SidePageChrome(onCard: onCard))
@@ -11333,7 +11419,7 @@ struct RoutinesPanel: View {
                     model.activeSubThreadID = nil
                 }
             } label: {
-                Image(systemName: "chevron.left")
+                Image(icon: "chevron.left")
                     .sfFont(Tokens.TypeSize.badge, weight: .semibold)
                     .foregroundStyle(Tokens.text3)
                     .frame(width: 22, height: 22)
@@ -11360,6 +11446,33 @@ struct RoutinesPanel: View {
                 head
             }
         }
+    }
+
+    /// A list page on the menu bar card: one menu card in the bubbles'
+    /// column, left-aligned with the composer, its caption and × on the first
+    /// line and the rows under it as menu rows. Hugs its rows; scrolls once
+    /// they pass the page's height.
+    private func cardListPage<List: View>(_ title: String,
+                                          @ViewBuilder list: () -> List) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 0) {
+                Text(title).captionLabel()
+                Spacer(minLength: 0)
+                SidePageCloseButton(action: onClose)
+            }
+            .frame(height: MenuCard.rowHeight)
+            .padding(.leading, MenuCard.rowPad)
+            .padding(.trailing, 2)
+            list()
+        }
+        .padding(MenuCard.cardPad)
+        // The gaps between rows take the wheel too, instead of passing it to
+        // the window underneath (the messages' own backing in `MenuBarChat`).
+        .background(RoundedRectangle(cornerRadius: MenuCard.radius, style: .continuous)
+            .fill(Color.black.opacity(0.001)))
+        .smokedGlass(radius: MenuCard.radius)
+        .frame(width: NotchMetrics.chatWidth * cardFraction, alignment: .leading)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     /// A section's caption, the panel's group-heading style, and on the
@@ -11400,29 +11513,62 @@ struct RoutinesPanel: View {
                 .foregroundStyle(Tokens.text4)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
-            if onCard {
-                cardWebsites(pages.pages)
-            } else {
-                panelWebsites(pages.pages)
-            }
+            panelWebsites(pages.pages)
             Spacer(minLength: 0)
         }
     }
 
-    private func cardWebsites(_ rows: [PagesService.PageSummary]) -> some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 8) {
-                ForEach(rows) { page in
-                    websiteRow(page)
-                        .padding(.horizontal, ChatBubbleChrome.glassHorizontalPad - 12)
-                        .padding(.vertical, ChatBubbleChrome.glassVerticalPad - 10)
-                        .smokedGlass(radius: ChatBubbleChrome.glassCardRadius)
+    /// Websites inside `cardListPage`'s menu card, in Sub-thread's rows:
+    /// title and time; a click opens the page, the rest is in the context menu.
+    @ViewBuilder
+    private var cardWebsitesList: some View {
+        let rows = pages.pages
+        if rows.isEmpty {
+            Group {
+                if pages.loading {
+                    ProgressView().controlSize(.small)
+                } else {
+                    Text("No websites yet")
+                        .sfFont(Tokens.TypeSize.label)
+                        .foregroundStyle(Tokens.text4)
                 }
             }
+            .padding(.horizontal, MenuCard.rowPad)
+            .frame(height: MenuCard.rowHeight)
+        } else {
+            let stack = VStack(alignment: .leading, spacing: MenuCard.rowSpacing) {
+                ForEach(rows) { page in
+                    MenuCardRow(title: page.title,
+                                accessory: SubThreadList.relative(
+                                    Date(timeIntervalSince1970: page.updatedAt / 1000)),
+                                selected: false) {
+                        if let url = page.pageURL { PagesService.shared.open(url) }
+                    }
+                    .contextMenu { websiteMenu(page) }
+                }
+            }
+            ViewThatFits(in: .vertical) {
+                stack
+                ScrollView { stack }.scrollIndicators(.never)
+            }
         }
-        .scrollIndicators(.never)
-        .fixedSize(horizontal: false, vertical: true)
-        .frame(width: NotchMetrics.chatWidth * cardFraction)
+    }
+
+    @ViewBuilder
+    private func websiteMenu(_ page: PagesService.PageSummary) -> some View {
+        Button("Open") {
+            if let url = page.pageURL { PagesService.shared.open(url) }
+        }
+        Button("Copy Link") {
+            Task { await PagesService.shared.copyLink(page) }
+        }
+        Divider()
+        Button(page.isPublic ? "Make Private" : "Share Publicly") {
+            Task { try? await PagesService.shared.setVisibility(slug: page.slug, isPublic: !page.isPublic) }
+        }
+        Button("Delete", role: .destructive) {
+            Task { try? await PagesService.shared.delete(slug: page.slug) }
+        }
     }
 
     private func panelWebsites(_ rows: [PagesService.PageSummary]) -> some View {
@@ -11481,7 +11627,7 @@ struct RoutinesPanel: View {
                     if copiedPageSlug == page.slug { copiedPageSlug = nil }
                 }
             } label: {
-                Image(systemName: copiedPageSlug == page.slug ? "checkmark" : "doc.on.doc")
+                Image(icon: copiedPageSlug == page.slug ? "checkmark" : "doc.on.doc")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(copiedPageSlug == page.slug ? Color.green.opacity(0.9) : Tokens.text3)
                     .frame(width: 24, height: 24)
@@ -11493,7 +11639,7 @@ struct RoutinesPanel: View {
             Button {
                 if let url = page.pageURL { PagesService.shared.open(url) }
             } label: {
-                Image(systemName: "arrow.up.right")
+                Image(icon: "arrow.up.right")
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(Tokens.text3)
                     .frame(width: 24, height: 24)
@@ -11504,21 +11650,7 @@ struct RoutinesPanel: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
-        .contextMenu {
-            Button("Open") {
-                if let url = page.pageURL { PagesService.shared.open(url) }
-            }
-            Button("Copy Link") {
-                Task { await PagesService.shared.copyLink(page) }
-            }
-            Divider()
-            Button(page.isPublic ? "Make Private" : "Share Publicly") {
-                Task { try? await PagesService.shared.setVisibility(slug: page.slug, isPublic: !page.isPublic) }
-            }
-            Button("Delete", role: .destructive) {
-                Task { try? await PagesService.shared.delete(slug: page.slug) }
-            }
-        }
+        .contextMenu { websiteMenu(page) }
     }
 
     private func websiteRelativeTime(_ ms: Double) -> String {
@@ -11531,25 +11663,45 @@ struct RoutinesPanel: View {
     /// page's height instead of stopping at three rows.
     private func routines(_ rows: [Item], fills: Bool = false) -> some View {
         Group {
-            if onCard { cardRoutines(rows) } else { panelRoutines(rows, fills: fills) }
+            panelRoutines(rows, fills: fills)
         }
     }
 
-    /// On the card: each routine is its own glass bubble, like a message.
-    private func cardRoutines(_ rows: [Item]) -> some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 8) {
+    /// Routines inside `cardListPage`'s menu card, in Sub-thread's rows: the
+    /// prompt, its schedule, and a switch; a click on the row flips it.
+    @ViewBuilder
+    private var cardRoutinesList: some View {
+        let rows = items
+        if rows.isEmpty {
+            Text(L("routines.empty"))
+                .sfFont(Tokens.TypeSize.label)
+                .foregroundStyle(Tokens.text4)
+                .padding(.horizontal, MenuCard.rowPad)
+                .frame(height: MenuCard.rowHeight)
+        } else {
+            let stack = VStack(alignment: .leading, spacing: MenuCard.rowSpacing) {
                 ForEach(rows) { item in
-                    row(item)
-                        .padding(.horizontal, ChatBubbleChrome.glassHorizontalPad - 12)
-                        .padding(.vertical, ChatBubbleChrome.glassVerticalPad - 10)
-                        .smokedGlass(radius: ChatBubbleChrome.glassCardRadius)
+                    MenuCardRow(title: item.title, accessory: rule(item),
+                                isOn: item.active, selected: false) {
+                        setActive(item, !item.active)
+                    }
                 }
             }
+            ViewThatFits(in: .vertical) {
+                stack
+                ScrollView { stack }.scrollIndicators(.never)
+            }
         }
-        .scrollIndicators(.never)
-        .fixedSize(horizontal: false, vertical: true)
-        .frame(width: NotchMetrics.chatWidth * cardFraction)
+    }
+
+    private func setActive(_ item: Item, _ on: Bool) {
+        Haptics.levelChange()
+        if item.agent {
+            on ? agentManager.unpauseLoop(taskID: item.id)
+               : agentManager.pauseLoop(taskID: item.id)
+        } else {
+            on ? chatLoops.unpause(item.id) : chatLoops.pause(item.id)
+        }
     }
 
     private func panelRoutines(_ rows: [Item], fills: Bool) -> some View {
@@ -11606,15 +11758,7 @@ struct RoutinesPanel: View {
             Spacer(minLength: 0)
             Toggle("", isOn: Binding(
                 get: { item.active },
-                set: { on in
-                    Haptics.levelChange()
-                    if item.agent {
-                        on ? agentManager.unpauseLoop(taskID: item.id)
-                           : agentManager.pauseLoop(taskID: item.id)
-                    } else {
-                        on ? chatLoops.unpause(item.id) : chatLoops.pause(item.id)
-                    }
-                }))
+                set: { setActive(item, $0) }))
                 .labelsHidden()
                 .toggleStyle(.switch)
                 .controlSize(.mini)
@@ -11663,7 +11807,7 @@ struct SidePageCloseButton: View {
 
     var body: some View {
         Button(action: action) {
-            Image(systemName: "xmark")
+            Image(icon: "xmark")
                 .sfFont(Tokens.TypeSize.meta, weight: .semibold)
                 .foregroundStyle(hovering ? Tokens.text1 : Tokens.text3)
                 .frame(width: 24, height: 24)
@@ -11751,6 +11895,9 @@ struct SubThreadList: View {
     @ObservedObject private var chatLoops = ChatLoopManager.shared
     /// Code-threads (agent runs) instead of sub-threads.
     let code: Bool
+    /// On the menu bar chat's card: each row is a glass bubble in the
+    /// bubbles' column, like the card's Websites rows.
+    var onCard = false
     /// Closes the side page once a thread opens.
     let onOpen: () -> Void
 
@@ -11760,7 +11907,9 @@ struct SubThreadList: View {
 
     var body: some View {
         let rows = rows
-        if rows.isEmpty {
+        if onCard {
+            cardBody(rows)
+        } else if rows.isEmpty {
             Text(L(code ? "codeThread.empty" : "subThread.empty"))
                 .sfFont(Tokens.TypeSize.label)
                 .foregroundStyle(Tokens.text4)
@@ -11771,36 +11920,66 @@ struct SubThreadList: View {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
                     ForEach(rows) { item in
-                        Button {
-                            if code {
-                                onOpen()
-                                model.openHistory(item)
-                            } else {
-                                withAnimation(.spring(response: 0.36, dampingFraction: 0.86)) {
-                                    model.openSubThread(item.id)
-                                }
-                            }
-                        } label: {
-                            HStack(alignment: .firstTextBaseline, spacing: 12) {
-                                Text(item.displayTitle)
-                                    .sfFont(Tokens.TypeSize.form)
-                                    .foregroundStyle(Tokens.text2)
-                                    .lineLimit(1)
-                                    .truncationMode(.tail)
-                                    .layoutPriority(-1)
-                                Spacer(minLength: 0)
-                                Text(meta(for: item))
-                                    .font(.sf(Tokens.TypeSize.meta).monospacedDigit())
-                                    .foregroundStyle(Tokens.text4)
-                            }
-                            .padding(.vertical, 9)
-                            .padding(.horizontal, 8)
-                            .contentShape(Rectangle())
+                        Button { open(item) } label: {
+                            rowLabel(item)
+                                .padding(.vertical, 9)
+                                .padding(.horizontal, 8)
+                                .contentShape(Rectangle())
                         }
                         .buttonStyle(HistoryRowStyle())
                     }
                 }
             }
+        }
+    }
+
+    /// Inside `RoutinesPanel.cardListPage`'s menu card: menu rows with the
+    /// time as the trailing accessory, the `⋯` menu's rows.
+    @ViewBuilder
+    private func cardBody(_ rows: [NotchModel.HistoryItem]) -> some View {
+        if rows.isEmpty {
+            Text(L(code ? "codeThread.empty" : "subThread.empty"))
+                .sfFont(Tokens.TypeSize.label)
+                .foregroundStyle(Tokens.text4)
+                .padding(.horizontal, MenuCard.rowPad)
+                .frame(height: MenuCard.rowHeight)
+        } else {
+            let stack = VStack(alignment: .leading, spacing: MenuCard.rowSpacing) {
+                ForEach(rows) { item in
+                    MenuCardRow(title: item.displayTitle, accessory: meta(for: item),
+                                selected: false) { open(item) }
+                }
+            }
+            ViewThatFits(in: .vertical) {
+                stack
+                ScrollView { stack }.scrollIndicators(.never)
+            }
+        }
+    }
+
+    private func open(_ item: NotchModel.HistoryItem) {
+        if code {
+            onOpen()
+            model.openHistory(item)
+        } else {
+            withAnimation(.spring(response: 0.36, dampingFraction: 0.86)) {
+                model.openSubThread(item.id)
+            }
+        }
+    }
+
+    private func rowLabel(_ item: NotchModel.HistoryItem) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            Text(item.displayTitle)
+                .sfFont(Tokens.TypeSize.form)
+                .foregroundStyle(Tokens.text2)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .layoutPriority(-1)
+            Spacer(minLength: 0)
+            Text(meta(for: item))
+                .font(.sf(Tokens.TypeSize.meta).monospacedDigit())
+                .foregroundStyle(Tokens.text4)
         }
     }
 

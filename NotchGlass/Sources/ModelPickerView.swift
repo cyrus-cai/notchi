@@ -1049,7 +1049,7 @@ struct ModelDetailCard: View {
                     .fixedSize()
                 balanceFigure
                 Spacer(minLength: 4)
-                Image(systemName: "arrow.up.right")
+                Image(icon: "arrow.up.right")
                     .font(.sf(Tokens.TypeSize.meta, weight: .medium))
                     .foregroundStyle(learnMoreHovered ? Tokens.text1 : Tokens.text4)
             }
@@ -4154,7 +4154,7 @@ struct AgentModelPickerView: View {
                     .lineLimit(1)
                     .truncationMode(.tail)
                 Spacer(minLength: 0)
-                Image(systemName: "chevron.up.chevron.down")
+                Image(icon: "chevron.up.chevron.down")
                     .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
                     .foregroundStyle(Tokens.text3)
                     .opacity(engineHovering ? 1 : 0)

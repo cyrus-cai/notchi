@@ -1216,14 +1216,11 @@ final class SignalBridge: ObservableObject {
         }
 
         let existingThread = action != nil ? nil : (repliedThread ?? defaultThread())
-        let seedIDs = Set(existingThread.flatMap { id in
-            model.history.first(where: { $0.id == id })?.conversation.map(\.id)
-        } ?? [])
         let previousAnswer = existingThread.flatMap { id in
             model.history.first(where: { $0.id == id })?.conversation.last(where: { $0.role == "assistant" })?.text
         } ?? ""
 
-        guard let threadID = model.runChannelRound(
+        guard let round = model.runChannelRound(
             threadID: existingThread,
             question: question,
             images: images,
@@ -1233,6 +1230,7 @@ final class SignalBridge: ObservableObject {
             _ = await sendNoteToSelf(L("signal.failed"), quoteTimestamp: last.timestamp)
             return
         }
+        let threadID = round.thread
 
         TelegramBridge.shared.mirrorSignalMessage(threadID: threadID, text: sentText, images: images)
         if repliedThread == nil && action == nil { currentThread = threadID }
@@ -1241,7 +1239,7 @@ final class SignalBridge: ObservableObject {
 
         react(to: question, previous: previousAnswer, thread: threadID, targetTimestamp: last.timestamp)
         Task { [weak self] in await self?.sendTyping() }
-        await stream(thread: threadID, seedIDs: seedIDs, replyTo: last.timestamp)
+        await stream(thread: threadID, answer: round.answer, replyTo: last.timestamp)
 
         // Answer any steered messages that arrived too late to be read by the round.
         let unreadTags = Set(model.unreadSteerTags(threadID: threadID))
@@ -1254,7 +1252,10 @@ final class SignalBridge: ObservableObject {
         }
     }
 
-    private func stream(thread: UUID, seedIDs: Set<UUID>, replyTo: Int64) async {
+    /// Follows `answer`, the one turn this round writes. Other turns that land
+    /// on the thread meanwhile (sub-thread reports, another device's round)
+    /// are not this reply.
+    private func stream(thread: UUID, answer answerID: UUID, replyTo: Int64) async {
         guard let model else { return }
         var sawLive = false
         var askedQuestions: Set<UUID> = []
@@ -1264,12 +1265,12 @@ final class SignalBridge: ObservableObject {
             ticks += 1
             guard let live = model.liveThread(thread) else {
                 let landed = model.history.first(where: { $0.id == thread })?.conversation
-                    .contains(where: { $0.role == "assistant" && !seedIDs.contains($0.id) }) ?? false
+                    .contains(where: { $0.id == answerID }) ?? false
                 if !sawLive && !landed && ticks < 75 { continue }
                 break
             }
             sawLive = true
-            if let answer = live.last(where: { $0.role == "assistant" && !seedIDs.contains($0.id) }),
+            if let answer = live.first(where: { $0.id == answerID }),
                let question = answer.pendingQuestion, !askedQuestions.contains(question.id) {
                 askedQuestions.insert(question.id)
                 await askPendingQuestion(question)
@@ -1281,7 +1282,7 @@ final class SignalBridge: ObservableObject {
         activeQuestion = nil
 
         let turn = model.history.first(where: { $0.id == thread })?.conversation
-            .last(where: { $0.role == "assistant" && !seedIDs.contains($0.id) })
+            .first(where: { $0.id == answerID })
         let whole = turn?.text ?? ""
         let (withoutVisuals, charts) = TelegramBridge.renderVisuals(whole)
         let (shownText, photos) = TelegramBridge.localImages(withoutVisuals)
@@ -1518,10 +1519,9 @@ final class SignalBridge: ObservableObject {
             guard let target = lastInterrupted, let model else { return true }
             lastInterrupted = nil
             Task {
-                let seed = Set(model.history.first { $0.id == target.thread }?.conversation.map(\.id) ?? [])
-                guard model.continueTelegramAnswer(threadID: target.thread, turnID: target.turn) != nil else { return }
+                guard let round = model.continueTelegramAnswer(threadID: target.thread, turnID: target.turn) else { return }
                 await sendTyping()
-                await stream(thread: target.thread, seedIDs: seed, replyTo: message.timestamp)
+                await stream(thread: round.thread, answer: round.answer, replyTo: message.timestamp)
             }
             return true
         case "retry":
@@ -1529,10 +1529,10 @@ final class SignalBridge: ObservableObject {
             lastFailedThread = nil
             guard let thread, let model else { return true }
             Task {
-                guard let (landed, seed) = model.retryTelegramRound(threadID: thread) else { return }
-                currentThread = landed
+                guard let round = model.retryTelegramRound(threadID: thread) else { return }
+                currentThread = round.thread
                 await sendTyping()
-                await stream(thread: landed, seedIDs: seed, replyTo: message.timestamp)
+                await stream(thread: round.thread, answer: round.answer, replyTo: message.timestamp)
             }
             return true
         case "undo":

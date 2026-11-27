@@ -1323,7 +1323,7 @@ struct LicenseOfferCard: View {
         startPoint: .bottomLeading, endPoint: .topTrailing)
 
     private func feature(_ symbol: String, _ text: String) -> some View {
-        featureRow(Image(systemName: symbol)
+        featureRow(Image(icon: symbol)
                        .font(.system(size: 14, weight: .semibold)), text)
     }
 

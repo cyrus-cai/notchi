@@ -1051,6 +1051,20 @@ final class MCPHub: ObservableObject {
         }
     }
 
+    /// The live connection to one server, by name; nil when it is not connected.
+    func connection(named name: String) -> MCPConnection? { connections[name] }
+
+    /// Connected servers whose catalog entry is in the Mail category, by name,
+    /// read from the live state each time: a server counts only while it is up.
+    func liveMailConnections() -> [(name: String, connection: MCPConnection)] {
+        servers.compactMap { server in
+            guard case .ready = server.status,
+                  MCPConnector.find(server.name)?.category == .mail,
+                  let connection = connections[server.name] else { return nil }
+            return (server.name, connection)
+        }
+    }
+
     /// The connected servers' tools for one question. `confirm` shows the
     /// in-answer card for a call that changes something.
     func agentTools(confirm: @escaping MCPTool.Confirm) -> [NotchTool] {

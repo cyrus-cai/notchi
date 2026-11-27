@@ -1130,7 +1130,7 @@ struct SendButton: View {
         HStack(spacing: 6) {
             Text(label)
                 .sfFont(Tokens.TypeSize.form, weight: .medium)
-            Image(systemName: icon)
+            Image(icon: icon)
                 .sfFont(Tokens.TypeSize.label, weight: .semibold)
         }
         .foregroundStyle(hovering ? Tokens.text1 : Tokens.text2)
@@ -1144,7 +1144,7 @@ struct SendButton: View {
 
     /// The bare form: the send arrow on a solid ink circle (mid-thread follow-up).
     private var glyphCircle: some View {
-        Image(systemName: icon)
+        Image(icon: icon)
             .sfFont(Tokens.TypeSize.form, weight: .semibold)
             .foregroundStyle(Self.glyphOnInk)
             .id(icon)
@@ -1175,7 +1175,7 @@ struct StopButton: View {
 
     var body: some View {
         Button(action: action) {
-            Image(systemName: "stop.circle")
+            Image(icon: "stop.circle")
                 .sfFont(Tokens.TypeSize.form, weight: .regular)
                 .foregroundStyle(hovering ? Tokens.text1 : Tokens.text2)
                 .frame(width: size, height: size)
@@ -1599,7 +1599,7 @@ struct ComposeImagesAttachedLine: View {
                 .buttonStyle(.plain).exemptsDoubleClickPin()
                 .overlay(alignment: .topTrailing) {
                     Button { onRemove(index) } label: {
-                        Image(systemName: "xmark")
+                        Image(icon: "xmark")
                             .sfFont(Tokens.TypeSize.badge, weight: .semibold)
                             .foregroundStyle(Tokens.text1)
                             .frame(width: 15, height: 15)
@@ -1690,11 +1690,11 @@ struct GlassIconButton: View {
     @ViewBuilder
     private var glyph: some View {
         if let hoverSystemName {
-            Image(systemName: hovering ? hoverSystemName : systemName)
+            Image(icon: hovering ? hoverSystemName : systemName)
                 .contentTransition(.opacity)
                 .animation(.easeOut(duration: 0.08), value: hovering)
         } else {
-            Image(systemName: systemName)
+            Image(icon: systemName)
                 .contentTransition(.symbolEffect(.replace))
         }
     }
@@ -1733,7 +1733,7 @@ struct PinStateGlyph: View {
 
     var body: some View {
         let systemName = alternateSystemName ?? (pinned ? "pin.fill" : "pin")
-        Image(systemName: systemName)
+        Image(icon: systemName)
             .sfFont(alternateSize ?? size, weight: weight)
             .rotationEffect(.degrees(alternateSystemName == nil && !pinned ? 32 : 0))
             .contentTransition(.symbolEffect(.replace))
@@ -1994,7 +1994,7 @@ struct PanelBackPill: View {
     var body: some View {
         Button(action: action) {
             HStack(spacing: 5) {
-                Image(systemName: "chevron.left")
+                Image(icon: "chevron.left")
                     .sfFont(Tokens.TypeSize.label, weight: .regular)
                 Text(title)
                     .sfFont(Tokens.TypeSize.label, weight: .regular)
@@ -2091,7 +2091,7 @@ struct PanelBackButton: View {
 
     var body: some View {
         Button(action: action) {
-            Image(systemName: "chevron.left")
+            Image(icon: "chevron.left")
                 .sfFont(Tokens.TypeSize.form, weight: .semibold)
                 .foregroundStyle(Tokens.text2)
                 .frame(width: Tokens.Control.header, height: Tokens.Control.header)
@@ -2157,7 +2157,7 @@ struct CaptureLineLink: View {
                 // line's chevron, so the arrow adds no height and the tag
                 // doesn't move up or down when it appears.
                 if hovering {
-                    Image(systemName: "arrow.up.right")
+                    Image(icon: "arrow.up.right")
                         .sfFont(Tokens.TypeSize.badge, weight: .semibold)
                         .frame(width: 9, height: 9)
                         .centeredOnTextGlyphs(fontSize: font)
@@ -2204,7 +2204,7 @@ struct SubThreadMark: View {
                     .lineLimit(1)
                     .truncationMode(.tail)
                 if hovering {
-                    Image(systemName: "arrow.up.right")
+                    Image(icon: "arrow.up.right")
                         .sfFont(Tokens.TypeSize.badge, weight: .semibold)
                         .frame(width: 9, height: 9)
                         .centeredOnTextGlyphs(fontSize: font)
@@ -2295,7 +2295,7 @@ struct CaptureJumpButton: View {
             HStack(spacing: 3) {
                 Text(title)
                     .sfFont(Tokens.TypeSize.meta, weight: .medium)
-                Image(systemName: "arrow.up.right")
+                Image(icon: "arrow.up.right")
                     .sfFont(Tokens.TypeSize.badge, weight: .semibold)
             }
             .foregroundStyle(hovering ? Tokens.text2 : Tokens.text3)
@@ -3201,7 +3201,7 @@ private struct ReadingSourceRow: View {
                     .foregroundStyle(hovering ? Tokens.text2 : Tokens.text3)
                     .lineLimit(1)
                     .truncationMode(.tail)
-                Image(systemName: "chevron.right")
+                Image(icon: "chevron.right")
                     .sfFont(font - 4, weight: .semibold)
                     .foregroundStyle(Tokens.text4)
                     .opacity(hovering ? 1 : 0)
@@ -3749,7 +3749,7 @@ struct AssistantTurnView: View {
                             // centre of a fixed square, so it rotates in place and
                             // never shifts.
                             if !working {
-                                Image(systemName: "chevron.right")
+                                Image(icon: "chevron.right")
                                     .sfFont(Tokens.TypeSize.badge, weight: .semibold)
                                     .frame(width: 9, height: 9)
                                     .centeredOnTextGlyphs(fontSize: waitFont)
@@ -4453,10 +4453,17 @@ struct AnswerCard<Content: View>: View {
         let pad = visible && !bare && !flat
         let showsGlass = pad
         let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)
+        let innerMetrics: AnswerCardInnerMetrics? = pad
+            ? AnswerCardInnerMetrics(
+                radius: max(Tokens.Radius.inset, radius - ChatBubbleChrome.glassVerticalPad),
+                horizontalOutset: ChatBubbleChrome.glassHorizontalPad - ChatBubbleChrome.glassVerticalPad
+            )
+            : nil
         return FractionWidthLayout(fraction: visible && !flat ? widthFraction : 1,
                                    hugs: visible && hugs && !flat, idealAtLeast: idealAtLeast) {
             content
                 .environment(\.chatBubbleGlass, !showsGlass)
+                .environment(\.answerCardInnerMetrics, innerMetrics)
                 .padding(.leading, pad && !chrome ? ChatBubbleChrome.horizontalPad : 0)
                 .padding(.horizontal, pad ? ChatBubbleChrome.glassHorizontalPad : 0)
                 .padding(.vertical, pad ? ChatBubbleChrome.glassVerticalPad : 0)
@@ -4472,9 +4479,16 @@ struct AnswerCard<Content: View>: View {
     private var panelBody: some View {
         let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)
         let pad = visible && !bare && !flat
+        let innerMetrics: AnswerCardInnerMetrics? = pad
+            ? AnswerCardInnerMetrics(
+                radius: max(Tokens.Radius.inset, radius - ChatBubbleChrome.verticalPad),
+                horizontalOutset: ChatBubbleChrome.horizontalPad - ChatBubbleChrome.verticalPad
+            )
+            : nil
         return FractionWidthLayout(fraction: visible && !flat ? widthFraction : 1,
                             hugs: visible && hugs && !flat, idealAtLeast: idealAtLeast) {
             content
+                .environment(\.answerCardInnerMetrics, innerMetrics)
                 .padding(.horizontal, pad ? ChatBubbleChrome.horizontalPad : 0)
                 .padding(.vertical, pad ? ChatBubbleChrome.verticalPad : 0)
                 .background(
@@ -4509,19 +4523,32 @@ struct OptionalSmokedGlass: ViewModifier {
 }
 
 /// Quiet timestamp shown beside a message bubble's bottom-right corner on hover.
-/// Anchored outside the bubble's trailing edge in an overlay so it never
-/// affects bubble width or triggers `FractionWidthLayout` relayout.
+/// When the bubble leaves enough room to its right inside the enclosing scroll
+/// view, the timestamp sits cleanly beside the trailing edge as plain text.
+/// When a wide bubble would push the timestamp past the trailing edge, it
+/// switches to a Liquid Glass capsule perched on the bubble's bottom-right
+/// corner so it never clips.
 struct BubbleHoverTimestamp: ViewModifier {
     let date: Date?
     var enabled: Bool = true
-    @Environment(\.cardWidthFraction) private var cardWidthFraction
+    @Environment(\.colorScheme) private var colorScheme
     @Environment(\.chatBubbleGlass) private var glass
     @State private var hovering = false
+    @State private var trailingSpace: CGFloat = 0
 
     func body(content: Content) -> some View {
         content
+            .onGeometryChange(for: CGFloat.self) { proxy in
+                guard let sv = proxy.bounds(of: .scrollView) else { return 0 }
+                // In `MenuBarChat`, `trailingSlack` extends past the right edge
+                // of the screen when right-aligned, and `glassGutter` pads the
+                // scroll view outside the chat frame — subtract both so we
+                // measure only the visible room inside the bubbles' column.
+                let offscreen = glass ? (MenuBarChat.trailingSlack + MenuBarChat.glassGutter) : 0
+                return floor(max(0, sv.maxX - proxy.frame(in: .scrollView).maxX - offscreen))
+            } action: { trailingSpace = $0 }
             .onHover { over in
-                guard date != nil, enabled, cardWidthFraction < 1 else {
+                guard date != nil, enabled else {
                     if hovering { hovering = false }
                     return
                 }
@@ -4530,24 +4557,71 @@ struct BubbleHoverTimestamp: ViewModifier {
                 }
             }
             .overlay(alignment: .bottomTrailing) {
-                Color.clear
-                    .frame(width: 0, height: 0)
-                    .overlay(alignment: .bottomLeading) {
-                        if let date, hovering, enabled, cardWidthFraction < 1 {
-                            Text(messageTimeStamp(date, compact: glass))
-                                .sfFont(Tokens.TypeSize.caption)
-                                .monospacedDigit()
-                                .foregroundStyle(Tokens.text4)
-                                .multilineTextAlignment(.leading)
-                                .lineLimit(glass ? 2 : 1)
-                                .fixedSize()
-                                .padding(.leading, 8)
-                                .padding(.bottom, 4)
-                                .transition(.opacity)
-                        }
+                if let date, hovering, enabled {
+                    let label = messageTimeStamp(date)
+                    if trailingSpace >= Self.neededTrailingWidth(for: label) {
+                        Color.clear
+                            .frame(width: 0, height: 0)
+                            .overlay(alignment: .bottomLeading) {
+                                Text(label)
+                                    .sfFont(Tokens.TypeSize.caption)
+                                    .monospacedDigit()
+                                    .foregroundStyle(Tokens.text4)
+                                    .lineLimit(1)
+                                    .fixedSize()
+                                    .padding(.leading, 8)
+                                    .padding(.bottom, 4)
+                                    .transition(.opacity)
+                            }
+                            .allowsHitTesting(false)
+                    } else {
+                        timestampPill(for: label)
+                            .offset(y: 7)
+                            .transition(.opacity.combined(with: .scale(scale: 0.92, anchor: .bottomTrailing)))
+                            .allowsHitTesting(false)
                     }
-                    .allowsHitTesting(false)
+                }
             }
+    }
+
+    private static func neededTrailingWidth(for text: String) -> CGFloat {
+        let font = NSFont.monospacedDigitSystemFont(ofSize: Tokens.TypeSize.caption, weight: .regular)
+        let textWidth = (text as NSString).size(withAttributes: [.font: font]).width
+        // 8pt leading gap + text width + 6pt margin from the scroll view edge.
+        return ceil(textWidth) + 14
+    }
+
+    private func timestampPill(for label: String) -> some View {
+        let shape = Capsule(style: .continuous)
+        let isLight = colorScheme == .light
+        return Text(label)
+            .sfFont(Tokens.TypeSize.caption, weight: .medium)
+            .monospacedDigit()
+            .foregroundStyle(Tokens.text3)
+            .lineLimit(1)
+            .fixedSize()
+            .padding(.horizontal, 7)
+            .padding(.vertical, 2.5)
+            .background {
+                if #available(macOS 26.0, *) {
+                    shape.fill(.clear)
+                        .glassEffect(.regular, in: shape)
+                } else {
+                    LegacyGlassBackdrop(light: isLight).clipShape(shape)
+                }
+            }
+            .overlay(
+                shape.strokeBorder(
+                    LinearGradient(
+                        colors: isLight
+                            ? [.white.opacity(0.75), .black.opacity(0.08)]
+                            : [.white.opacity(0.28), .white.opacity(0.07)],
+                        startPoint: .top, endPoint: .bottom
+                    ),
+                    lineWidth: 0.75
+                )
+            )
+            .shadow(color: .black.opacity(isLight ? 0.10 : 0.22), radius: 3, y: 1)
     }
 }
 
@@ -4813,12 +4887,32 @@ private struct ChatBubbleGlassKey: EnvironmentKey {
     static let defaultValue = false
 }
 
+struct AnswerCardInnerMetrics: Equatable {
+    /// Concentric continuous corner radius (`outerRadius - uniformInset`).
+    let radius: CGFloat
+    /// Extra horizontal padding the outer card carries over its vertical
+    /// padding (`hPad - vPad`). Outsetting a nested well by this amount gives
+    /// it equal inset on all four sides so its corners are truly concentric.
+    let horizontalOutset: CGFloat
+}
+
+private struct AnswerCardInnerMetricsKey: EnvironmentKey {
+    static let defaultValue: AnswerCardInnerMetrics? = nil
+}
+
 extension EnvironmentValues {
     /// The bubbles sit on nothing but the desktop (`MenuBarChat`): each one
     /// wears its own smoked glass instead of the faint fill it has on the panel.
     var chatBubbleGlass: Bool {
         get { self[ChatBubbleGlassKey.self] }
         set { self[ChatBubbleGlassKey.self] = newValue }
+    }
+
+    /// Concentric geometry for nested wells (e.g. `CodeBlockView`) inside an
+    /// enclosing `AnswerCard` bubble.
+    var answerCardInnerMetrics: AnswerCardInnerMetrics? {
+        get { self[AnswerCardInnerMetricsKey.self] }
+        set { self[AnswerCardInnerMetricsKey.self] = newValue }
     }
 }
 
@@ -6777,7 +6871,7 @@ struct MarkdownBlockRow: View, Equatable {
             // A checked-off item dims: the checkbox already says "done", the
             // fade just keeps open items visually in front.
             listRow(text: text, indent: indent, textOpacity: done ? 0.55 : 1) {
-                markerText(Image(systemName: done ? "checkmark.square" : "square"))
+                markerText(Image(icon: done ? "checkmark.square" : "square"))
             }
 
         case .quote(let text):
@@ -6990,7 +7084,7 @@ private struct MarkdownTableView: View {
                 withAnimation(.easeOut(duration: 0.25)) { copied = false }
             }
         } label: {
-            Image(systemName: copied ? "checkmark" : "doc.on.doc")
+            Image(icon: copied ? "checkmark" : "doc.on.doc")
                 .sfFont(Tokens.TypeSize.label, weight: .regular)
                 .foregroundStyle(Tokens.text1)
                 .contentTransition(.symbolEffect(.replace))
@@ -7307,14 +7401,14 @@ struct MediaLinkChip: View {
         Button(action: action) {
             HStack(spacing: 6) {
                 if let icon {
-                    Image(systemName: icon)
+                    Image(icon: icon)
                         .sfFont(baseFont - 3, weight: .medium)
                 }
                 Text(label)
                     .sfFont(baseFont - 1)
                     .lineLimit(1)
                     .truncationMode(.middle)
-                Image(systemName: "arrow.up.right")
+                Image(icon: "arrow.up.right")
                     .sfFont(baseFont - 5, weight: .semibold)
                     .opacity(0.6)
             }
@@ -7463,7 +7557,7 @@ private struct AnswerPDFView: View {
                             .frame(maxWidth: .infinity)
                         Divider().overlay(Tokens.hairline)
                         HStack(spacing: 6) {
-                            Image(systemName: "doc.text")
+                            Image(icon: "doc.text")
                                 .sfFont(baseFont - 3, weight: .medium)
                             Text(displayTitle)
                                 .sfFont(baseFont - 1, weight: .medium)
@@ -7473,7 +7567,7 @@ private struct AnswerPDFView: View {
                             Text(preview.pageCount == 1 ? "1 page" : "\(preview.pageCount) pages")
                                 .sfFont(baseFont - 2)
                                 .opacity(0.55)
-                            Image(systemName: "arrow.up.right")
+                            Image(icon: "arrow.up.right")
                                 .sfFont(baseFont - 5, weight: .semibold)
                                 .opacity(0.6)
                         }
@@ -7542,6 +7636,7 @@ struct CodeBlockView: View {
     var copyText: String? = nil
 
     @Environment(\.stickyScrollTopInset) private var stickyTopInset
+    @Environment(\.answerCardInnerMetrics) private var enclosingMetrics
 
     @State private var hovering = false
     @State private var copied = false
@@ -7579,7 +7674,10 @@ struct CodeBlockView: View {
     private static let inset: CGFloat = 8
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        let cornerRadius = enclosingMetrics?.radius ?? Tokens.Radius.inset
+        let horizontalOutset = enclosingMetrics?.horizontalOutset ?? 0
+        let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+        return VStack(alignment: .leading, spacing: 6) {
             if isDraft {
                 Text(text)
                     .sfFont(baseFont)
@@ -7614,14 +7712,14 @@ struct CodeBlockView: View {
                 .buttonStyle(.plain).exemptsDoubleClickPin()
             }
         }
-            .padding(.horizontal, 10)
+            .padding(.horizontal, 10 + horizontalOutset)
             .padding(.vertical, 8)
             .background(
-                RoundedRectangle.inset
+                shape
                     .fill(Tokens.ink.opacity(0.06))
             )
             .overlay(
-                RoundedRectangle.inset
+                shape
                     .strokeBorder(Tokens.hairline, lineWidth: 0.5)
             )
             .overlay(alignment: singleLine ? .trailing : .topTrailing) {
@@ -7634,6 +7732,7 @@ struct CodeBlockView: View {
                         .offset(y: stickyY)
                 }
             }
+            .padding(.horizontal, -horizontalOutset)
             .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { blockHeight = $0 }
             // Read on every scroll frame, but the button only redraws when the
             // clamped offset changes — a block fully in view or off screen keeps
@@ -7656,7 +7755,7 @@ struct CodeBlockView: View {
                 withAnimation(.easeOut(duration: 0.25)) { copied = false }
             }
         } label: {
-            Image(systemName: copied ? "checkmark" : "doc.on.doc")
+            Image(icon: copied ? "checkmark" : "doc.on.doc")
                 .sfFont(Tokens.TypeSize.label, weight: .regular)
                 .foregroundStyle(hovering || copied ? Tokens.text1 : Tokens.text3)
                 // Native SF Symbols swap — the doc morphs to the check
@@ -8392,7 +8491,7 @@ struct ThinkingFoldRow: View {
                             .italic()
                             .foregroundStyle(Tokens.text4)
                     }
-                    Image(systemName: "chevron.right")
+                    Image(icon: "chevron.right")
                         .sfFont(Tokens.TypeSize.badge, weight: .semibold)
                         .foregroundStyle(Tokens.text4)
                         .rotationEffect(.degrees(expanded ? 90 : 0))
@@ -8542,7 +8641,7 @@ private struct AgentTrailPlanItem: View {
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 7) {
-            Image(systemName: Self.glyph(status))
+            Image(icon: Self.glyph(status))
                 .sfFont(Tokens.TypeSize.caption, weight: .semibold)
                 .foregroundStyle(status == .done ? Tokens.text3 : Tokens.text4)
                 .contentTransition(.symbolEffect(.replace))
@@ -8607,7 +8706,7 @@ private struct AgentTrailGroupRow: View {
                         .sfFont(waitFont)
                         .foregroundStyle(Tokens.text4)
                         .lineLimit(1)
-                    Image(systemName: "chevron.right")
+                    Image(icon: "chevron.right")
                         .sfFont(Tokens.TypeSize.badge, weight: .semibold)
                         .foregroundStyle(Tokens.text4)
                         .rotationEffect(.degrees(expanded ? 90 : 0))
@@ -8685,7 +8784,7 @@ private struct AgentTrailToolRow: View {
                         .lineLimit(expanded ? nil : 1)
                         .fixedSize(horizontal: false, vertical: true)
                     if entry.detail != nil {
-                        Image(systemName: "chevron.right")
+                        Image(icon: "chevron.right")
                             .sfFont(Tokens.TypeSize.badge, weight: .semibold)
                             .foregroundStyle(Tokens.text4)
                             .rotationEffect(.degrees(expanded ? 90 : 0))
@@ -9155,14 +9254,14 @@ struct MenuCardRow: View {
         return Button(action: action) {
             HStack(spacing: 6) {
                 if let checkmark {
-                    Image(systemName: "checkmark")
+                    Image(icon: "checkmark")
                         .sfFont(accessoryFontSize, weight: .semibold)
                         .foregroundStyle(Tokens.text2)
                         .opacity(checkmark ? 1 : 0)
                         .frame(width: MenuCard.symbolWidth)
                 }
                 if let symbol {
-                    Image(systemName: symbol)
+                    Image(icon: symbol)
                         .sfFont(fontSize, weight: .regular)
                         .foregroundStyle(selected ? Tokens.text1 : Tokens.text3)
                         .frame(width: MenuCard.symbolWidth)
@@ -9198,7 +9297,7 @@ struct MenuCardRow: View {
                 }
                 if let disclosure {
                     if accessory == nil && !lowBalance && tag == nil && !notchiMark { Spacer(minLength: 0) }
-                    Image(systemName: "chevron.right")
+                    Image(icon: "chevron.right")
                         .sfFont(accessoryFontSize, weight: .semibold)
                         .foregroundStyle(selected ? Tokens.text2 : Tokens.text4)
                         .rotationEffect(.degrees(disclosure ? 90 : 0))
@@ -9220,7 +9319,7 @@ struct MenuCardRow: View {
                     if accessory == nil && !lowBalance && tag == nil && !notchiMark && disclosure == nil {
                         Spacer(minLength: 0)
                     }
-                    Image(systemName: hoverSymbol)
+                    Image(icon: hoverSymbol)
                         .sfFont(accessoryFontSize + 1, weight: .medium)
                         // Same ink as the row's own word — a brighter glyph beside
                         // a dim label read as two different rows.

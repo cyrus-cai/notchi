@@ -2405,6 +2405,11 @@ final class NotchModel: ObservableObject {
         threadHistoryID = threadID
         text = question
         submit(hideUserBubble: hideUserBubble)
+        // The answer turn `submit` just appended. Channel bridges follow this
+        // one turn, never "the newest assistant turn" of a thread other
+        // writers also append to.
+        let seedIDs = Set(seed.map(\.id))
+        lastDetachedAnswerID = turns.last(where: { $0.role == "assistant" && !seedIDs.contains($0.id) })?.id
         // A fresh submit synchronously parks its Recent placeholder. Stamp the
         // entry point before handing the round off; `persistThread` carries this
         // field forward when it replaces the placeholder with the settled row.
@@ -2549,13 +2554,23 @@ final class NotchModel: ObservableObject {
 
     // MARK: - Telegram
 
+    /// The answer turn of the latest `runDetachedRound`, read right after it.
+    private var lastDetachedAnswerID: UUID?
+
+    /// A round a channel (Telegram, Signal) started: the thread it runs on and
+    /// the one answer turn the channel sends back.
+    struct ChannelRound {
+        let thread: UUID
+        let answer: UUID
+    }
+
     /// One message from the Notchi bot in Telegram, run detached like a loop
     /// round: it lands in Recent as its own thread (`nil` starts one) and never
-    /// touches what the panel is showing. Returns the thread id, or nil when
+    /// touches what the panel is showing. Returns the round, or nil when
     /// that thread already has a round in flight.
     @discardableResult
     func runTelegramRound(threadID: UUID?, question: String, images: [NSImage],
-                          hideUserBubble: Bool = false, pin: ModelPin? = nil) -> UUID? {
+                          hideUserBubble: Bool = false, pin: ModelPin? = nil) -> ChannelRound? {
         runChannelRound(threadID: threadID, question: question, images: images,
                         origin: .telegram, hideUserBubble: hideUserBubble, pin: pin)
     }
@@ -2563,7 +2578,7 @@ final class NotchModel: ObservableObject {
     @discardableResult
     func runChannelRound(threadID: UUID?, question: String, images: [NSImage],
                          origin: HistoryItem.Origin,
-                         hideUserBubble: Bool = false, pin: ModelPin? = nil) -> UUID? {
+                         hideUserBubble: Bool = false, pin: ModelPin? = nil) -> ChannelRound? {
         if let threadID, inFlightRounds.contains(where: { $0.threadID == threadID }) { return nil }
         var seed = threadID.flatMap { id in history.first { $0.id == id }?.conversation } ?? []
         // Same repair as `runChatLoopRound`: a turn left streaming by a quit.
@@ -2571,16 +2586,19 @@ final class NotchModel: ObservableObject {
             seed[i].streaming = false
             seed[i].toolActivity = nil
         }
-        return runDetachedRound(threadID: threadID ?? UUID(), seed: seed, question: question,
-                                hideUserBubble: hideUserBubble,
-                                trackCompactTask: true, pin: pin,
-                                origin: origin, images: images, mintsMirror: false)
+        lastDetachedAnswerID = nil
+        guard let landed = runDetachedRound(threadID: threadID ?? UUID(), seed: seed, question: question,
+                                            hideUserBubble: hideUserBubble,
+                                            trackCompactTask: true, pin: pin,
+                                            origin: origin, images: images, mintsMirror: false),
+              let answer = lastDetachedAnswerID else { return nil }
+        return ChannelRound(thread: landed, answer: answer)
     }
 
     /// Telegram's Continue button under a cut-off answer: the same hidden
     /// instruction `continueAnswer` sends, on the thread in Recent.
     @discardableResult
-    func continueTelegramAnswer(threadID: UUID, turnID: UUID) -> UUID? {
+    func continueTelegramAnswer(threadID: UUID, turnID: UUID) -> ChannelRound? {
         guard let h = history.firstIndex(where: { $0.id == threadID }) else { return nil }
         var thread = history[h].conversation
         guard let i = thread.firstIndex(where: { $0.id == turnID }), thread[i].interrupted,
@@ -2595,8 +2613,8 @@ final class NotchModel: ObservableObject {
 
     /// Telegram's Try again under a failed answer: the failed pair leaves the
     /// thread and its question runs again, as `retryLastAsk` does in the
-    /// notch. Returns the thread the round runs on and the turns it starts from.
-    func retryTelegramRound(threadID: UUID) -> (thread: UUID, seed: Set<UUID>)? {
+    /// notch.
+    func retryTelegramRound(threadID: UUID) -> ChannelRound? {
         guard !inFlightRounds.contains(where: { $0.threadID == threadID }),
               let h = history.firstIndex(where: { $0.id == threadID }) else { return nil }
         var thread = history[h].conversation
@@ -2606,13 +2624,11 @@ final class NotchModel: ObservableObject {
         if thread.isEmpty {
             history.remove(at: h)
             saveHistory()
-            guard let landed = runTelegramRound(threadID: nil, question: question, images: []) else { return nil }
-            return (landed, [])
+            return runTelegramRound(threadID: nil, question: question, images: [])
         }
         history[h].turns = thread
         saveHistory()
-        guard let landed = runTelegramRound(threadID: threadID, question: question, images: []) else { return nil }
-        return (landed, Set(thread.map(\.id)))
+        return runTelegramRound(threadID: threadID, question: question, images: [])
     }
 
     /// `/loop` from Telegram: a new loop thread whose round one runs now. Its
@@ -3479,17 +3495,6 @@ final class NotchModel: ObservableObject {
         }
     }
 
-    /// Present-progressive "thinking" words shown beside the dots while the AI is
-    /// still composing and no token has landed yet — the bare pre-stream wait. Picked
-    /// at random per question so the moment of thought reads with a little mood
-    /// instead of a fixed "Thinking…". Drawn from the Orange Moon imagery.
-    static let thinkingWords = [
-        "Gazing...", "Glowing...", "Drifting...", "Imagining...", "Whispering...",
-        "Hoping...", "Waiting...", "Wandering...", "Lingering...",
-        "Floating...", "Shimmering...", "Musing...", "Pondering...", "Yearning...",
-        "Reminiscing...", "Fading...", "Echoing...", "Searching...", "Wondering...",
-    ]
-
     /// The handful of rounds that already name their own job: a translation that
     /// says "Whispering…" is hiding what it is plainly doing. These are the verbs
     /// people fire at a selection — the prompt-shortcut work — so the wait word
@@ -3617,12 +3622,11 @@ final class NotchModel: ObservableObject {
     /// languages; the other literal task labels retain the composing ribbon.
     private var pinnedThinkingOrb: OrbState = .composing
 
-    /// The current rotating thinking word. Re-rolled at the start of each answer and
-    /// every `thinkingWordInterval` while the wait is on screen, avoiding an immediate
-    /// repeat. This is the *mood word only* — it is NOT the thing the UI displays
-    /// directly. The UI reads `thinkingStatus`, which decides between this word and a
-    /// live tool-activity line so the two can never both show at once.
-    @Published private var thinkingWord: String = NotchModel.thinkingWords.randomElement() ?? "drifting"
+    /// The wait word when no tool is running: the round's task word
+    /// ("Translating…") or "Thinking…". Set at the start of each answer. The UI
+    /// reads `thinkingStatus`, which decides between this word and a live
+    /// tool-activity line so the two can never both show at once.
+    @Published private var thinkingWord: String = L("agent.activity.thinking")
 
     /// A live tool-activity line ("Searching the web…", "Reading the results…") when a
     /// tool is running, else nil. Set by the harness via `updateActivity`.
@@ -3687,14 +3691,11 @@ final class NotchModel: ObservableObject {
             if let answerID { mirrorThinkingWord(for: answerID) }
             return
         }
-        let pool = NotchModel.thinkingWords.filter { $0 != thinkingWord }
-        thinkingWord = pool.randomElement() ?? NotchModel.thinkingWords.randomElement() ?? thinkingWord
+        // The wait says what is happening. Rotating mood words ("Gazing…") were
+        // dropped on 2026-11-27: they hid what a long agent round was doing.
+        thinkingWord = L("agent.activity.thinking")
         if let answerID { mirrorThinkingWord(for: answerID) }
     }
-
-    /// How long each mood word lingers before rotating to the next. Slow enough to
-    /// read as a settling mood, not a ticker.
-    private static let thinkingWordInterval: TimeInterval = 4.0
 
     /// Slowly rotates the mood word while the pre-stream wait is on screen, so a long
     /// search/compose round (10s+ across several tool rounds) breathes instead of
@@ -3720,17 +3721,8 @@ final class NotchModel: ObservableObject {
         }
         rerollThinkingWord(for: answerID)
         mirrorThinkingState(for: answerID)
-        // A pinned word is the whole round's word — nothing to rotate.
-        guard pinnedThinkingWord == nil else {
-            thinkingWordTimer = nil
-            return
-        }
-        let t = Timer(timeInterval: NotchModel.thinkingWordInterval, repeats: true) { [weak self] _ in
-            self?.rerollThinkingWord(for: answerID)
-        }
-        t.tolerance = 0.4
-        RunLoop.main.add(t, forMode: .common)
-        thinkingWordTimer = t
+        // The word is fixed for the round: a literal task word or "Thinking…".
+        thinkingWordTimer = nil
     }
 
     func stopThinkingWordRotation(for answerID: UUID) {
@@ -3836,8 +3828,6 @@ final class NotchModel: ObservableObject {
             case menuBarIcon(MenuBarIconVisibility)
             case launchAtLogin(Bool)
             case placement(DisplayPlacement)
-            case hideInFullscreen(Bool)
-            case liveActivity(Bool)
             case hoverSensitivity(HoverSensitivity)
             case noteDestination(NoteDestination)
             case notesFolder(String)
@@ -3992,11 +3982,6 @@ final class NotchModel: ObservableObject {
             case .placement(let value):
                 DisplayPlacement.current = value
                 NotificationCenter.default.post(name: .displayPlacementChanged, object: nil)
-            case .hideInFullscreen(let enabled):
-                HideNotchInFullscreen.isEnabled = enabled
-                NotificationCenter.default.post(name: .hideNotchInFullscreenChanged, object: nil)
-            case .liveActivity(let enabled):
-                liveActivityEnabled = enabled
             case .hoverSensitivity(let value):
                 applyHoverSensitivity(value)
             case .noteDestination(let value):
@@ -4697,7 +4682,7 @@ final class NotchModel: ObservableObject {
         case "shortcuts", "summon_shortcut", "action_shortcut", "prompt_shortcut",
              "copy_sense", "selection_context":
             return "shortcuts"
-        case "appearance", "display_placement", "hide_in_fullscreen", "live_activity",
+        case "appearance", "display_placement",
              "hover_sensitivity", "force_click":
             return "appearance"
         case "stats", "usage", "statistics":
@@ -4761,8 +4746,6 @@ final class NotchModel: ObservableObject {
             "menu_bar_icon=\(MenuBarIconVisibility.current.rawValue)",
             "launch_at_login=\(LaunchAtLogin.isEnabled)",
             "display_placement=\(Self.placementToken(DisplayPlacement.current))",
-            "hide_in_fullscreen=\(HideNotchInFullscreen.isEnabled)",
-            "live_activity=\(liveActivityEnabled)",
             "hover_sensitivity=\(HoverSensitivity.current.rawValue)",
             "note_destination=\(Self.noteDestinationToken(NoteDestination.current))",
             "notes_folder=\(FileNotesService.folderPath)",
@@ -4876,16 +4859,6 @@ final class NotchModel: ObservableObject {
             }
             return made(setting, L("general.showOn"), newValue.label,
                         .placement(newValue), noOp: newValue == DisplayPlacement.current)
-
-        case "hide_in_fullscreen":
-            guard let enabled = Self.parseBoolean(value) else { throw invalidBoolean(setting) }
-            return made(setting, L("general.fullscreenAutoHide"), localizedToggle(enabled),
-                        .hideInFullscreen(enabled), noOp: enabled == HideNotchInFullscreen.isEnabled)
-
-        case "live_activity":
-            guard let enabled = Self.parseBoolean(value) else { throw invalidBoolean(setting) }
-            return made(setting, L("appearance.liveActivity"), localizedToggle(enabled),
-                        .liveActivity(enabled), noOp: enabled == liveActivityEnabled)
 
         case "hover_sensitivity":
             guard let newValue = HoverSensitivity(rawValue: Self.settingToken(value)) else {
@@ -6786,23 +6759,9 @@ final class NotchModel: ObservableObject {
     }
     private static let copySenseKey = "copySenseEnabled"
 
-    /// Whether background work drives the RESTING notch's busy ears (Settings →
-    /// Appearance, "Live activity"). Agent runs are minutes long, so the
-    /// verb-and-clock flex is the one background readout that stays on screen
-    /// while you work in another app — some people want the notch to hold still
-    /// instead. One global switch for everything live: off keeps the closed notch
-    /// flat for agent runs AND detached Ask rounds alike. The finished-count
-    /// badge, the agent card and the completion notification are all unaffected.
-    @Published var liveActivityEnabled: Bool =
-        OnboardingService.firstRunDefault(NotchModel.liveActivityKey, fresh: false, existing: true)
-    {
-        didSet {
-            UserDefaults.standard.set(liveActivityEnabled,
-                                      forKey: NotchModel.liveActivityKey)
-        }
-    }
-    /// Legacy key name, kept so the setting survives the agent-only → global move.
-    private static let liveActivityKey = "agentNotchActivityEnabled"
+    /// Whether background work flexes the resting notch's busy ears. Off for
+    /// everyone; Settings no longer offers the switch.
+    let liveActivityEnabled = false
 
     /// Unified threads, always on: each question from the idle prompt is a
     /// follow-up on one main thread — one Recent row — and the idle prompt
@@ -8027,6 +7986,30 @@ final class NotchModel: ObservableObject {
     /// Points of pull that reach progress 1. NotchBody sets it from the height
     /// the panel has to grow, so the panel's bottom edge tracks the fingers.
     var threadPullSpan: CGFloat = 240
+
+    /// Cached reveal height for the main thread, keyed by thread fingerprint
+    /// and stack width so a pull starts with exact geometry on frame 0 instead
+    /// of shrinking toward a 0pt viewport before `onGeometryChange` fires.
+    struct MainThreadRevealCache: Equatable {
+        let itemID: UUID
+        let drawnCount: Int
+        let lastTurnID: UUID?
+        let lastTurnLength: Int
+        let width: CGFloat
+        let height: CGFloat
+        let partial: Bool
+    }
+    var mainThreadRevealCache: MainThreadRevealCache?
+
+    /// Updates `threadPullSpan` without causing `travelled` to jump backwards
+    /// if a layout measurement refines the span mid-gesture.
+    func updateThreadPullSpan(_ newSpan: CGFloat) {
+        let clamped = max(newSpan, 1)
+        if threadPullGesture == .tracking, threadPullDistance > 0, threadPullSpan > 0 {
+            threadPullDistance = threadPullDistance * (clamped / threadPullSpan)
+        }
+        threadPullSpan = clamped
+    }
 
     /// The row a pull opens — the peek's, fixed when the pull starts.
     private(set) var threadPullItemID: UUID?
@@ -10967,9 +10950,7 @@ final class NotchModel: ObservableObject {
 
     /// Files dropped on the island. A single folder starts an agent task in it
     /// (`handleAgentFolderDrop`); anything else attaches to the next ask on the
-    /// idle prompt: an image as a pasted image (when the model takes images),
-    /// a PDF or text file as its text. Files that are neither are ignored.
-    /// While `fileDropAskEnabled` is off, only PDFs attach.
+    /// idle prompt as its path. While `fileDropAskEnabled` is off, only PDFs attach.
     func handleFileDrop(_ urls: [URL]) {
         if urls.count == 1, isDirectory(urls[0]) {
             handleAgentFolderDrop(urls[0])
@@ -10983,47 +10964,21 @@ final class NotchModel: ObservableObject {
         readAndAttach(files, fromPaste: false)
     }
 
-    /// Read `files` off the main thread and attach them to the next ask:
-    /// images as compose images, the rest as text. A drop starts a fresh ask
+    /// Attach `files` to the next ask as paths. A drop starts a fresh ask
     /// (`attachDropped`); a paste joins the line being typed.
     private func readAndAttach(_ files: [URL], fromPaste: Bool) {
-        let takesImages = activeModelSupportsVision
-        let budget = Self.droppedFileTextLimit - droppedFiles.reduce(0) { $0 + $1.text.count }
-        Task.detached(priority: .userInitiated) {
-            let (images, texts) = Self.readAttachments(files, takesImages: takesImages, budget: budget)
-            await MainActor.run { [images, texts] in
-                if fromPaste {
-                    self.attachPasted(files: texts, images: images)
-                } else {
-                    self.attachDropped(images: images, files: texts)
-                }
-            }
+        let attached = files.map(Self.fileAttachment)
+        if fromPaste {
+            attachPasted(files: attached)
+        } else {
+            attachDropped(images: [], files: attached)
         }
     }
 
-    /// Files read for an ask: images (when the model takes them) and the
-    /// text of the rest, cut to `budget` characters in all.
-    nonisolated static func readAttachments(_ files: [URL], takesImages: Bool,
-                                            budget: Int) -> ([NSImage], [DroppedFile]) {
-        var images: [NSImage] = []
-        var texts: [DroppedFile] = []
-        var left = budget
-        for url in files {
-            let type = UTType(filenameExtension: url.pathExtension)
-            if type?.conforms(to: .image) == true {
-                if takesImages, let image = NSImage(contentsOf: url), image.isValid {
-                    images.append(image)
-                }
-                continue
-            }
-            guard left > 0, var body = droppedFileText(url, type: type) else { continue }
-            if body.count > left {
-                body = String(body.prefix(left)) + "\n[… the rest of this file was cut]"
-            }
-            left -= body.count
-            texts.append(DroppedFile(name: url.lastPathComponent, text: body))
-        }
-        return (images, texts)
+    /// A file as an attachment: its full path, for read_file.
+    nonisolated static func fileAttachment(_ file: URL) -> DroppedFile {
+        DroppedFile(name: file.lastPathComponent,
+                    text: "File: \(file.path)\nRead it with read_file.")
     }
 
     private func attachPasted(files: [DroppedFile], images: [NSImage] = []) {
@@ -11104,7 +11059,7 @@ final class NotchModel: ObservableObject {
 
     /// + in a detached thread window: the same pickers as the prompt's + menu,
     /// with what was picked handed to that window's own line.
-    func pickAttachments(folder: Bool, takesImages: Bool,
+    func pickAttachments(folder: Bool,
                          done: @escaping ([NSImage], [DroppedFile]) -> Void) {
         let panel = NSOpenPanel()
         panel.canChooseFiles = !folder
@@ -11131,11 +11086,7 @@ final class NotchModel: ObservableObject {
             } else {
                 Self.saveAgentFolder(first.deletingLastPathComponent(),
                                      forKey: Self.attachFilesDirectoryKey)
-                Task.detached(priority: .userInitiated) {
-                    let (images, texts) = Self.readAttachments(
-                        urls, takesImages: takesImages, budget: Self.droppedFileTextLimit)
-                    await MainActor.run { [images, texts] in done(images, texts) }
-                }
+                done([], urls.map(Self.fileAttachment))
             }
         }
     }
@@ -13856,14 +13807,19 @@ final class NotchModel: ObservableObject {
                 // hold one history. A Telegram round is already there.
                 // Loop rounds go out without quoting the loop's prompt.
                 let mirroredQuestion = loopRound == nil ? q : ""
+                // A loop round in a sub-thread reaches the channels only through
+                // `postSubThreadReport`: the screened line the main thread shows.
+                let reportsInstead = loopRound != nil
+                    && self.history.contains(where: { $0.mainThread && $0.source == .ask })
+                    && !(self.history.first(where: { $0.id == threadID })?.mainThread ?? false)
                 // A channel round's question already went to the other channel as it arrived.
-                if nonoContext.surface != NoNoRequestContext.telegram {
+                if !reportsInstead, nonoContext.surface != NoNoRequestContext.telegram {
                     TelegramBridge.shared.mirror(
                         threadID: threadID,
                         question: nonoContext.surface == NoNoRequestContext.signal ? "" : mirroredQuestion,
                         answer: acc)
                 }
-                if nonoContext.surface != NoNoRequestContext.signal {
+                if !reportsInstead, nonoContext.surface != NoNoRequestContext.signal {
                     SignalBridge.shared.mirror(
                         threadID: threadID,
                         question: nonoContext.surface == NoNoRequestContext.telegram ? "" : mirroredQuestion,
@@ -17407,7 +17363,7 @@ extension NotchModel {
     /// Hand a sub-thread's newest loop output to the main thread's secretary:
     /// it screens out noise / "nothing new" runs silently, and only speaks to
     /// the user in its own concise voice when there is real signal.
-    func postSubThreadReport(threadID: UUID, answer: Turn) {
+    func postSubThreadReport(threadID: UUID, answer: Turn, sendToChannels: Bool = true) {
         let body = answer.text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !body.isEmpty,
               let mi = history.firstIndex(where: { $0.mainThread && $0.source == .ask }),
@@ -17456,6 +17412,11 @@ extension NotchModel {
                 }
                 self.saveHistory()
                 self.touchMainThreadPeek(mainID)
+                // The same line the main thread shows, and nothing on SKIP.
+                if sendToChannels {
+                    TelegramBridge.shared.mirror(threadID: mainID, question: "", answer: distilled)
+                    SignalBridge.shared.mirror(threadID: mainID, question: "", answer: distilled)
+                }
             }
         }
     }
@@ -17540,7 +17501,7 @@ extension NotchModel {
         saveHistory()
         touchMainThreadPeek(history[mi].id)
         for item in toRescreen {
-            postSubThreadReport(threadID: item.threadID, answer: item.answer)
+            postSubThreadReport(threadID: item.threadID, answer: item.answer, sendToChannels: false)
         }
     }
 
@@ -17566,27 +17527,45 @@ extension NotchModel {
         guard history.contains(where: { $0.id == id })
             || inFlightRounds.contains(where: { $0.threadID == id })
         else { return false }
-        if mode == .idle {
-            guard let main = history.first(where: { $0.mainThread && $0.source == .ask })
-            else { return false }
-            showHistory = false
-            highlightedHistoryIndex = nil
-            if let round = inFlightRounds.last(where: { $0.threadID == main.id }) {
-                attachInFlightRound(round)
-            } else if !main.pending {
-                text = ""
-                turns = main.conversation
-                threadHistoryID = main.id
-                threadImages = nil
-                mode = .result
-            } else {
-                return false
-            }
-        }
+        if mode == .idle, !openMainThread() { return false }
         sidePageTab = .copies
         activeSubThreadID = id
         showRoutines = true
         return true
+    }
+
+    /// Put the main thread on screen (live round or saved turns). Returns
+    /// `false` when there is no main thread to show.
+    @discardableResult
+    func openMainThread() -> Bool {
+        guard let main = history.first(where: { $0.mainThread && $0.source == .ask })
+        else { return false }
+        showHistory = false
+        highlightedHistoryIndex = nil
+        if let round = inFlightRounds.last(where: { $0.threadID == main.id }) {
+            attachInFlightRound(round)
+        } else if !main.pending {
+            text = ""
+            turns = main.conversation
+            threadHistoryID = main.id
+            threadImages = nil
+            mode = .result
+        } else {
+            return false
+        }
+        return true
+    }
+
+    /// A notification opened the panel or card on a thread (a tapped banner,
+    /// the card unfolding for a reply). Never opens the sub-thread drawer: a
+    /// sub-thread or loop thread id lands on the main thread instead.
+    func openThreadFromNotification(id: UUID, live: Bool = false) {
+        if isSubThreadID(id) {
+            showRoutines = false
+            if !openMainThread() { mode = .idle }
+            return
+        }
+        if live { openLoopThread(id: id) } else { openCardThread(id: id) }
     }
 
     /// A sub-thread's conversation (live mirror if a round is streaming in it,

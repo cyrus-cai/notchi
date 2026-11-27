@@ -246,7 +246,7 @@ private struct HistoryArchiveView: View {
                 .padding(.bottom, 4)
 
             HStack(spacing: 8) {
-                Image(systemName: "magnifyingglass")
+                Image(icon: "magnifyingglass")
                     .font(.sf(Tokens.TypeSize.label, weight: .medium))
                     .foregroundStyle(Tokens.text3)
                 TextField(L("history.window.search"), text: $search.query)
@@ -261,7 +261,7 @@ private struct HistoryArchiveView: View {
                     .foregroundStyle(Tokens.text1)
                 if !query.isEmpty {
                     Button { search.query = "" } label: {
-                        Image(systemName: "xmark")
+                        Image(icon: "xmark")
                             .font(.sf(Tokens.TypeSize.caption, weight: .semibold))
                             .foregroundStyle(Tokens.text4)
                     }
@@ -379,7 +379,7 @@ private struct HistoryArchiveView: View {
 
     private var emptyList: some View {
         VStack(spacing: 8) {
-            Image(systemName: "clock.arrow.circlepath")
+            Image(icon: "clock.arrow.circlepath")
                 .font(.sf(Tokens.TypeSize.figure, weight: .light))
                 .foregroundStyle(Tokens.text4)
             Text(query.isEmpty && sourceFilter == .agent
@@ -402,7 +402,7 @@ private struct HistoryArchiveView: View {
                 .id(item.id)
         } else {
             VStack(spacing: 10) {
-                Image(systemName: "text.bubble")
+                Image(icon: "text.bubble")
                     .font(.sf(Tokens.TypeSize.figure, weight: .light))
                     .foregroundStyle(Tokens.text4)
                 Text(L("history.window.detail.empty"))
@@ -574,7 +574,7 @@ private struct HistoryDetailView: View {
                 HStack(spacing: 5) {
                     Text(item.source == .note ? L("recent.badge.notes") : L("recent.badge.reminders"))
                         .font(.sf(Tokens.TypeSize.label, weight: .medium))
-                    Image(systemName: "arrow.up.right").font(.sf(Tokens.TypeSize.caption, weight: .semibold))
+                    Image(icon: "arrow.up.right").font(.sf(Tokens.TypeSize.caption, weight: .semibold))
                 }
                 .foregroundStyle(Tokens.text2)
                 .padding(.horizontal, 14)
@@ -682,6 +682,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         window.title = L("settings.title")
         StandaloneWindowStyle.apply(to: window, toolbar: nil)
         window.isReleasedWhenClosed = false
+        window.hidesOnDeactivate = false
         window.minSize = NSSize(width: 700, height: 480)
         window.onEscape = { [weak window, weak model] in
             guard let model else { return }

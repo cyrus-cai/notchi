@@ -755,22 +755,21 @@ final class TelegramBridge: ObservableObject {
         while let id = threadID, model.liveThread(id) != nil {
             try? await Task.sleep(nanoseconds: 500_000_000)
         }
-        let seedIDs = Set(threadID.flatMap { id in model.history.first { $0.id == id }?.conversation.map(\.id) } ?? [])
-
         await call("sendChatAction", ["chat_id": chatID, "action": "typing"])
-        guard let landed = model.runTelegramRound(threadID: threadID, question: question, images: images,
+        guard let round = model.runTelegramRound(threadID: threadID, question: question, images: images,
                                                   pin: action?.pin) else {
             await call("sendMessage", ["chat_id": chatID, "text": L(LicenseLock.isLocked ? "service.error.licenseRequired" : "telegram.failed"),
                                        "reply_to_message_id": messageID])
             return
         }
+        let landed = round.thread
         SignalBridge.shared.mirrorTelegramMessage(threadID: landed, text: text, images: images)
         setThread(landed, chat: chatID)
         model.openSteering(threadID: landed)
         let previous = threadID.flatMap { id in model.history.first { $0.id == id }?.conversation }?
             .last(where: { $0.role == "assistant" && !$0.isError })?.text ?? ""
         react(to: text, previous: previous, thread: landed, chatID: chatID, messageID: messageID)
-        await stream(thread: landed, seedIDs: seedIDs, chatID: chatID, replyTo: messageID)
+        await stream(thread: landed, answer: round.answer, chatID: chatID, replyTo: messageID)
         // Messages sent after the round's last tool call: answer them next.
         let waiting = steered.removeValue(forKey: landed) ?? [:]
         let unread = model.closeSteering(threadID: landed).compactMap { waiting[$0] }.flatMap { $0 }
@@ -864,7 +863,10 @@ final class TelegramBridge: ObservableObject {
     /// Follows the round once a second and waits for it to finish; nothing of a
     /// half-written answer is shown. The finished text goes out with
     /// formatting. Pending questions go out as inline buttons.
-    private func stream(thread: UUID, seedIDs: Set<UUID>, chatID: Int64, replyTo firstReplyTo: Int) async {
+    /// Follows `answer`, the one turn this round writes. Other turns that land
+    /// on the thread meanwhile (sub-thread reports, another device's round)
+    /// are not this reply.
+    private func stream(thread: UUID, answer answerID: UUID, chatID: Int64, replyTo firstReplyTo: Int) async {
         guard let model else { return }
         var replyTo = firstReplyTo
         var sentID: Int?
@@ -886,12 +888,12 @@ final class TelegramBridge: ObservableObject {
                 // A round that already ended (one that failed at once, such as
                 // a locked license) has its answer in history: stop waiting.
                 let landed = model.history.first(where: { $0.id == thread })?.conversation
-                    .contains(where: { $0.role == "assistant" && !seedIDs.contains($0.id) }) ?? false
+                    .contains(where: { $0.id == answerID }) ?? false
                 if !sawLive && !landed && ticks < 15 { continue }
                 break
             }
             sawLive = true
-            guard let answer = live.last(where: { $0.role == "assistant" && !seedIDs.contains($0.id) }) else { continue }
+            guard let answer = live.first(where: { $0.id == answerID }) else { continue }
             if let question = answer.pendingQuestion, !askedQuestions.contains(question.id) {
                 askedQuestions.insert(question.id)
                 await ask(question, chatID: chatID)
@@ -927,7 +929,7 @@ final class TelegramBridge: ObservableObject {
         }
 
         let turn = model.history.first(where: { $0.id == thread })?.conversation
-            .last(where: { $0.role == "assistant" && !seedIDs.contains($0.id) })
+            .first(where: { $0.id == answerID })
         let whole = turn?.text ?? ""
         let final = String(whole.dropFirst(min(base, whole.count)))
         let (withoutVisuals, charts) = Self.renderVisuals(final)
@@ -1873,11 +1875,10 @@ extension TelegramBridge {
             chains[lane] = Task { [weak self] in
                 await previous?.value
                 guard let self, let model = self.model else { return }
-                let seed = Set(model.history.first { $0.id == thread }?.conversation.map(\.id) ?? [])
-                guard model.continueTelegramAnswer(threadID: thread, turnID: turn) != nil else { return }
+                guard let round = model.continueTelegramAnswer(threadID: thread, turnID: turn) else { return }
                 let awake = Awake(.answering)
                 defer { withExtendedLifetime(awake) {} }
-                await self.stream(thread: thread, seedIDs: seed, chatID: chatID, replyTo: messageID)
+                await self.stream(thread: round.thread, answer: round.answer, chatID: chatID, replyTo: messageID)
             }
         case .retry(let thread):
             choices[id] = nil
@@ -1887,12 +1888,12 @@ extension TelegramBridge {
             chains[lane] = Task { [weak self] in
                 await previous?.value
                 guard let self, let model = self.model,
-                      let (landed, seed) = model.retryTelegramRound(threadID: thread) else { return }
-                self.setThread(landed, chat: chatID)
+                      let round = model.retryTelegramRound(threadID: thread) else { return }
+                self.setThread(round.thread, chat: chatID)
                 let awake = Awake(.answering)
                 defer { withExtendedLifetime(awake) {} }
                 await self.call("sendChatAction", ["chat_id": chatID, "action": "typing"])
-                await self.stream(thread: landed, seedIDs: seed, chatID: chatID, replyTo: messageID)
+                await self.stream(thread: round.thread, answer: round.answer, chatID: chatID, replyTo: messageID)
             }
         case .undo(let capture):
             choices[id] = nil

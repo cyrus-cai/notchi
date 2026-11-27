@@ -43,7 +43,7 @@ struct MenuBarChat: View {
     private static let bubbleGap: CGFloat = 8
     /// Space kept around the bubbles inside the scroll view for the glass's
     /// edge to draw into.
-    private static let glassGutter: CGFloat = 6
+    static let glassGutter: CGFloat = 6
     private static let bottomID = "menuBarChat.bottom"
     private static let topID = "menuBarChat.top"
     /// The widest a bubble gets, as a share of the column. The composer is as
@@ -76,7 +76,11 @@ struct MenuBarChat: View {
     }
     private var shownComposerHeight: CGFloat { showsComposer ? composerHeight : 0 }
     /// A card unfolded for a reply shows its composer once the pointer is over it.
-    private var showsComposer: Bool { !model.replyOnly || model.replyComposerShown }
+    private var showsComposer: Bool {
+        // The side pages (Routines, Sub-thread, Websites) take no message.
+        if model.showRoutines { return false }
+        return !model.replyOnly || model.replyComposerShown
+    }
     /// The messages have outgrown `maxMessagesHeight` for this thread. Held
     /// once true, so the lazy list's height estimates, which shift as rows
     /// scroll into view, stop resizing the scroll view and re-rendering the
@@ -372,7 +376,7 @@ struct MenuBarChat: View {
                       engaged: model.isCardMoreMenuOpen,
                       tooltip: L("nono.more"),
                       action: { model.isCardMoreMenuOpen.toggle() }) {
-                    Image(systemName: "ellipsis")
+                    Image(icon: "ellipsis")
                         .sfFont(12, weight: .light)
                 },
             ], glass: false, bareChip: false, restsBright: true)
@@ -495,6 +499,8 @@ struct MenuBarChat: View {
                 .padding(.bottom, 12)
             }
             .scrollIndicators(.never)
+            // The gaps between bubbles take the wheel, as in `messages`.
+            .background(Color.black.opacity(0.001))
         }
     }
 

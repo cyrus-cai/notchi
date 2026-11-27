@@ -102,7 +102,7 @@ struct SettingsButton: View {
                     .controlSize(.small)
                     .scaleEffect(0.8)
             } else if let systemImage {
-                Image(systemName: systemImage)
+                Image(icon: systemImage)
                     .font(.sf(size.fontSize, weight: .regular))
             }
             if !title.isEmpty {
@@ -112,7 +112,7 @@ struct SettingsButton: View {
                     .lineLimit(1)
             }
             if external {
-                Image(systemName: "arrow.up.right")
+                Image(icon: "arrow.up.right")
                     .font(.sf(Tokens.TypeSize.badge, weight: .regular))
                     .opacity(0.75)
             }
@@ -258,8 +258,9 @@ struct SettingsInputBox: ViewModifier {
         return content
             .padding(.horizontal, 12)
             .frame(minHeight: height)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
             .background(shape.fill(Tokens.ink.opacity(focused ? 0.08 : 0.045)))
+            .clipShape(shape)
             .overlay(shape.strokeBorder(borderColor, lineWidth: 0.5))
             .animation(.easeOut(duration: 0.14), value: focused)
     }
@@ -350,7 +351,7 @@ struct SettingsCollapsible<Content: View>: View {
                     }
                 } label: {
                     HStack(spacing: 6) {
-                        Image(systemName: "chevron.right")
+                        Image(icon: "chevron.right")
                             .font(.sf(Tokens.TypeSize.badge, weight: .regular))
                             .foregroundStyle(hovering ? Tokens.text1 : Tokens.text2)
                             .rotationEffect(.degrees(isOpen ? 90 : 0))
@@ -410,7 +411,7 @@ struct SettingsPlanSteps<Content: View>: View {
                 withAnimation(.easeOut(duration: 0.16)) { expanded.toggle() }
             } label: {
                 HStack(spacing: 6) {
-                    Image(systemName: "chevron.right")
+                    Image(icon: "chevron.right")
                         .font(.sf(Tokens.TypeSize.badge, weight: .regular))
                         .foregroundStyle(hoveringHeader ? Tokens.text2 : Tokens.text4)
                         .rotationEffect(.degrees(expanded ? 90 : 0))
@@ -492,7 +493,7 @@ struct SettingsPlanStep<Action: View, Detail: View>: View {
     private var statusGlyph: some View {
         switch status {
         case .done:
-            Image(systemName: "checkmark.circle.fill")
+            Image(icon: "checkmark.circle.fill")
                 .font(.sf(13, weight: .regular))
                 .foregroundStyle(Tokens.text2)
         case .running:
@@ -545,43 +546,85 @@ struct SettingsTabs<Item: Hashable>: View {
     private var capsule: Capsule { Capsule(style: .continuous) }
 
     var body: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 2) {
-                ForEach(items, id: \.self) { item in
-                    let active = item == selection
-                    let isHover = hovered == item
-                    Button {
-                        NotchPanel.exemptNextDoubleClick()
-                        withAnimation(.spring(response: 0.28, dampingFraction: 0.86)) {
-                            onSelect(item)
-                        }
-                    } label: {
-                        Text(title(item))
-                            .font(.sf(Tokens.TypeSize.meta, weight: .regular))
-                            .foregroundStyle(active ? Tokens.text1 : (isHover ? Tokens.text1 : Tokens.text3))
-                            .lineLimit(1)
-                            .padding(.horizontal, 11)
-                            .frame(height: 24)
-                            .background {
-                                if active {
-                                    capsule
-                                        .fill(Tokens.ink.opacity(0.12))
-                                        .overlay(capsule.strokeBorder(Tokens.ink.opacity(0.14), lineWidth: 0.5))
-                                        .matchedGeometryEffect(id: "settingsActiveTab", in: activeTab)
+        if #available(macOS 26.0, *) {
+            ScrollView(.horizontal, showsIndicators: false) {
+                GlassEffectContainer(spacing: 2) {
+                    HStack(spacing: 2) {
+                        ForEach(items, id: \.self) { item in
+                            let active = item == selection
+                            let isHover = hovered == item
+                            Button {
+                                NotchPanel.exemptNextDoubleClick()
+                                withAnimation(.spring(response: 0.28, dampingFraction: 0.86)) {
+                                    onSelect(item)
                                 }
+                            } label: {
+                                Text(title(item))
+                                    .font(.sf(Tokens.TypeSize.meta, weight: active ? .medium : .regular))
+                                    .foregroundStyle(active ? Tokens.text1 : (isHover ? Tokens.text1 : Tokens.text3))
+                                    .lineLimit(1)
+                                    .padding(.horizontal, 11)
+                                    .frame(height: 24)
+                                    .background {
+                                        if active {
+                                            capsule
+                                                .fill(.clear)
+                                                .glassEffect(.regular.interactive(), in: capsule)
+                                                .glassEffectID("settingsActiveTab", in: activeTab)
+                                        }
+                                    }
+                                    .contentShape(capsule)
                             }
-                            .contentShape(capsule)
+                            .buttonStyle(.plain).exemptsDoubleClickPin()
+                            .onHover { inside in
+                                if inside { hovered = item }
+                                else if hovered == item { hovered = nil }
+                            }
+                        }
                     }
-                    .buttonStyle(.plain).exemptsDoubleClickPin()
-                    .onHover { inside in
-                        if inside { hovered = item }
-                        else if hovered == item { hovered = nil }
-                    }
+                    .padding(3)
+                    .glassEffect(.regular, in: capsule)
                 }
             }
-            .padding(3)
-            .background(capsule.fill(Tokens.ink.opacity(0.045)))
-            .overlay(capsule.strokeBorder(Tokens.ink.opacity(0.08), lineWidth: 0.5))
+        } else {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 2) {
+                    ForEach(items, id: \.self) { item in
+                        let active = item == selection
+                        let isHover = hovered == item
+                        Button {
+                            NotchPanel.exemptNextDoubleClick()
+                            withAnimation(.spring(response: 0.28, dampingFraction: 0.86)) {
+                                onSelect(item)
+                            }
+                        } label: {
+                            Text(title(item))
+                                .font(.sf(Tokens.TypeSize.meta, weight: .regular))
+                                .foregroundStyle(active ? Tokens.text1 : (isHover ? Tokens.text1 : Tokens.text3))
+                                .lineLimit(1)
+                                .padding(.horizontal, 11)
+                                .frame(height: 24)
+                                .background {
+                                    if active {
+                                        capsule
+                                            .fill(Tokens.ink.opacity(0.12))
+                                            .overlay(capsule.strokeBorder(Tokens.ink.opacity(0.14), lineWidth: 0.5))
+                                            .matchedGeometryEffect(id: "settingsActiveTab", in: activeTab)
+                                    }
+                                }
+                                .contentShape(capsule)
+                        }
+                        .buttonStyle(.plain).exemptsDoubleClickPin()
+                        .onHover { inside in
+                            if inside { hovered = item }
+                            else if hovered == item { hovered = nil }
+                        }
+                    }
+                }
+                .padding(3)
+                .background(capsule.fill(Tokens.ink.opacity(0.045)))
+                .overlay(capsule.strokeBorder(Tokens.ink.opacity(0.08), lineWidth: 0.5))
+            }
         }
     }
 }
@@ -650,7 +693,7 @@ struct SettingsChoiceChip: View {
                     )
                     .frame(width: 11, height: 11)
                 if active {
-                    Image(systemName: "checkmark")
+                    Image(icon: "checkmark")
                         .font(.system(size: 7.5, weight: .bold))
                         .foregroundStyle(Tokens.adaptive(dark: .black, light: .white))
                 }

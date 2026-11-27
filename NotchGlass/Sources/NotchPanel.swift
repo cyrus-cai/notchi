@@ -348,7 +348,7 @@ enum SelectionQuote {
                               action: #selector(QuoteAction.run(_:)), keyEquivalent: "")
         item.target = QuoteAction.shared
         item.representedObject = itemTag
-        item.image = NSImage(systemSymbolName: "text.quote", accessibilityDescription: nil)
+        item.image = NSImage.icon("text.quote")
         QuoteAction.shared.pending = { handler(text) }
         menu.insertItem(item, at: 0)
         if menu.items.count > 1 { menu.insertItem(.separator(), at: 1) }

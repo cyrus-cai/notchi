@@ -774,7 +774,7 @@ let appSettingsCatalog = """
 Supported setting ids and values:
 - app_language: system, english, chinese_simplified, chinese_traditional, japanese, korean, french, spanish
 - dock_icon / menu_bar_icon: shown or hidden
-- launch_at_login / hide_in_fullscreen / live_activity / copy_sense: true or false
+- launch_at_login / copy_sense: true or false
 - emoji_reactions / link_check / run_commands: true or false. These have no row in Settings; chat is the only way to change them.
 - display_placement: all or built_in
 - hover_sensitivity: low, balanced, or instant
@@ -2573,6 +2573,26 @@ enum ShellRisk {
     /// 11,000-message inbox (`repeat with m in messages of inbox`, `whose read
     /// status is false`) held Mail for minutes, and every Mail call after it
     /// timed out too (2026-11-09).
+    /// A refusal for an `osascript` that reads Mail's messages, applied only
+    /// while the Gmail connector is connected. On 2026-11-27 a sign-up read its
+    /// verification mail this way with the connector connected; read_mail
+    /// reads Gmail through it in about 2 s. Without the connector, Apple Mail
+    /// is the user's mail and osascript stays allowed.
+    /// `connectors`: the mail connectors connected right now, by display name.
+    static func mailByScript(_ command: String, connectors: [String]) -> String? {
+        guard !connectors.isEmpty else { return nil }
+        let lowered = command.lowercased()
+        guard lowered.contains("osascript"), lowered.contains("\"mail\""),
+              lowered.contains("message") || lowered.contains("inbox") else { return nil }
+        let names = connectors.joined(separator: " and ")
+        return """
+        Not run: \(names) is connected, and Apple Mail only sees the accounts added to it. \
+        read_mail action=codes (load it with load_tools if it is not listed) reads \(names) \
+        and Apple Mail together and returns the last minutes' codes and links in one call; \
+        for other searches use the \(names) connector's tools.
+        """
+    }
+
     static func unboundedMailQuery(_ command: String) -> String? {
         let lowered = command.lowercased()
         guard lowered.contains("osascript"), lowered.contains("\"mail\""),
@@ -2925,7 +2945,9 @@ struct RunShellTool: NotchTool {
         if let raw = input["timeout_seconds"] as? NSNumber {
             timeout = min(max(raw.doubleValue, 1), ShellRunner.maxTimeout)
         }
-        if let refusal = ShellRisk.unboundedMailQuery(command) { return refusal }
+        let mailConnectors = await ConnectorMail.liveSources().map(\.title)
+        if let refusal = ShellRisk.mailByScript(command, connectors: mailConnectors)
+            ?? ShellRisk.unboundedMailQuery(command) { return refusal }
         if let refusal = ShellRisk.windowScripting(command) { return refusal }
         if ShellRisk.needsConfirmation(command) {
             guard try await confirm(command) else {

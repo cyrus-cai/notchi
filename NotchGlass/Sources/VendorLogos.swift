@@ -29,7 +29,7 @@ struct VendorLogo: View {
                 .fill(Tokens.text1, style: FillStyle(eoFill: true))
                 .aspectRatio(1, contentMode: .fit)
         } else if let symbol {
-            Image(systemName: symbol)
+            Image(icon: symbol)
                 .resizable()
                 .aspectRatio(contentMode: .fit)
                 .foregroundStyle(Tokens.text1)

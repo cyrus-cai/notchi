@@ -752,7 +752,7 @@ struct NotchiPagesPane: View {
             Button(role: .destructive) {
                 delete(slug: page.slug)
             } label: {
-                Image(systemName: "trash")
+                Image(icon: "trash")
                     .font(.system(size: 11.5))
             }
             .buttonStyle(.borderless)
